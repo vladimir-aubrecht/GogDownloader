@@ -13,8 +13,19 @@ public sealed record DownloadOptions
     public string Language { get; init; } = "en";
     public int MaxConnections { get; init; } = 8;
 
+    /// <summary>
+    /// Where the game is assembled and zipped. Defaults to local temp, never to
+    /// <see cref="OutputRoot"/>: staging on a network share would push every byte across the
+    /// wire three times (write files, read them back to zip, write the zip).
+    /// Needs room for the unpacked game plus the zip.
+    /// </summary>
+    public string? StagingRoot { get; init; }
+
     /// <summary>Re-download even what the manifest already reports as done.</summary>
     public bool Force { get; init; }
+
+    public string StagingDirectory =>
+        StagingRoot ?? Path.Combine(Path.GetTempPath(), "gogdl-staging");
 }
 
 public enum DownloadOutcome { Completed, AlreadyDone, NoDepot, UnsupportedGeneration, NoDepotForLanguage }
@@ -85,7 +96,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         var totalCompressed = files.Sum(f => f.Item.Chunks.Sum(c => c.CompressedSize));
         var installedSize = files.Sum(f => f.Item.Size);
 
-        var staging = Path.Combine(options.OutputRoot, ".gogdl-staging", $"{game.DirectoryName}__{options.Platform.ContentSystemName()}");
+        var staging = Path.Combine(
+            options.StagingDirectory, $"{game.DirectoryName}__{options.Platform.ContentSystemName()}");
         if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
         Directory.CreateDirectory(staging);
 
@@ -93,15 +105,13 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         {
             await MaterializeAsync(staging, files, directories, links, totalCompressed, options, progress, ct);
 
-            progress?.Report(new DownloadProgress("zip", totalCompressed, totalCompressed, files.Count, files.Count));
-
             var stagingZip = staging + ".zip";
             if (File.Exists(stagingZip)) File.Delete(stagingZip);
-            ZipFile.CreateFromDirectory(staging, stagingZip, CompressionLevel.Optimal, includeBaseDirectory: false);
+            ZipDirectory(staging, stagingZip, progress, ct);
 
             Directory.CreateDirectory(gameDirectory);
             var archivePath = Path.Combine(gameDirectory, archiveName);
-            File.Move(stagingZip, archivePath, overwrite: true);
+            PublishArchive(stagingZip, archivePath, SameVolume(stagingZip, archivePath), progress);
 
             var manifest = existing ?? new BackupManifest
             {
@@ -134,6 +144,72 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         {
             if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
         }
+    }
+
+    /// <summary>
+    /// Zips the staging directory entry by entry rather than via
+    /// <see cref="ZipFile.CreateFromDirectory(string, string)"/>, so that a multi-hour archive
+    /// of a large game still reports progress.
+    /// </summary>
+    internal static void ZipDirectory(
+        string staging, string zipPath, IProgress<DownloadProgress>? progress, CancellationToken ct)
+    {
+        var entries = Directory
+            .EnumerateFileSystemEntries(staging, "*", SearchOption.AllDirectories)
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToList();
+
+        using var stream = File.Create(zipPath);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Create);
+
+        var done = 0;
+        foreach (var entry in entries)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var relative = Path.GetRelativePath(staging, entry).Replace('\\', '/');
+
+            if (Directory.Exists(entry))
+            {
+                // Empty directories only survive as an explicit trailing-slash entry.
+                if (!Directory.EnumerateFileSystemEntries(entry).Any())
+                    archive.CreateEntry(relative + "/");
+            }
+            else
+            {
+                archive.CreateEntryFromFile(entry, relative, CompressionLevel.Optimal);
+            }
+
+            progress?.Report(new DownloadProgress("zip", 0, 0, ++done, entries.Count));
+        }
+    }
+
+    /// <summary>A rename is only atomic within one volume.</summary>
+    internal static bool SameVolume(string a, string b) => string.Equals(
+        Path.GetPathRoot(Path.GetFullPath(a)),
+        Path.GetPathRoot(Path.GetFullPath(b)),
+        StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Moves the finished zip into place. A plain rename when staging shares the target's
+    /// volume; otherwise a copy to a sibling temp file followed by a rename, so the target
+    /// name still appears atomically and a crash cannot leave a half-written archive.
+    /// </summary>
+    internal static void PublishArchive(
+        string stagingZip, string archivePath, bool sameVolume, IProgress<DownloadProgress>? progress)
+    {
+        if (sameVolume)
+        {
+            File.Move(stagingZip, archivePath, overwrite: true);
+            return;
+        }
+
+        progress?.Report(new DownloadProgress("copy", 0, 0, 0, 0));
+
+        var temp = archivePath + ".tmp";
+        File.Copy(stagingZip, temp, overwrite: true);
+        File.Move(temp, archivePath, overwrite: true);
+        File.Delete(stagingZip);
     }
 
     private async Task<(List<PlannedFile> Files, List<string> Directories, List<DepotItem> Links)> PlanAsync(

@@ -78,6 +78,7 @@ public static class Cli
                 --out DIR                      default ./gog-backup
                 --connections N                concurrent connections, default 8
                 --limit-rate 5M                speed cap (k/M/G)
+                --staging DIR                  where to assemble and zip, default local temp
                 --force                        re-download even a completed build
             """);
         return 1;
@@ -428,10 +429,12 @@ public static class Cli
             Platform = platform,
             Language = flags.GetValueOrDefault("language", "en"),
             MaxConnections = options.MaxConnections,
+            StagingRoot = flags.TryGetValue("staging", out var staging) ? Path.GetFullPath(staging) : null,
             Force = flags.ContainsKey("force"),
         };
 
-        Console.Error.WriteLine($"{game.Title} → {downloadOptions.OutputRoot}/{game.DirectoryName}");
+        Console.Error.WriteLine($"{game.Title} → {Path.Combine(downloadOptions.OutputRoot, game.DirectoryName)}");
+        Console.Error.WriteLine($"staging in {downloadOptions.StagingDirectory}");
 
         var result = await new GameDownloader(api, content)
             .RunAsync(game, downloadOptions, new ConsoleProgress(), ct);
@@ -487,19 +490,24 @@ public sealed class ConsoleProgress : IProgress<DownloadProgress>
 
         var elapsed = (now - _startedAt) / (double)Stopwatch.Frequency;
         var speed = elapsed > 0 ? p.Bytes / elapsed / 1024 / 1024 : 0;
-        var percent = p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes : 0;
+
+        // Zipping moves no bytes over the wire, so it can only report progress in files.
+        var percent = p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes
+            : p.TotalFiles > 0 ? 100.0 * p.Files / p.TotalFiles
+            : 0;
 
         // Remaining time is only meaningful once the speed has settled a little.
         var eta = speed > 0.1 && p.Bytes > 0 && p.TotalBytes > p.Bytes
             ? TimeSpan.FromSeconds((p.TotalBytes - p.Bytes) / (p.Bytes / elapsed))
             : (TimeSpan?)null;
 
-        // The manifest phase has nothing to size yet; "-/-" would just be noise.
+        // The manifest and zip phases have no byte counter; "-/-" and "0.0 MiB/s" are noise.
         var size = p.TotalBytes > 0 ? $"{Cli.Bytes(p.Bytes)}/{Cli.Bytes(p.TotalBytes)}" : "";
+        var rate = p.Bytes > 0 ? $"{speed,6:F1} MiB/s" : "";
         var remaining = eta is { } left ? $"  ETA {left:hh\\:mm\\:ss}" : "";
 
         Console.Error.Write(
             $"\r  {p.Phase,-8} {percent,5:F1} %  {size,-20}  {p.Files}/{p.TotalFiles} files  " +
-            $"{speed,6:F1} MiB/s{remaining}   ");
+            $"{rate}{remaining}        ");
     }
 }

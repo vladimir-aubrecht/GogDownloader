@@ -36,6 +36,11 @@ documentation. **Do not go hunting for endpoints on the web.** Refresh it with
   recorded in `.gogdl.json` as `skippedDependencies` so it stays visible what the game wanted.
 - **Archive:** zip everywhere. Symlinks are dereferenced; unix permissions are not preserved —
   the user explicitly agreed and handles that outside this project.
+- **Staging goes on a local disk**, never in `--out`. Users back up onto network shares, and
+  staging there would push every byte across the wire three times (write the files, read them
+  back to zip, write the zip). Override with `--staging`. When staging and target sit on
+  different volumes the zip is copied to a sibling `.tmp` and then renamed, so the final name
+  still appears atomically.
 - **Reliability:** work in a staging directory, only an atomic `File.Move` into the target.
   The `.gogdl.json` manifest is written **as the very last step** — until it exists the game
   counts as not downloaded and a restart redoes it. A corrupted "done" state cannot arise.

@@ -1,0 +1,157 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using GogDownloader.Core.Api;
+
+namespace GogDownloader.Core.Library;
+
+public sealed record BuildRef(string BuildId, int Generation, string? VersionName, string? Manifest);
+
+public sealed record InstallerRef(string Language, string? Version, long TotalSize);
+
+/// <summary>Jak lze danou platformu dané hry získat.</summary>
+public sealed record PlatformAvailability
+{
+    /// <summary>Galaxy depot. Null = hra ho pro tuhle platformu nemá.</summary>
+    public BuildRef? Depot { get; init; }
+
+    /// <summary>Offline instalátory z api.gog.com.</summary>
+    public List<InstallerRef> Installers { get; init; } = [];
+
+    public bool HasDepot => Depot is not null;
+    public bool HasInstaller => Installers.Count > 0;
+    public bool Unavailable => !HasDepot && !HasInstaller;
+
+    public long LargestInstallerSize => Installers.Count == 0 ? 0 : Installers.Max(i => i.TotalSize);
+}
+
+public sealed record LibraryEntry
+{
+    public required long Id { get; init; }
+    public required string Title { get; init; }
+    public required string Slug { get; init; }
+
+    public Dictionary<GamePlatform, PlatformAvailability> Platforms { get; init; } = [];
+
+    /// <summary>Adresář na disku. Nikdy ne podle titulu — viz CLAUDE.md.</summary>
+    public string DirectoryName => $"{Slug}__{Id}";
+}
+
+public sealed record LibrarySnapshot
+{
+    public DateTimeOffset SyncedAt { get; init; } = DateTimeOffset.UtcNow;
+    public List<LibraryEntry> Games { get; init; } = [];
+
+    /// <summary>Hry, které se nepodařilo načíst — ať sync nespadne kvůli jedné.</summary>
+    public Dictionary<long, string> Failures { get; init; } = [];
+
+    private static readonly JsonSerializerOptions Json = new()
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() },
+    };
+
+    public static string DefaultPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "gogdownloader", "library.json");
+
+    public async Task SaveAsync(string path, CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var tmp = path + ".tmp";
+        await using (var stream = File.Create(tmp))
+            await JsonSerializer.SerializeAsync(stream, this, Json, ct);
+        File.Move(tmp, path, overwrite: true);
+    }
+
+    public static async Task<LibrarySnapshot?> LoadAsync(string path, CancellationToken ct = default)
+    {
+        if (!File.Exists(path)) return null;
+        await using var stream = File.OpenRead(path);
+        return await JsonSerializer.DeserializeAsync<LibrarySnapshot>(stream, Json, ct);
+    }
+}
+
+public sealed class LibrarySync(GogApiClient api, int maxParallelism)
+{
+    private static readonly GamePlatform[] DepotPlatforms = [GamePlatform.Windows, GamePlatform.Mac];
+
+    public async Task<LibrarySnapshot> RunAsync(
+        IProgress<(int done, int total)>? progress = null, CancellationToken ct = default)
+    {
+        var ids = await api.GetOwnedGameIdsAsync(ct);
+
+        var games = new List<LibraryEntry>(ids.Count);
+        var failures = new Dictionary<long, string>();
+        var done = 0;
+
+        await Parallel.ForEachAsync(
+            ids,
+            new ParallelOptions { MaxDegreeOfParallelism = maxParallelism, CancellationToken = ct },
+            async (id, token) =>
+            {
+                try
+                {
+                    var entry = await FetchAsync(id, token);
+                    if (entry is not null)
+                        lock (games) games.Add(entry);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lock (failures) failures[id] = ex.Message;
+                }
+                finally
+                {
+                    progress?.Report((Interlocked.Increment(ref done), ids.Count));
+                }
+            });
+
+        games.Sort((a, b) => string.CompareOrdinal(a.Title, b.Title));
+        return new LibrarySnapshot { Games = games, Failures = failures };
+    }
+
+    private async Task<LibraryEntry?> FetchAsync(long id, CancellationToken ct)
+    {
+        var product = await api.GetProductAsync(id, ct);
+        if (product is null) return null;
+
+        var platforms = new Dictionary<GamePlatform, PlatformAvailability>();
+
+        // Instalátory rozřadíme podle platformy.
+        var installers = new Dictionary<GamePlatform, List<InstallerRef>>();
+        foreach (var installer in product.Downloads?.Installers ?? [])
+        {
+            if (GamePlatformExtensions.FromApiName(installer.Os) is not { } platform) continue;
+            if (!installers.TryGetValue(platform, out var list))
+                installers[platform] = list = [];
+            list.Add(new InstallerRef(installer.Language, installer.Version, installer.TotalSize));
+        }
+
+        // Depoty existují jen pro Windows a macOS. Linux jde vždy přes instalátor.
+        foreach (var platform in DepotPlatforms)
+        {
+            var build = await api.GetLatestBuildAsync(id, platform, ct);
+            if (build is null) continue;
+            platforms[platform] = new PlatformAvailability
+            {
+                Depot = new BuildRef(build.BuildId, build.Generation, build.VersionName, build.Manifest),
+                Installers = installers.GetValueOrDefault(platform, []),
+            };
+        }
+
+        foreach (var (platform, list) in installers)
+        {
+            if (platforms.TryGetValue(platform, out var existing))
+                platforms[platform] = existing with { Installers = list };
+            else
+                platforms[platform] = new PlatformAvailability { Installers = list };
+        }
+
+        return new LibraryEntry
+        {
+            Id = product.Id,
+            Title = product.Title,
+            Slug = string.IsNullOrEmpty(product.Slug) ? id.ToString() : product.Slug,
+            Platforms = platforms,
+        };
+    }
+}

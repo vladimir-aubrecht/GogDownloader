@@ -1,0 +1,7 @@
+bin/
+obj/
+*.user
+
+# Tokeny GOG — nikdy necommitovat
+.gogdl/
+*.token.json

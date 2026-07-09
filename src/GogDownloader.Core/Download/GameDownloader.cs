@@ -13,7 +13,7 @@ public sealed record DownloadOptions
     public string Language { get; init; } = "en";
     public int MaxConnections { get; init; } = 8;
 
-    /// <summary>Stáhnout znovu i to, co už manifest hlásí jako hotové.</summary>
+    /// <summary>Re-download even what the manifest already reports as done.</summary>
     public bool Force { get; init; }
 }
 
@@ -24,8 +24,8 @@ public sealed record DownloadResult(DownloadOutcome Outcome, string? ArchivePath
 public sealed record DownloadProgress(string Phase, long Bytes, long TotalBytes, int Files, int TotalFiles);
 
 /// <summary>
-/// Path A: sestaví hru z Galaxy depotů ve staging adresáři, zabalí do zipu a
-/// atomicky ho přesune do cíle. Manifest se zapisuje jako poslední.
+/// Path A: assembles the game from Galaxy depots in a staging directory, zips it and
+/// atomically moves the zip into place. The manifest is written last.
 /// </summary>
 public sealed class GameDownloader(GogApiClient api, ContentClient content)
 {
@@ -39,11 +39,11 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
     {
         if (game.Platforms.GetValueOrDefault(options.Platform) is not { Depot: { } build })
             return new DownloadResult(DownloadOutcome.NoDepot,
-                Detail: "Galaxy depot pro tuhle platformu neexistuje (Path B/C, zatím neimplementováno).");
+                Detail: "No Galaxy depot for this platform (path B/C, not implemented yet).");
 
         if (build.Generation != 2)
             return new DownloadResult(DownloadOutcome.UnsupportedGeneration,
-                Detail: $"Build je generation {build.Generation}; podporuje se zatím jen 2.");
+                Detail: $"Build is generation {build.Generation}; only 2 is supported so far.");
 
         var gameDirectory = Path.Combine(options.OutputRoot, game.DirectoryName);
         var archiveName = $"{options.Platform.ContentSystemName()}.zip";
@@ -55,13 +55,13 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         {
             return new DownloadResult(DownloadOutcome.AlreadyDone,
                 Path.Combine(gameDirectory, done.ArchiveName),
-                $"Build {build.BuildId} už je zazálohovaný.");
+                $"Build {build.BuildId} is already backed up.");
         }
 
         progress?.Report(new DownloadProgress("manifest", 0, 0, 0, 0));
 
         var repository = await content.GetRepositoryManifestAsync(build.Manifest!, ct)
-            ?? throw new InvalidOperationException("Repository manifest se nepodařilo načíst.");
+            ?? throw new InvalidOperationException("Failed to load the repository manifest.");
 
         var owned = (await api.GetOwnedGameIdsAsync(ct)).ToHashSet();
         var dlcIds = repository.Products
@@ -78,7 +78,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
         if (depots.Count == 0)
             return new DownloadResult(DownloadOutcome.NoDepotForLanguage,
-                Detail: $"Žádný depot pro jazyk '{options.Language}'.");
+                Detail: $"No depot for language '{options.Language}'.");
 
         var (files, directories, links) = await PlanAsync(depots, ct);
 
@@ -125,7 +125,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                     .ToDictionary(f => f.RelativePath, f => new BackedUpFile(f.Item.Identity!, f.Item.Size)),
             };
 
-            // Až teď je hra z pohledu toolu stažená.
+            // Only now does the game count as downloaded.
             await manifest.SaveAsync(gameDirectory, ct);
 
             return new DownloadResult(DownloadOutcome.Completed, archivePath);
@@ -172,16 +172,16 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
     private static string RelativePathFor(DepotItem item, string productId)
     {
         var relative = SafeRelative(item.Path);
-        // `support` soubory nepatří do hry, Galaxy je dává stranou.
+        // `support` files do not belong in the game, Galaxy keeps them aside.
         return item.IsSupport ? $"gog-support/{productId}/{relative}" : relative;
     }
 
-    /// <summary>Depot cesty používají `\`. Zároveň brání úniku ze staging adresáře.</summary>
+    /// <summary>Depot paths use `\`. This also prevents escaping the staging directory.</summary>
     private static string SafeRelative(string path)
     {
         var normalized = path.Replace('\\', '/').Trim('/');
         if (normalized.Split('/').Any(s => s is ".." or "."))
-            throw new InvalidOperationException($"Podezřelá cesta v depotu: {path}");
+            throw new InvalidOperationException($"Suspicious path in depot: {path}");
         return normalized;
     }
 
@@ -238,7 +238,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                 Interlocked.Increment(ref filesDone);
             });
 
-        // Symlinky se dereferencují: cíl je relativní ke kořeni instalace.
+        // Symlinks are dereferenced: the target is relative to the install root.
         foreach (var link in links)
         {
             if (link.Target is null) continue;
@@ -272,7 +272,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                 }
                 catch (ChunkChecksumException) when (attempt < 3)
                 {
-                    // poškozený přenos, zkusit znovu
+                    // corrupted transfer, try again
                 }
             }
         }

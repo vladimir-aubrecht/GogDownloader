@@ -6,7 +6,7 @@ namespace GogDownloader.Core.Download;
 
 public sealed record BackedUpFile(string Md5, long Size);
 
-/// <summary>Jedna platforma jedné hry: jeden zip.</summary>
+/// <summary>One platform of one game: one zip.</summary>
 public sealed record PlatformBackup
 {
     public required string BuildId { get; init; }
@@ -19,19 +19,19 @@ public sealed record PlatformBackup
 
     public DateTimeOffset CompletedAt { get; init; } = DateTimeOffset.UtcNow;
 
-    /// <summary>Vlastněná DLC, jejichž depoty jsou v zipu.</summary>
+    /// <summary>Owned DLC whose depots are in the zip.</summary>
     public List<string> Dlcs { get; init; } = [];
 
-    /// <summary>Redistributables, které hra chtěla a my je vědomě vynechali.</summary>
+    /// <summary>Redistributables the game asked for and we deliberately skipped.</summary>
     public List<string> SkippedDependencies { get; init; } = [];
 
-    /// <summary>Cesta v zipu → hash a velikost. Podklad pro inkrementální patch.</summary>
+    /// <summary>Path inside the zip to hash and size. The basis for an incremental patch.</summary>
     public Dictionary<string, BackedUpFile> Files { get; init; } = [];
 }
 
 /// <summary>
-/// `.gogdl.json` v adresáři hry. Zapisuje se **jako úplně poslední krok** — dokud
-/// pro platformu nemá záznam, je z pohledu toolu nestažená a restart ji udělá znovu.
+/// `.gogdl.json` in the game directory. Written **as the very last step** — until it has
+/// an entry for a platform, that platform counts as not downloaded and a restart redoes it.
 /// </summary>
 public sealed record BackupManifest
 {

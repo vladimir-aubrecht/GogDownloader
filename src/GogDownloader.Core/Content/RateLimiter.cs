@@ -3,14 +3,14 @@ using System.Diagnostics;
 namespace GogDownloader.Core.Content;
 
 /// <summary>
-/// Token bucket sdílený všemi spojeními. `bytesPerSecond <= 0` limit vypíná.
+/// A token bucket shared by all connections. `bytesPerSecond <= 0` disables the limit.
 /// </summary>
 public sealed class RateLimiter(long bytesPerSecond)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private long _lastTicks = Stopwatch.GetTimestamp();
 
-    /// <summary>Kbelík startuje plný, jinak by i první čtení čekalo celou sekundu.</summary>
+    /// <summary>The bucket starts full, otherwise even the first read would wait a whole second.</summary>
     private double _tokens = bytesPerSecond > 0 ? bytesPerSecond : 0;
 
     public bool Enabled => bytesPerSecond > 0;
@@ -22,8 +22,8 @@ public sealed class RateLimiter(long bytesPerSecond)
         await _gate.WaitAsync(ct);
         try
         {
-            // Kbelík musí pojmout i požadavek větší než sekundový rozpočet, jinak
-            // by se na něj čekalo věčně.
+            // The bucket must hold a request larger than the per-second budget, otherwise
+            // it would be waited on forever.
             var capacity = Math.Max(bytesPerSecond, bytes);
 
             while (true)

@@ -6,10 +6,10 @@ namespace GogDownloader.Core.Http;
 
 public sealed record GogHttpOptions
 {
-    /// <summary>Kolik souběžných spojení na jeden host. GOG rate-limituje, nepřehánět.</summary>
+    /// <summary>Concurrent connections per host. GOG rate-limits, so do not overdo it.</summary>
     public int MaxConnections { get; init; } = 8;
 
-    /// <summary>Strop rychlosti stahování v bajtech za sekundu. 0 = bez omezení.</summary>
+    /// <summary>Download speed cap in bytes per second. 0 means unlimited.</summary>
     public long MaxBytesPerSecond { get; init; }
 
     public int MaxRetries { get; init; } = 5;
@@ -18,8 +18,8 @@ public sealed record GogHttpOptions
 }
 
 /// <summary>
-/// Opakuje požadavek při přechodných chybách. Respektuje Retry-After (429 i 503),
-/// jinak exponenciální backoff s jitterem.
+/// Retries a request on transient failures. Honours Retry-After (both 429 and 503),
+/// otherwise exponential backoff with jitter.
 /// </summary>
 public sealed class RetryHandler(int maxRetries) : DelegatingHandler
 {
@@ -39,11 +39,11 @@ public sealed class RetryHandler(int maxRetries) : DelegatingHandler
             }
             catch (HttpRequestException) when (attempt < maxRetries)
             {
-                // spadlo spojení — spadneme do backoffu níž
+                // connection dropped — fall through to the backoff below
             }
             catch (TaskCanceledException) when (!ct.IsCancellationRequested && attempt < maxRetries)
             {
-                // timeout, ne zrušení uživatelem
+                // timeout, not a user cancellation
             }
 
             var delay = response is not null
@@ -83,7 +83,7 @@ public sealed class RetryHandler(int maxRetries) : DelegatingHandler
     }
 }
 
-/// <summary>Přidá Bearer token a při 401 ho jednou obnoví.</summary>
+/// <summary>Adds the Bearer token and refreshes it once on a 401.</summary>
 public sealed class AuthHandler(TokenProvider tokens) : DelegatingHandler
 {
     protected override async Task<HttpResponseMessage> SendAsync(

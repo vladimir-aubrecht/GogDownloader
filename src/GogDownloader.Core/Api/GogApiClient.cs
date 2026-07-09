@@ -48,7 +48,7 @@ public sealed record Build
     [JsonPropertyName("repository_manifest")] public string? RepositoryManifest { get; init; }
     [JsonPropertyName("link")] public string? Link { get; init; }
 
-    /// <summary>gogdl čte repository_manifest; starší odpovědi mají jen link.</summary>
+    /// <summary>gogdl reads repository_manifest; older responses only carry link.</summary>
     public string? Manifest => RepositoryManifest ?? Link;
 }
 
@@ -78,8 +78,8 @@ public sealed class GogApiClient(HttpClient http)
     }
 
     /// <summary>
-    /// Buildy pro platformu. Prázdný seznam znamená, že hra nemá Galaxy depot a
-    /// depot cesta pro ni není možná. Zkouší generation 2, pak 1.
+    /// Builds for a platform. An empty list means the game has no Galaxy depot, so the
+    /// depot path is impossible for it. Tries generation 2, then 1.
     /// </summary>
     public async Task<Build?> GetLatestBuildAsync(
         long id, GamePlatform platform, CancellationToken ct = default)
@@ -93,7 +93,7 @@ public sealed class GogApiClient(HttpClient http)
             if (!response.IsSuccessStatusCode) continue;
 
             var builds = await response.Content.ReadFromJsonAsync<BuildsResponse>(cancellationToken: ct);
-            // Zajímá nás jen veřejná větev; branch != null jsou beta kanály.
+            // Only the public branch matters; branch != null are beta channels.
             var build = builds?.Items.FirstOrDefault(b => b.Branch is null);
             if (build is not null) return build;
         }

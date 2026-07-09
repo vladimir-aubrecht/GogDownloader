@@ -1,16 +1,16 @@
-# GOG API — ověřená reference
+# GOG API — verified reference
 
-GOG nemá veřejnou dokumentaci API. Tenhle dokument je **cache ověřených faktů**, aby se
-endpointy nemusely znovu dohledávat. Ověřeno 2026-07-09 proti [heroic-gogdl][gogdl]
-(commit na větvi `main`), což je downloader pohánějící Heroic Games Launcher.
+GOG has no public API documentation. This document is a **cache of verified facts** so the
+endpoints do not have to be looked up again. Verified 2026-07-09 against [heroic-gogdl][gogdl]
+(commit `4928e46` on `main`), the downloader that powers Heroic Games Launcher.
 
-Refresh: `scripts/refresh-gog-api-ref.sh` (stáhne zdroje a vypíše aktuální endpointy).
+Refresh: `scripts/refresh-gog-api-ref.sh` (clones the sources and prints the current endpoints).
 
 [gogdl]: https://github.com/Heroic-Games-Launcher/heroic-gogdl
 
-## Hosty
+## Hosts
 
-| Konstanta | Hodnota |
+| Constant | Value |
 |---|---|
 | `GOG_AUTH` | `https://auth.gog.com` |
 | `GOG_EMBED` | `https://embed.gog.com` |
@@ -19,152 +19,155 @@ Refresh: `scripts/refresh-gog-api-ref.sh` (stáhne zdroje a vypíše aktuální 
 | `GOG_CDN` | `https://gog-cdn-fastly.gog.com` |
 | `GOG_CLOUDSTORAGE` | `https://cloudstorage.gog.com` |
 
-> Pozor: CDN host je `gog-cdn-fastly.gog.com`, **ne** `cdn.gog.com`.
+> Careful: the CDN host is `gog-cdn-fastly.gog.com`, **not** `cdn.gog.com`.
 
-## Autentizace (OAuth2)
+## Authentication (OAuth2)
 
-Veřejné credentials Galaxy klienta (žijí v otevřeném zdrojáku gogdl):
+Public credentials of the Galaxy client (they live in gogdl's open source):
 
 - `client_id` = `46899977096215655`
 - `client_secret` = `9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9`
 - `redirect_uri` = `https://embed.gog.com/on_login_success?origin=client`
 
-Výměna kódu za token:
+Exchanging a code for a token:
 
 ```
 GET {GOG_AUTH}/token?client_id=…&client_secret=…&grant_type=authorization_code
     &redirect_uri=…&code={code}
 ```
 
-Obnova tokenu:
+Refreshing a token:
 
 ```
 GET {GOG_AUTH}/token?client_id=…&client_secret=…&grant_type=refresh_token
     &refresh_token={refresh_token}
 ```
 
-Access token má krátkou platnost (řádově hodina), refresh token dlouhou.
+The access token is short-lived (roughly an hour), the refresh token is long-lived.
 
-## Knihovna a metadata
+## Library and metadata
 
-| Účel | Endpoint |
+| Purpose | Endpoint |
 |---|---|
-| Seznam vlastněných `gameId` | `GET {GOG_EMBED}/user/data/games` |
-| Detaily hry + offline instalátory | `GET {GOG_EMBED}/account/gameDetails/{id}.json` |
-| Produktová data | `GET {GOG_API}/products/{id}` (`?expand=…`) |
+| List of owned `gameId`s | `GET {GOG_EMBED}/user/data/games` |
+| Game details + offline installers | `GET {GOG_EMBED}/account/gameDetails/{id}.json` |
+| Product data | `GET {GOG_API}/products/{id}` (`?expand=…`) |
 
-## Content system (Galaxy depoty) — Path A
+## Content system (Galaxy depots) — Path A
 
-Seznam buildů pro platformu. `build_platform` ∈ `windows`, `osx`, `linux`:
+Builds for a platform. `build_platform` is one of `windows`, `osx`, `linux`:
 
 ```
 GET {GOG_CONTENT_SYSTEM}/products/{gameId}/os/{build_platform}/builds?&generation={1|2}
 ```
 
-> Původně jsem tenhle endpoint uváděl bez segmentu `/os/{platform}/` — **to bylo špatně.**
+> This endpoint was originally documented here without the `/os/{platform}/` segment —
+> **that was wrong.**
 
-Odpověď má `items[]`; každá položka nese `branch` a `repository_manifest` (přímé URL).
-Když je `items` prázdné, hra content system nepodporuje → depot cesta není možná.
+The response has `items[]`; each entry carries `branch` and `repository_manifest` (a direct
+URL). When `items` is empty the game has no content system support, so the depot path is
+impossible.
 
-Manifesty jsou **zlib-komprimovaný JSON** (`zlib.decompress(data, 15)`).
+Manifests are **zlib-compressed JSON** (`zlib.decompress(data, 15)`).
 
 ### galaxy_path
 
-Hash manifestu se na CDN mapuje na cestu vložením dvou adresářových úrovní:
-`abcdef…` → `ab/cd/abcdef…` (pokud hash už lomítko neobsahuje).
+A manifest hash maps onto a CDN path by inserting two directory levels:
+`abcdef…` becomes `ab/cd/abcdef…` (unless the hash already contains a slash).
 
-| Účel | URL |
+| Purpose | URL |
 |---|---|
 | Depot manifest (v2) | `{GOG_CDN}/content-system/v2/meta/{galaxy_path(manifest)}` |
 | Patch manifest (v2) | `{GOG_CDN}/content-system/v2/patches/meta/{galaxy_path(manifest)}` |
 | Depot manifest (v1) | `{GOG_CDN}/content-system/v1/manifests/{gameId}/{platform}/{timestamp}/{manifest}` |
 
-Generation 1 je starší formát — manifest je **nekomprimovaný JSON** a cesta obsahuje
-`timestamp` z produktových dat. Netriviální rozdíl oproti v2, počítat s oběma.
+Generation 1 is the older format — its manifest is **uncompressed JSON** and the path contains
+a `timestamp` from the product data. A non-trivial difference from v2; expect both.
 
-### Schéma manifestů v2
+### Schema of v2 manifests
 
-Repository manifest (URL z `build.repository_manifest`) po zlib dekompresi:
+The repository manifest (the URL in `build.repository_manifest`) after zlib decompression:
 
-| Pole | Význam |
+| Field | Meaning |
 |---|---|
-| `baseProductId` | id základní hry |
-| `buildId` | potřeba pro patch endpoint |
-| `installDirectory` | jméno instalačního adresáře (**nepoužívat pro náš zip**) |
-| `dependencies[]` | id redistributables |
-| `products[]` | `productId` + `name` základní hry **a všech jejích DLC** |
-| `depots[]` | viz níže |
+| `baseProductId` | id of the base game |
+| `buildId` | needed by the patch endpoint |
+| `installDirectory` | name of the install directory (**do not use it for our zip**) |
+| `dependencies[]` | ids of redistributables |
+| `products[]` | `productId` + `name` of the base game **and all its DLC** |
+| `depots[]` | see below |
 
-Seznam DLC se tedy nikde nedotahuje zvlášť: vezme se `products[]` z manifestu, vyhodí
-se `baseProductId` a zbytek se protne s vlastněnými id z `{GOG_EMBED}/user/data/games`.
+The DLC list therefore never has to be fetched separately: take `products[]` from the
+manifest, drop `baseProductId`, and intersect the rest with the owned ids from
+`{GOG_EMBED}/user/data/games`.
 
-Depot: `manifest` (hash), `productId`, `languages[]`, `osBitness`, `size`,
-`compressedSize`. Depot patří do stažení, když `productId` == základní hra nebo
-vlastněné DLC, **a zároveň** `languages` obsahuje `*` nebo cílový jazyk.
+A depot has `manifest` (hash), `productId`, `languages[]`, `osBitness`, `size` and
+`compressedSize`. A depot belongs in the download when `productId` is the base game or an
+owned DLC, **and** `languages` contains `*` or the target language.
 
-Depot manifest (`{GOG_CDN}/content-system/v2/meta/{galaxy_path(depot.manifest)}`,
-opět zlib) má `depot.items[]`, každý s `type`:
+The depot manifest (`{GOG_CDN}/content-system/v2/meta/{galaxy_path(depot.manifest)}`, zlib
+again) has `depot.items[]`, each with a `type`:
 
-- `DepotFile` — `path`, `chunks[]`, volitelně `md5`, `sha256`, `flags[]`
-- `DepotDirectory` — jen `path`, adresář k vytvoření
-- `DepotLink` — `path` + `target`, symlink
+- `DepotFile` — `path`, `chunks[]`, optionally `md5`, `sha256`, `flags[]`
+- `DepotDirectory` — just a `path`, a directory to create
+- `DepotLink` — `path` + `target`, a symlink whose target is relative to the install root
 
-`flags` obsahuje `support` (soubor patří do `gog-support`, ne do hry) a `executable`.
-Cesty v `path` používají `\` jako oddělovač — na Linuxu je nutné je přeložit.
+`flags` may contain `support` (the file belongs in `gog-support`, not in the game) and
+`executable`. Paths in `path` use `\` as the separator and must be translated on Linux.
 
-Chunk: `compressedMd5`, `md5`, `size`, `compressedSize`. Identita souboru je
-`md5`, a když chybí, `chunks[0].md5` (platí jen pro jednochunkové soubory).
+A chunk has `compressedMd5`, `md5`, `size` and `compressedSize`. A file's identity is `md5`,
+or `chunks[0].md5` when that is missing (which only holds for single-chunk files).
 
-### Secure links (podepsané URL pro chunky)
+### Secure links (signed URLs for chunks)
 
 ```
 generation 2:  GET {GOG_CONTENT_SYSTEM}/products/{gameId}/secure_link?_version=2&generation=2&path=/
 generation 1:  GET {GOG_CONTENT_SYSTEM}/products/{gameId}/secure_link?_version=2&type=depot&path=/
 ```
 
-Vrací pole `urls`. Secure link se získává **zvlášť pro každý vlastněný DLC produkt**,
-ne jen pro základní hru. (Volitelné `&root=/patches/store` pro patche.)
+Returns an array of `urls`. A secure link is obtained **separately for every owned DLC
+product**, not just for the base game. (Optionally `&root=/patches/store` for patches.)
 
-Každý prvek `urls[]` má `url_format` a `parameters`. URL chunku se sestaví takto —
-pořadí kroků je podstatné:
+Every element of `urls[]` has `url_format` and `parameters`. A chunk URL is assembled like
+this — the order of the steps matters:
 
 1. `parameters["path"] += "/" + galaxy_path(chunk.compressedMd5)`
-2. v `url_format` nahradit každé `{klíč}` hodnotou `parameters[klíč]`
+2. replace every `{key}` in `url_format` with `parameters[key]`
 
-Tělo chunku je **zlib-komprimované**. MD5 se kontroluje proti `compressedMd5`, tedy
-nad *staženými* bajty před dekompresí, ne po ní.
+The chunk body is **zlib-compressed**. Its MD5 is checked against `compressedMd5`, i.e. over
+the *downloaded* bytes before inflating, not after.
 
-`401` u chunku znamená vypršelý secure link → vyžádat znovu, není to chyba stahování.
+A `401` on a chunk means the secure link expired; it is not a download failure.
 
 ### Dependencies / redistributables
 
-| Účel | Endpoint |
+| Purpose | Endpoint |
 |---|---|
-| Repozitář závislostí | `GET {GOG_CONTENT_SYSTEM}/dependencies/repository?generation=2` |
+| Dependency repository | `GET {GOG_CONTENT_SYSTEM}/dependencies/repository?generation=2` |
 | Store link | `GET {GOG_CONTENT_SYSTEM}/open_link?generation=2&_version=2&path=/dependencies/store/` |
 
-## Linux — zvláštní cesta
+## Linux — a separate path
 
-**Pro Linux neexistují Galaxy depoty.** gogdl pro `platform == "linux"` content system
-úplně obchází a bere offline MojoSetup instalátory z `gameDetails`
-(filtruje `installer["os"] == "linux"`, vybírá podle `installer["language"]`,
-anglické instalátory bývají multilanguage).
+**Galaxy depots do not exist for Linux.** For `platform == "linux"` gogdl bypasses the content
+system entirely and takes the offline MojoSetup installers from `gameDetails` (filtering
+`installer["os"] == "linux"` and selecting by `installer["language"]`; English installers tend
+to be multilanguage).
 
-Zásadní trik, který gogdl používá: MojoSetup instalátor je shell skript se ZIP payloadem,
-a ZIP má central directory na konci. Díky **HTTP Range requestům** lze přečíst central
-directory a stáhnout jen potřebné entries — **instalátor se nikdy nestahuje celý.**
-(Zdroj: komentář v `gogdl/dl/managers/linux.py`: „new zip method based on Range headers".)
+The essential trick gogdl uses: a MojoSetup installer is a shell script with a ZIP payload, and
+a ZIP keeps its central directory at the end. **HTTP Range requests** therefore make it
+possible to read the central directory and download only the entries that are needed — **the
+installer is never downloaded in full.** (Source: a comment in `gogdl/dl/managers/linux.py`:
+"new zip method based on Range headers".)
 
-To přesně splňuje požadavek „neskladovat instalátory".
+That satisfies the requirement of never storing installers.
 
-Kuriozita: `linux.py` si i pro Linux hru vyžádá `os/windows/builds`. Nezjišťoval jsem proč —
-pravděpodobně kvůli zjištění verze/existence titulu. Neopisovat naslepo.
+Curiosity: `linux.py` requests `os/windows/builds` even for a Linux game. I did not investigate
+why — probably to determine the version or whether the title exists. Do not copy this blindly.
 
-## Co gogdl neumí
+## What gogdl cannot do
 
-Hry bez content systemu (prázdné `builds.items`) gogdl na Windows/macOS **nepodporuje** —
-skončí chybou. Tj. i referenční implementace rezignuje na cestu přes Inno Setup
-instalátory. Pokud takové tituly v knihovně budou, jsme na to sami (innoextract / Wine).
+Games with no content system (an empty `builds.items`) are **unsupported** by gogdl on
+Windows/macOS — it errors out. So even the reference implementation gives up on the Inno Setup
+installer path. For such titles we are on our own (innoextract / Wine).
 
-Kolik jich reálně je, se zjistí až po `library sync` — viz zadání: neimplementovat,
-dokud se neprokáže potřeba.
+`library stats` over the real library reports **24** such Windows/macOS titles out of 256 games.

@@ -9,8 +9,8 @@ using GogDownloader.Core.Api;
 namespace GogDownloader.Core.Content;
 
 /// <summary>
-/// Přístup ke Galaxy content systemu. Metadata jdou přes autentizovaného klienta,
-/// chunky přes holý — secure link je podepsaný a Bearer hlavičku nechce.
+/// Access to the Galaxy content system. Metadata goes through the authenticated client,
+/// chunks through the bare one — a secure link is signed and does not want a Bearer header.
 /// </summary>
 public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter limiter)
 {
@@ -32,12 +32,12 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
         var response = await authed.GetFromJsonAsync<SecureLinkResponse>(url, Json, ct);
         var urls = response?.Urls ?? [];
         if (urls.Count == 0)
-            throw new InvalidOperationException($"GOG nevrátil secure link pro produkt {productId}.");
+            throw new InvalidOperationException($"GOG returned no secure link for product {productId}.");
 
         return urls.OrderBy(u => u.Priority).ToList();
     }
 
-    /// <summary>Stáhne chunk, ověří MD5 nad *komprimovanými* bajty a rozbalí ho.</summary>
+    /// <summary>Downloads a chunk, verifies the MD5 over the *compressed* bytes, and inflates it.</summary>
     public async Task<byte[]> DownloadChunkAsync(
         SecureLinkEndpoint endpoint, Chunk chunk, IProgress<long>? bytes, CancellationToken ct)
     {
@@ -80,7 +80,7 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
     }
 
     /// <summary>
-    /// Manifesty jsou zlib JSON. Generation 1 je posílá nekomprimované, proto fallback.
+    /// Manifests are zlib JSON. Generation 1 sends them uncompressed, hence the fallback.
     /// </summary>
     private async Task<T?> GetZlibJsonAsync<T>(string url, CancellationToken ct)
     {
@@ -100,7 +100,7 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
     }
 }
 
-/// <summary>Cache secure linků. Při 401 se link zahodí a vyžádá znovu.</summary>
+/// <summary>Secure link cache. On a 401 the link is dropped and requested again.</summary>
 public sealed class SecureLinkCache(ContentClient content)
 {
     private readonly Dictionary<string, SecureLinkEndpoint> _cache = [];
@@ -126,7 +126,7 @@ public sealed class SecureLinkCache(ContentClient content)
         await _gate.WaitAsync(ct);
         try
         {
-            // Jiné vlákno už mohlo obnovit — pak nezahazovat čerstvý link.
+            // Another thread may have refreshed it already — do not drop a fresh link.
             if (_cache.TryGetValue(productId, out var current) && ReferenceEquals(current, stale))
                 _cache.Remove(productId);
         }

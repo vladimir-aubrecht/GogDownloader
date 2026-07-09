@@ -21,7 +21,7 @@ catch (GogAuthException ex)
 }
 catch (OperationCanceledException)
 {
-    Console.Error.WriteLine("Přerušeno.");
+    Console.Error.WriteLine("Interrupted.");
     return 130;
 }
 
@@ -57,22 +57,22 @@ internal static class Cli
     private static int Usage()
     {
         Console.WriteLine($"""
-            gogdl {Version} — záloha vlastních her z GOG
+            gogdl {Version} — back up games you own on GOG
 
-              auth login [--code <code|url>]   přihlášení přes prohlížeč
-              auth status                      stav tokenu
-              auth logout                      zapomenout token
+              auth login [--code <code|url>]   log in via browser
+              auth status                      token status
+              auth logout                      forget the token
 
-              library sync [--connections N]   načte knihovnu z GOG a uloží snapshot
-              library stats                    rozpad knihovny podle dostupnosti depotů
+              library sync [--connections N]   fetch the library from GOG and save a snapshot
+              library stats                    library breakdown by depot availability
 
-              download <slug|id>               stáhne hru z Galaxy depotů do zipu
-                --platform windows|mac|linux   výchozí windows
-                --language en                  výchozí en
-                --out DIR                      výchozí ./gog-backup
-                --connections N                souběžná spojení, výchozí 8
-                --limit-rate 5M                strop rychlosti (k/M/G)
-                --force                        stáhnout znovu i hotový build
+              download <slug|id>               download a game from Galaxy depots into a zip
+                --platform windows|mac|linux   default windows
+                --language en                  default en
+                --out DIR                      default ./gog-backup
+                --connections N                concurrent connections, default 8
+                --limit-rate 5M                speed cap (k/M/G)
+                --force                        re-download even a completed build
             """);
         return 1;
     }
@@ -98,7 +98,7 @@ internal static class Cli
         MaxBytesPerSecond = flags.TryGetValue("limit-rate", out var r) ? ParseRate(r) : 0,
     };
 
-    /// <summary>`5M` → 5 * 1024^2. Bez přípony bajty za sekundu.</summary>
+    /// <summary>`5M` becomes 5 * 1024^2. Without a suffix, bytes per second.</summary>
     private static long ParseRate(string value)
     {
         if (value.Length == 0) return 0;
@@ -129,7 +129,7 @@ internal static class Cli
         var tokens = Tokens(options);
         var authed = GogHttpFactory.Create(options, tokens);
 
-        // Chunky jdou přes podepsanou URL — Bearer hlavička na CDN nepatří.
+        // Chunks go through a signed URL — a Bearer header has no place on the CDN.
         var cdn = GogHttpFactory.Create(options);
 
         var limiter = new RateLimiter(options.MaxBytesPerSecond);
@@ -143,26 +143,26 @@ internal static class Cli
 
         if (!flags.TryGetValue("code", out var raw))
         {
-            Console.WriteLine("Otevři v prohlížeči a přihlas se:");
+            Console.WriteLine("Open this in a browser and log in:");
             Console.WriteLine();
             Console.WriteLine("  " + GogConstants.LoginUrl);
             Console.WriteLine();
-            Console.WriteLine("Po přihlášení skončíš na prázdné stránce. Zkopíruj z adresního řádku");
-            Console.WriteLine("celou URL (obsahuje ?code=...) a vlož ji sem:");
+            Console.WriteLine("After logging in you will land on a blank page. Copy the whole URL");
+            Console.WriteLine("from the address bar (it contains ?code=...) and paste it here:");
             Console.Write("> ");
             raw = Console.ReadLine() ?? "";
         }
 
         if (GogAuthClient.ExtractCode(raw) is not { Length: > 0 } code)
         {
-            Console.Error.WriteLine("V zadaném vstupu není authorization code.");
+            Console.Error.WriteLine("No authorization code in the given input.");
             return 1;
         }
 
         var tokens = await auth.ExchangeCodeAsync(code, ct);
         await store.SaveAsync(tokens, ct);
 
-        Console.WriteLine($"Přihlášeno. Token uložen do {store.Path}");
+        Console.WriteLine($"Logged in. Token saved to {store.Path}");
         return 0;
     }
 
@@ -171,21 +171,21 @@ internal static class Cli
         var tokens = await new TokenStore().LoadAsync(ct);
         if (tokens is null)
         {
-            Console.WriteLine("Nepřihlášen. Spusť: gogdl auth login");
+            Console.WriteLine("Not logged in. Run: gogdl auth login");
             return 1;
         }
 
         var state = tokens.IsExpired
-            ? "vypršel (obnoví se sám)"
-            : $"platný do {tokens.ExpiresAt.ToLocalTime():HH:mm:ss}";
-        Console.WriteLine($"Přihlášen jako user_id={tokens.UserId}, access token {state}.");
+            ? "expired (will refresh itself)"
+            : $"valid until {tokens.ExpiresAt.ToLocalTime():HH:mm:ss}";
+        Console.WriteLine($"Logged in as user_id={tokens.UserId}, access token {state}.");
         return 0;
     }
 
     private static int AuthLogout()
     {
         new TokenStore().Delete();
-        Console.WriteLine("Token smazán.");
+        Console.WriteLine("Token deleted.");
         return 0;
     }
 
@@ -194,14 +194,14 @@ internal static class Cli
         var (api, options) = CreateApi(flags);
 
         if (options.MaxBytesPerSecond > 0)
-            Console.Error.WriteLine("Pozn.: --limit-rate zatím nemá efekt, uplatní se až u stahování her.");
+            Console.Error.WriteLine("Note: --limit-rate has no effect here, it applies to game downloads.");
 
-        Console.Error.WriteLine($"Načítám knihovnu ({options.MaxConnections} spojení)...");
+        Console.Error.WriteLine($"Fetching library ({options.MaxConnections} connections)...");
 
         var progress = new Progress<(int Done, int Total)>(p =>
         {
             if (p.Done % 10 == 0 || p.Done == p.Total)
-                Console.Error.Write($"\r  {p.Done}/{p.Total} her");
+                Console.Error.Write($"\r  {p.Done}/{p.Total} games");
         });
 
         var sync = new LibrarySync(api, options.MaxConnections);
@@ -211,9 +211,9 @@ internal static class Cli
         var path = LibrarySnapshot.DefaultPath();
         await snapshot.SaveAsync(path, ct);
 
-        Console.WriteLine($"Uloženo {snapshot.Games.Count} her do {path}");
+        Console.WriteLine($"Saved {snapshot.Games.Count} games to {path}");
         if (snapshot.Failures.Count > 0)
-            Console.WriteLine($"Nepodařilo se načíst {snapshot.Failures.Count} her (viz snapshot).");
+            Console.WriteLine($"Failed to load {snapshot.Failures.Count} games (see the snapshot).");
 
         return 0;
     }
@@ -223,11 +223,11 @@ internal static class Cli
         var snapshot = await LibrarySnapshot.LoadAsync(LibrarySnapshot.DefaultPath(), ct);
         if (snapshot is null)
         {
-            Console.Error.WriteLine("Snapshot chybí. Spusť nejdřív: gogdl library sync");
+            Console.Error.WriteLine("No snapshot. Run first: gogdl library sync");
             return 1;
         }
 
-        Console.WriteLine($"Snapshot z {snapshot.SyncedAt.ToLocalTime():yyyy-MM-dd HH:mm}, {snapshot.Games.Count} her.");
+        Console.WriteLine($"Snapshot from {snapshot.SyncedAt.ToLocalTime():yyyy-MM-dd HH:mm}, {snapshot.Games.Count} games.");
         Console.WriteLine();
 
         foreach (var platform in Enum.GetValues<GamePlatform>())
@@ -242,24 +242,24 @@ internal static class Cli
             var size = present.Sum(p => p.LargestInstallerSize);
 
             Console.WriteLine(
-                $"{platform,-8} {present.Count,4} her   depot: {depot,4}   " +
-                $"jen instalátor: {installerOnly,4}   ~{Gib(size):N0} GiB");
+                $"{platform,-8} {present.Count,4} games   depot: {depot,4}   " +
+                $"installer only: {installerOnly,4}   ~{Gib(size):N0} GiB");
         }
 
         Console.WriteLine();
 
-        // Tohle je číslo, kvůli kterému sync vznikl: kolik titulů by potřebovalo
-        // innoextract/Wine, protože pro ně Galaxy depot neexistuje.
+        // This is the number the sync exists for: how many titles would need
+        // innoextract/Wine because no Galaxy depot exists for them.
         var needsInstallerPath = snapshot.Games
             .Where(g => new[] { GamePlatform.Windows, GamePlatform.Mac }
                 .Any(p => g.Platforms.GetValueOrDefault(p) is { HasDepot: false, HasInstaller: true }))
             .ToList();
 
-        Console.WriteLine($"Windows/macOS titulů bez depotu: {needsInstallerPath.Count}");
+        Console.WriteLine($"Windows/macOS titles without a depot: {needsInstallerPath.Count}");
         foreach (var game in needsInstallerPath.Take(30))
             Console.WriteLine($"  {game.Title}");
         if (needsInstallerPath.Count > 30)
-            Console.WriteLine($"  ... a dalších {needsInstallerPath.Count - 30}");
+            Console.WriteLine($"  ... and {needsInstallerPath.Count - 30} more");
 
         return 0;
     }
@@ -270,14 +270,14 @@ internal static class Cli
         var needle = args.Skip(1).FirstOrDefault(a => !a.StartsWith('-'));
         if (needle is null)
         {
-            Console.Error.WriteLine("Chybí hra. Použití: gogdl download <slug|id>");
+            Console.Error.WriteLine("Missing game. Usage: gogdl download <slug|id>");
             return 1;
         }
 
         var snapshot = await LibrarySnapshot.LoadAsync(LibrarySnapshot.DefaultPath(), ct);
         if (snapshot is null)
         {
-            Console.Error.WriteLine("Snapshot chybí. Spusť nejdřív: gogdl library sync");
+            Console.Error.WriteLine("No snapshot. Run first: gogdl library sync");
             return 1;
         }
 
@@ -287,14 +287,14 @@ internal static class Cli
 
         if (game is null)
         {
-            Console.Error.WriteLine($"Hra '{needle}' není ve snapshotu knihovny.");
+            Console.Error.WriteLine($"Game '{needle}' is not in the library snapshot.");
             return 1;
         }
 
         var platformName = flags.GetValueOrDefault("platform", "windows");
         if (GamePlatformExtensions.FromApiName(platformName) is not { } platform)
         {
-            Console.Error.WriteLine($"Neznámá platforma '{platformName}'. Použij windows, mac nebo linux.");
+            Console.Error.WriteLine($"Unknown platform '{platformName}'. Use windows, mac or linux.");
             return 1;
         }
 
@@ -319,13 +319,13 @@ internal static class Cli
         switch (result.Outcome)
         {
             case DownloadOutcome.Completed:
-                Console.WriteLine($"Hotovo: {result.ArchivePath}");
+                Console.WriteLine($"Done: {result.ArchivePath}");
                 return 0;
             case DownloadOutcome.AlreadyDone:
                 Console.WriteLine(result.Detail);
                 return 0;
             default:
-                Console.Error.WriteLine($"Přeskočeno: {result.Detail}");
+                Console.Error.WriteLine($"Skipped: {result.Detail}");
                 return 3;
         }
     }
@@ -333,7 +333,7 @@ internal static class Cli
     private static double Gib(long bytes) => bytes / 1024d / 1024d / 1024d;
 }
 
-/// <summary>Přepisuje jeden řádek, ne aby to zaplavilo terminál.</summary>
+/// <summary>Rewrites a single line instead of flooding the terminal.</summary>
 internal sealed class ConsoleProgress : IProgress<DownloadProgress>
 {
     private readonly long _startedAt = Stopwatch.GetTimestamp();
@@ -351,6 +351,6 @@ internal sealed class ConsoleProgress : IProgress<DownloadProgress>
         var percent = p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes : 0;
 
         Console.Error.Write(
-            $"\r  {p.Phase,-8} {percent,5:F1} %  {p.Files}/{p.TotalFiles} souborů  {speed,6:F1} MiB/s   ");
+            $"\r  {p.Phase,-8} {percent,5:F1} %  {p.Files}/{p.TotalFiles} files  {speed,6:F1} MiB/s   ");
     }
 }

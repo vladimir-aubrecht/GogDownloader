@@ -11,12 +11,12 @@ public sealed record GogTokens
     [JsonPropertyName("expires_in")] public int ExpiresIn { get; init; }
     [JsonPropertyName("user_id")] public string UserId { get; init; } = "";
 
-    /// <summary>Doplňujeme sami — GOG ho neposílá. Bez něj nejde spočítat expiraci.</summary>
+    /// <summary>We add this ourselves — GOG does not send it. Without it expiry cannot be computed.</summary>
     [JsonPropertyName("obtained_at")] public DateTimeOffset ObtainedAt { get; init; } = DateTimeOffset.UtcNow;
 
     public DateTimeOffset ExpiresAt => ObtainedAt.AddSeconds(ExpiresIn);
 
-    /// <summary>Minutu před koncem platnosti už token považujeme za mrtvý.</summary>
+    /// <summary>A token is treated as dead one minute before it actually expires.</summary>
     public bool IsExpired => DateTimeOffset.UtcNow >= ExpiresAt.AddMinutes(-1);
 }
 
@@ -41,7 +41,7 @@ public sealed class TokenStore(string? path = null)
     {
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
 
-        // Zápis přes temp + přesun, ať výpadek nenechá půlku tokenu.
+        // Write to a temp file and move, so a crash cannot leave half a token behind.
         var tmp = Path + ".tmp";
         await using (var stream = File.Create(tmp))
             await JsonSerializer.SerializeAsync(stream, tokens, Json, ct);
@@ -87,14 +87,14 @@ public sealed class GogAuthClient(HttpClient http)
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(ct);
-            throw new GogAuthException($"GOG odmítl autentizaci ({(int)response.StatusCode}): {body}");
+            throw new GogAuthException($"GOG rejected authentication ({(int)response.StatusCode}): {body}");
         }
 
         return await response.Content.ReadFromJsonAsync<GogTokens>(cancellationToken: ct)
-               ?? throw new GogAuthException("GOG vrátil prázdnou odpověď na žádost o token.");
+               ?? throw new GogAuthException("GOG returned an empty response to the token request.");
     }
 
-    /// <summary>Z celé redirect URL i z holého kódu vytáhne authorization code.</summary>
+    /// <summary>Extracts the authorization code from a full redirect URL or a bare code.</summary>
     public static string? ExtractCode(string input)
     {
         input = input.Trim();
@@ -113,7 +113,7 @@ public sealed class GogAuthClient(HttpClient http)
     }
 }
 
-/// <summary>Drží platný access token a obnovuje ho, když vyprší.</summary>
+/// <summary>Holds a valid access token and refreshes it when it expires.</summary>
 public sealed class TokenProvider(TokenStore store, GogAuthClient auth)
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
@@ -125,7 +125,7 @@ public sealed class TokenProvider(TokenStore store, GogAuthClient auth)
         try
         {
             _cached ??= await store.LoadAsync(ct)
-                        ?? throw new GogAuthException("Nejsi přihlášen. Spusť: gogdl auth login");
+                        ?? throw new GogAuthException("Not logged in. Run: gogdl auth login");
 
             if (forceRefresh || _cached.IsExpired)
             {

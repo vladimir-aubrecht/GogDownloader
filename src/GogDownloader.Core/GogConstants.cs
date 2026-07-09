@@ -1,6 +1,6 @@
 namespace GogDownloader.Core;
 
-/// <summary>Ověřené hodnoty, viz docs/gog-api.md.</summary>
+/// <summary>Verified values, see docs/gog-api.md.</summary>
 public static class GogConstants
 {
     public const string Auth = "https://auth.gog.com";
@@ -9,7 +9,7 @@ public static class GogConstants
     public const string ContentSystem = "https://content-system.gog.com";
     public const string Cdn = "https://gog-cdn-fastly.gog.com";
 
-    // Veřejné credentials Galaxy klienta.
+    // Public credentials of the Galaxy client.
     public const string ClientId = "46899977096215655";
     public const string ClientSecret = "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9";
     public const string RedirectUri = "https://embed.gog.com/on_login_success?origin=client";
@@ -21,7 +21,7 @@ public static class GogConstants
 }
 
 /// <summary>
-/// api.gog.com říká macOS "mac", content-system.gog.com říká "osx". Nemíchat.
+/// api.gog.com calls macOS "mac", content-system.gog.com calls it "osx". Do not mix them up.
 /// </summary>
 public enum GamePlatform
 {
@@ -32,7 +32,7 @@ public enum GamePlatform
 
 public static class GamePlatformExtensions
 {
-    /// <summary>Tvar, který používá api.gog.com v downloads.installers[].os.</summary>
+    /// <summary>The spelling api.gog.com uses in downloads.installers[].os.</summary>
     public static string ApiName(this GamePlatform p) => p switch
     {
         GamePlatform.Windows => "windows",
@@ -41,7 +41,7 @@ public static class GamePlatformExtensions
         _ => throw new ArgumentOutOfRangeException(nameof(p)),
     };
 
-    /// <summary>Tvar, který používá content-system.gog.com v /os/{platform}/builds.</summary>
+    /// <summary>The spelling content-system.gog.com uses in /os/{platform}/builds.</summary>
     public static string ContentSystemName(this GamePlatform p) => p switch
     {
         GamePlatform.Windows => "windows",

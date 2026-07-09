@@ -8,13 +8,13 @@ public sealed record BuildRef(string BuildId, int Generation, string? VersionNam
 
 public sealed record InstallerRef(string Language, string? Version, long TotalSize);
 
-/// <summary>Jak lze danou platformu dané hry získat.</summary>
+/// <summary>How a given platform of a given game can be obtained.</summary>
 public sealed record PlatformAvailability
 {
-    /// <summary>Galaxy depot. Null = hra ho pro tuhle platformu nemá.</summary>
+    /// <summary>Galaxy depot. Null means the game has none for this platform.</summary>
     public BuildRef? Depot { get; init; }
 
-    /// <summary>Offline instalátory z api.gog.com.</summary>
+    /// <summary>Offline installers from api.gog.com.</summary>
     public List<InstallerRef> Installers { get; init; } = [];
 
     public bool HasDepot => Depot is not null;
@@ -32,7 +32,7 @@ public sealed record LibraryEntry
 
     public Dictionary<GamePlatform, PlatformAvailability> Platforms { get; init; } = [];
 
-    /// <summary>Adresář na disku. Nikdy ne podle titulu — viz CLAUDE.md.</summary>
+    /// <summary>Directory on disk. Never derived from the title — see CLAUDE.md.</summary>
     public string DirectoryName => $"{Slug}__{Id}";
 }
 
@@ -41,7 +41,7 @@ public sealed record LibrarySnapshot
     public DateTimeOffset SyncedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<LibraryEntry> Games { get; init; } = [];
 
-    /// <summary>Hry, které se nepodařilo načíst — ať sync nespadne kvůli jedné.</summary>
+    /// <summary>Games that failed to load — one bad game must not fail the whole sync.</summary>
     public Dictionary<long, string> Failures { get; init; } = [];
 
     private static readonly JsonSerializerOptions Json = new()
@@ -116,7 +116,7 @@ public sealed class LibrarySync(GogApiClient api, int maxParallelism)
 
         var platforms = new Dictionary<GamePlatform, PlatformAvailability>();
 
-        // Instalátory rozřadíme podle platformy.
+        // Bucket the installers by platform.
         var installers = new Dictionary<GamePlatform, List<InstallerRef>>();
         foreach (var installer in product.Downloads?.Installers ?? [])
         {
@@ -126,7 +126,7 @@ public sealed class LibrarySync(GogApiClient api, int maxParallelism)
             list.Add(new InstallerRef(installer.Language, installer.Version, installer.TotalSize));
         }
 
-        // Depoty existují jen pro Windows a macOS. Linux jde vždy přes instalátor.
+        // Depots exist only for Windows and macOS. Linux always goes through an installer.
         foreach (var platform in DepotPlatforms)
         {
             var build = await api.GetLatestBuildAsync(id, platform, ct);

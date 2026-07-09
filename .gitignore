@@ -2,10 +2,10 @@ bin/
 obj/
 *.user
 
-# Tokeny GOG — nikdy necommitovat
+# GOG tokens — never commit these
 .gogdl/
 *.token.json
 
-# Výstup stahování
+# Download output
 gog-backup/
 .gogdl-staging/

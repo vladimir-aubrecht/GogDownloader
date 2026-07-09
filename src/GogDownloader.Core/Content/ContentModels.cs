@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace GogDownloader.Core.Content;
 
-/// <summary>Hash → cesta na CDN: `abcdef…` se mapuje na `ab/cd/abcdef…`.</summary>
+/// <summary>Hash to CDN path: `abcdef…` maps to `ab/cd/abcdef…`.</summary>
 public static class GalaxyPath
 {
     public static string For(string hash) =>
@@ -24,12 +24,12 @@ public sealed record DepotRef
     [JsonPropertyName("size")] public long Size { get; init; }
     [JsonPropertyName("compressedSize")] public long CompressedSize { get; init; }
 
-    /// <summary>`*` znamená jazykově neutrální depot (binárky, assety).</summary>
+    /// <summary>`*` means a language-neutral depot (binaries, assets).</summary>
     public bool MatchesLanguage(string language) =>
         Languages.Any(l => l == "*" || string.Equals(l, language, StringComparison.OrdinalIgnoreCase));
 }
 
-/// <summary>Obsah `build.repository_manifest` po zlib dekompresi.</summary>
+/// <summary>The contents of `build.repository_manifest` after zlib decompression.</summary>
 public sealed record RepositoryManifest
 {
     [JsonPropertyName("version")] public int Version { get; init; }
@@ -38,7 +38,7 @@ public sealed record RepositoryManifest
     [JsonPropertyName("installDirectory")] public string InstallDirectory { get; init; } = "";
     [JsonPropertyName("dependencies")] public List<string> Dependencies { get; init; } = [];
 
-    /// <summary>Základní hra a všechna její DLC — jediný zdroj seznamu DLC.</summary>
+    /// <summary>The base game and all its DLC — the only source of the DLC list.</summary>
     [JsonPropertyName("products")] public List<RepositoryProduct> Products { get; init; } = [];
 
     [JsonPropertyName("depots")] public List<DepotRef> Depots { get; init; } = [];
@@ -65,7 +65,7 @@ public sealed record DepotItem
     public bool IsSupport => Flags.Contains("support");
     public long Size => Chunks.Sum(c => c.Size);
 
-    /// <summary>Identita souboru pro pozdější diff. Jednochunkové soubory `md5` nemívají.</summary>
+    /// <summary>File identity for a later diff. Single-chunk files usually lack `md5`.</summary>
     public string? Identity => Md5 ?? (Chunks.Count == 1 ? Chunks[0].Md5 : Sha256);
 }
 
@@ -86,8 +86,8 @@ public sealed record SecureLinkEndpoint
     [JsonPropertyName("priority")] public int Priority { get; init; }
 
     /// <summary>
-    /// Do `parameters["path"]` se připojí galaxy_path chunku a teprve pak se hodnoty
-    /// dosadí do `url_format`. Pořadí je podstatné — viz docs/gog-api.md.
+    /// The chunk's galaxy_path is appended to `parameters["path"]` and only then are the
+    /// values substituted into `url_format`. The order matters — see docs/gog-api.md.
     /// </summary>
     public string ChunkUrl(string compressedMd5)
     {
@@ -112,8 +112,8 @@ public sealed record SecureLinkResponse
     [JsonPropertyName("urls")] public List<SecureLinkEndpoint> Urls { get; init; } = [];
 }
 
-/// <summary>Podepsaná URL vypršela. Není to chyba stahování — stačí si říct o novou.</summary>
+/// <summary>The signed URL expired. Not a download failure — just ask for a new one.</summary>
 public sealed class SecureLinkExpiredException : Exception;
 
 public sealed class ChunkChecksumException(string expected, string actual)
-    : Exception($"Chunk má MD5 {actual}, čekalo se {expected}.");
+    : Exception($"Chunk MD5 is {actual}, expected {expected}.");

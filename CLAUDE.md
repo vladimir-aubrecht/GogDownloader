@@ -1,48 +1,55 @@
 # GogDownloader
 
-Záloha vlastních her z GOG do portable zipů. C# / .NET 9, běží na Linux, Windows i macOS.
+Backs up games you own on GOG into portable zips. C# / .NET 9, runs on Linux, Windows and macOS.
 
-## Než sáhneš na GOG API
+## Language
 
-Přečti `docs/gog-api.md`. Je to ověřená cache endpointů — GOG nemá veřejnou dokumentaci.
-**Nehledej endpointy na webu.** Obnovu dělá `scripts/refresh-gog-api-ref.sh`.
+Everything in this repository is **English**: code, comments, XML docs, commit messages,
+documentation, scripts and the application's console output. Chat with the maintainer
+happens in Czech, but none of that ever lands in a file.
 
-## Rozhodnutí, která už padla
+## Before you touch the GOG API
 
-- **Path A (primární):** Galaxy content-system depoty pro `windows` a `osx`. Stahují se
-  rovnou soubory nainstalované hry po chunkách. Žádná konverze instalátoru.
-- **Path B (Linux):** Galaxy depoty pro Linux neexistují. Linux verze jsou MojoSetup
-  instalátory (shell skript + ZIP payload). Čtou se přes HTTP Range — instalátor se
-  nikdy nestahuje celý. Tahle cesta je nevyhnutelná, ne spekulativní.
-- **Path C (Inno Setup / Wine):** jen pro Windows/macOS tituly bez depotu. **Zatím se
-  neimplementuje.** Nejdřív `library sync` ukáže, kolik takových titulů reálně je.
-  V první verzi se přeskočí a nahlásí.
-- **DLC:** vlastněná DLC patří do zipu. Seznam DLC je `products[]` přímo v repository
-  manifestu, protne se s vlastněnými id — žádné extra volání API.
-- **Redistributables** (`dependencies` v manifestu): **nestahují se.** Zapíšou se do
-  `.gogdl.json` jako `skippedDependencies`, ať je vidět, co hra chtěla.
-- **Archiv:** zip všude. Symlinky se dereferencují, unixová práva neřešíme — uživatel
-  to výslovně odsouhlasil a řeší si to mimo tento projekt.
-- **Spolehlivost:** práce ve staging adresáři, do cíle jen atomický `File.Move`.
-  Manifest `.gogdl.json` se zapisuje **jako úplně poslední krok** — dokud není, hra je
-  z pohledu toolu nestažená a restart ji udělá znovu. Poškozený „hotový" stav nevznikne.
-- **Idempotence a patche:** manifest nese hashe po jednotlivých souborech. Patch stáhne
-  jen chunky změněných souborů, zbytek vytáhne ze starého zipu (ten slouží jako cache).
-- **Názvy adresářů** `{slug}__{gameId}`, nikdy podle titulu (`:`, `CON`/`AUX`, MAX_PATH,
-  shoda napříč OS).
-- **Uživatel řídí** rychlost stahování i počet souběžných spojení.
+Read `docs/gog-api.md`. It is a verified cache of endpoints — GOG has no public
+documentation. **Do not go hunting for endpoints on the web.** Refresh it with
+`scripts/refresh-gog-api-ref.sh`.
 
-## Past, na kterou se dá naletět
+## Decisions already made
 
-`api.gog.com` používá pro macOS řetězec `mac`, ale `content-system.gog.com` používá
-`osx`. Nemíchat.
+- **Path A (primary):** Galaxy content-system depots for `windows` and `osx`. The installed
+  game files are downloaded directly, chunk by chunk. No installer conversion.
+- **Path B (Linux):** Galaxy depots do not exist for Linux. Linux builds are MojoSetup
+  installers (shell script + ZIP payload). They are read over HTTP Range — the installer is
+  never downloaded in full. This path is unavoidable, not speculative.
+- **Path C (Inno Setup / Wine):** only for Windows/macOS titles with no depot. **Not
+  implemented yet.** `library stats` on the real library reports 24 such titles, mostly old
+  bundles and compilations (Ultima, Might and Magic, Commandos 2+3).
+- **DLC:** owned DLC belongs in the zip. The DLC list is `products[]` straight from the
+  repository manifest, intersected with owned ids — no extra API call.
+- **Redistributables** (`dependencies` in the manifest): **not downloaded.** They are
+  recorded in `.gogdl.json` as `skippedDependencies` so it stays visible what the game wanted.
+- **Archive:** zip everywhere. Symlinks are dereferenced; unix permissions are not preserved —
+  the user explicitly agreed and handles that outside this project.
+- **Reliability:** work in a staging directory, only an atomic `File.Move` into the target.
+  The `.gogdl.json` manifest is written **as the very last step** — until it exists the game
+  counts as not downloaded and a restart redoes it. A corrupted "done" state cannot arise.
+- **Idempotence and patches:** the manifest carries per-file hashes. A patch downloads only
+  the chunks of changed files and pulls the rest out of the old zip (which acts as a cache).
+- **Directory names** are `{slug}__{gameId}`, never derived from the title (`:`, `CON`/`AUX`,
+  MAX_PATH, matching across operating systems).
+- **The user controls** download speed and the number of concurrent connections.
 
-## Zásady práce na tomhle projektu
+## A trap you can fall into
 
-- Neimplementovat featury, u kterých není prokázáno, že je knihovna uživatele potřebuje.
-  Když si nejsem jistý, zeptat se — ne psát kód pro jistotu.
-- Drahá zjištění ukládat do `docs/`, ne je odvozovat znovu v každé session.
-- Odhady velikosti a počtů brát z reálných dat (`library sync`), ne z hlavy.
+`api.gog.com` uses the string `mac` for macOS, but `content-system.gog.com` uses `osx`.
+Do not mix them up.
+
+## Working principles for this project
+
+- Do not implement features until it is proven the user's library needs them. When in doubt,
+  ask — do not write code just in case.
+- Store expensive findings in `docs/`, do not re-derive them every session.
+- Take size and count estimates from real data (`library sync`), not from memory.
 
 ## Build
 
@@ -51,9 +58,9 @@ dotnet build
 dotnet run --project src/GogDownloader.Cli -- <command>
 ```
 
-Pozn.: `dotnet run -v q --nologo -- <command>` argumenty spolkne. Používej tvar výše.
+Note: `dotnet run -v q --nologo -- <command>` swallows the arguments. Use the form above.
 
 ## Release
 
-**Push = release.** Každý push zvedne verzi v `Directory.Build.props` (started 0.1.0)
-a dostane tag `vX.Y.Z`. Nepushovat rozdělanou práci.
+**A push is a release.** Every push bumps the version in `Directory.Build.props` (started at
+0.1.0) and gets a `vX.Y.Z` tag. Do not push work in progress.

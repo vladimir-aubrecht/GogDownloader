@@ -48,6 +48,8 @@ internal static class Cli
             "auth logout" => AuthLogout(),
             "library sync" => await LibrarySyncAsync(flags, ct),
             "library stats" => await LibraryStatsAsync(ct),
+            _ when command.StartsWith("library list", StringComparison.Ordinal)
+                => await LibraryListAsync(args, flags, ct),
             _ when command.StartsWith("download", StringComparison.Ordinal)
                 => await DownloadAsync(args, flags, ct),
             _ => Usage(),
@@ -64,6 +66,9 @@ internal static class Cli
               auth logout                      forget the token
 
               library sync [--connections N]   fetch the library from GOG and save a snapshot
+              library list [text]              list games and their slugs, filtered by text
+                --platform windows|mac|linux   only games available for this platform
+                --depot                        only games with a Galaxy depot (downloadable now)
               library stats                    library breakdown by depot availability
 
               download <slug|id>               download a game from Galaxy depots into a zip
@@ -216,6 +221,85 @@ internal static class Cli
             Console.WriteLine($"Failed to load {snapshot.Failures.Count} games (see the snapshot).");
 
         return 0;
+    }
+
+    private static async Task<int> LibraryListAsync(
+        string[] args, Dictionary<string, string> flags, CancellationToken ct)
+    {
+        var snapshot = await LibrarySnapshot.LoadAsync(LibrarySnapshot.DefaultPath(), ct);
+        if (snapshot is null)
+        {
+            Console.Error.WriteLine("No snapshot. Run first: gogdl library sync");
+            return 1;
+        }
+
+        // Everything after "library list" that is not a flag is the search text.
+        var search = string.Join(' ', args.Skip(2).TakeWhile(a => !a.StartsWith('-')));
+
+        GamePlatform? platform = null;
+        if (flags.TryGetValue("platform", out var platformName))
+        {
+            platform = GamePlatformExtensions.FromApiName(platformName);
+            if (platform is null)
+            {
+                Console.Error.WriteLine($"Unknown platform '{platformName}'. Use windows, mac or linux.");
+                return 1;
+            }
+        }
+
+        var depotOnly = flags.ContainsKey("depot");
+
+        var games = snapshot.Games
+            .Where(g => search.Length == 0
+                        || g.Title.Contains(search, StringComparison.OrdinalIgnoreCase)
+                        || g.Slug.Contains(search, StringComparison.OrdinalIgnoreCase))
+            .Where(g => platform is null || g.Platforms.ContainsKey(platform.Value))
+            .Where(g => !depotOnly || Depots(g, platform).Any())
+            .ToList();
+
+        if (games.Count == 0)
+        {
+            Console.Error.WriteLine("Nothing matches.");
+            return 1;
+        }
+
+        var slugWidth = Math.Min(games.Max(g => g.Slug.Length), 44);
+
+        foreach (var game in games)
+        {
+            var depots = string.Join(",", Depots(game, platform).Select(p => Short(p)));
+            var installers = string.Join(",", game.Platforms
+                .Where(kv => (platform is null || kv.Key == platform) && !kv.Value.HasDepot && kv.Value.HasInstaller)
+                .Select(kv => Short(kv.Key)));
+
+            var availability = (depots.Length, installers.Length) switch
+            {
+                (0, 0) => "-",
+                (_, 0) => depots,
+                (0, _) => $"({installers})",
+                _ => $"{depots} ({installers})",
+            };
+
+            Console.WriteLine($"{game.Slug.PadRight(slugWidth)}  {availability,-22}  {game.Title}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"{games.Count} {(games.Count == 1 ? "game" : "games")}. " +
+                          "Plain = Galaxy depot, (parentheses) = installer only, not downloadable yet.");
+        Console.WriteLine("Pass the slug to: gogdl download <slug>");
+        return 0;
+
+        static IEnumerable<GamePlatform> Depots(LibraryEntry game, GamePlatform? only) =>
+            game.Platforms
+                .Where(kv => (only is null || kv.Key == only) && kv.Value.HasDepot)
+                .Select(kv => kv.Key);
+
+        static string Short(GamePlatform p) => p switch
+        {
+            GamePlatform.Windows => "win",
+            GamePlatform.Mac => "osx",
+            _ => "lin",
+        };
     }
 
     private static async Task<int> LibraryStatsAsync(CancellationToken ct)

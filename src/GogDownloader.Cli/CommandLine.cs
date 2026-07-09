@@ -56,6 +56,9 @@ public static class CommandLine
               library stats                    library breakdown by depot availability
 
               download <slug|id>               download a game from Galaxy depots into a zip
+              download --all [text]            download every matching game with a depot
+                --dlc                          of those, only games with owned DLC
+                --dry-run                      list what would be downloaded, then stop
                 --platform windows|mac|linux   default windows
                 --language en                  default en
                 --out DIR                      default ./gog-backup
@@ -73,19 +76,54 @@ public static class CommandLine
         return 1;
     }
 
+    /// <summary>
+    /// Flags that take no value. Without this list `download --all witcher` swallows the search
+    /// text as the value of `--all`, and `download --force witcher` loses the game name.
+    /// </summary>
+    private static readonly HashSet<string> Switches = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "dry-run",
+    };
+
     public static Dictionary<string, string> ParseFlags(string[] args)
     {
         var flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < args.Length; i++)
         {
             if (!args[i].StartsWith("--", StringComparison.Ordinal)) continue;
+
             var key = args[i][2..];
-            var value = i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal)
-                ? args[++i]
-                : "true";
-            flags[key] = value;
+            var takesValue = !Switches.Contains(key)
+                             && i + 1 < args.Length
+                             && !args[i + 1].StartsWith("--", StringComparison.Ordinal);
+
+            flags[key] = takesValue ? args[++i] : "true";
         }
         return flags;
+    }
+
+    /// <summary>
+    /// The arguments that are neither a flag nor a flag's value: the command words, then the
+    /// game or the search text. Anything else would mistake `windows` in `--platform windows`
+    /// for a game name.
+    /// </summary>
+    public static List<string> Positionals(string[] args)
+    {
+        var positionals = new List<string>();
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (!args[i].StartsWith("--", StringComparison.Ordinal))
+            {
+                positionals.Add(args[i]);
+                continue;
+            }
+
+            if (!Switches.Contains(args[i][2..])
+                && i + 1 < args.Length
+                && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                i++;   // skip the value
+        }
+        return positionals;
     }
 
     /// <summary>

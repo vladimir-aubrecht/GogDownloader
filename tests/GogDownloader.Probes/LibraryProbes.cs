@@ -44,6 +44,22 @@ public static class LibraryProbes
             new LibrarySnapshot { SchemaVersion = 5 } is { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true });
         Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 5);
 
+        Probe.Group("Argument parsing");
+        // A switch that swallows the next word turns `download --all witcher` into a request
+        // for every game, and `download --force x` into a request for nothing.
+        var flags = CommandLine.ParseFlags(["download", "--all", "witcher", "--platform", "windows"]);
+        Probe.Check("a switch takes no value", flags["all"] == "true", flags["all"]);
+        Probe.Check("a valued flag still takes its value", flags["platform"] == "windows");
+        Probe.Check("the word after a switch stays positional",
+            CommandLine.Positionals(["download", "--all", "witcher", "--platform", "windows"]) is ["download", "witcher"]);
+        Probe.Check("a flag's value is not positional",
+            CommandLine.Positionals(["download", "ftl", "--platform", "windows"]) is ["download", "ftl"]);
+        Probe.Check("a trailing switch parses",
+            CommandLine.ParseFlags(["download", "ftl", "--force"])["force"] == "true");
+        Probe.Check("--force does not eat the game name",
+            CommandLine.Positionals(["download", "--force", "ftl"]) is ["download", "ftl"]);
+        Probe.Check("no arguments yields nothing", CommandLine.Positionals([]).Count == 0);
+
         Probe.Group("Human-readable sizes");
         Probe.Check("an unknown size is a dash, not '0 B'", CommandLine.Bytes(0) == "-", CommandLine.Bytes(0));
         Probe.Check("bytes", CommandLine.Bytes(512) == "512 B", CommandLine.Bytes(512));

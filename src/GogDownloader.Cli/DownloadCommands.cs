@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using GogDownloader.Core;
 using GogDownloader.Core.Download;
+using GogDownloader.Core.Library;
 
 namespace GogDownloader.Cli;
 
@@ -9,44 +10,59 @@ public static class DownloadCommands
     public static async Task<int> RunAsync(
         string[] args, Dictionary<string, string> flags, CancellationToken ct)
     {
-        // Only positional arguments count. Scanning every argument would pick up a flag's
-        // value, so `download --platform windows` would try to download a game called
-        // "windows".
-        var needle = args.TakeWhile(a => !a.StartsWith('-')).Skip(1).FirstOrDefault();
-        if (needle is null)
-        {
-            Console.Error.WriteLine("Missing game. Usage: gogdl download <slug|id>");
-            return 1;
-        }
-
         if (await CommandLine.LoadSnapshotAsync(flags, ct) is not { } snapshot) return 1;
 
-        var game = snapshot.Games.FirstOrDefault(g =>
-            string.Equals(g.Slug, needle, StringComparison.OrdinalIgnoreCase)
-            || g.Id.ToString() == needle);
-
-        if (game is null)
-        {
-            Console.Error.WriteLine($"Game '{needle}' is not in the library snapshot.");
-            return 1;
-        }
-
-        if (!LibraryCommands.TryPlatform(flags, out var chosen)) return 1;
+        if (!GameFilter.TryPlatform(flags, out var chosen)) return 1;
         var platform = chosen ?? GamePlatform.Windows;
+
+        List<LibraryEntry> games;
+
+        if (flags.ContainsKey("all"))
+        {
+            // The same filter the listing uses, so what `library list` shows is what this takes.
+            // A game with no depot cannot be fetched at all, hence --depot is implied.
+            var search = GameFilter.SearchText(args, skip: 1);
+            games = GameFilter.Apply(snapshot, search, platform, depotOnly: true, dlcOnly: flags.ContainsKey("dlc"));
+
+            if (games.Count == 0)
+            {
+                Console.Error.WriteLine("Nothing matches.");
+                return 1;
+            }
+        }
+        else
+        {
+            var needle = CommandLine.Positionals(args).Skip(1).FirstOrDefault();
+            if (needle is null)
+            {
+                Console.Error.WriteLine("Missing game. Usage: gogdl download <slug|id>, or download --all");
+                return 1;
+            }
+
+            var game = snapshot.Games.FirstOrDefault(g =>
+                string.Equals(g.Slug, needle, StringComparison.OrdinalIgnoreCase)
+                || g.Id.ToString() == needle);
+
+            if (game is null)
+            {
+                Console.Error.WriteLine($"Game '{needle}' is not in the library snapshot.");
+                return 1;
+            }
+
+            games = [game];
+        }
 
         if (!snapshot.KnowsEarlyAccess)
             Console.Error.WriteLine(
                 "Note: this snapshot predates the early-access flag, so an (EA) game will be " +
                 "named without it. Refresh it with: gogdl library sync");
 
-        var (api, content, options) = CommandLine.CreateContent(flags);
-
         var downloadOptions = new DownloadOptions
         {
             OutputRoot = Path.GetFullPath(flags.GetValueOrDefault("out", "gog-backup")),
             Platform = platform,
             Language = flags.GetValueOrDefault("language", "en"),
-            MaxConnections = options.MaxConnections,
+            MaxConnections = CommandLine.OptionsFrom(flags).MaxConnections,
             StagingRoot = flags.TryGetValue("staging", out var staging) ? Path.GetFullPath(staging) : null,
             Force = flags.ContainsKey("force"),
             Clean = flags.ContainsKey("clean"),
@@ -56,37 +72,95 @@ public static class DownloadCommands
                 : Environment.ProcessorCount,
         };
 
-        Console.Error.WriteLine($"{game.Title} → {Path.Combine(downloadOptions.OutputRoot, game.DirectoryName)}");
+        var total = games.Sum(g => GameFilter.Size(g, platform));
+        Console.Error.WriteLine(
+            $"{games.Count} {(games.Count == 1 ? "game" : "games")} for {platform.ApiName()}, " +
+            $"{CommandLine.Bytes(total)} to download → {downloadOptions.OutputRoot}");
         Console.Error.WriteLine(
             $"staging in {downloadOptions.StagingDirectory}, " +
             $"zipping on {downloadOptions.MaxCompressionThreads} threads");
 
-        DownloadResult result;
-        try
+        if (flags.ContainsKey("dry-run"))
         {
-            result = await new GameDownloader(api, content)
-                .RunAsync(game, downloadOptions, new ConsoleProgress(), ct);
-        }
-        catch (DownloadInterruptedException interrupted)
-        {
-            OnInterrupted(interrupted.StagingDirectory, flags);
-            return 130;
+            foreach (var game in games)
+                Console.WriteLine($"{CommandLine.Bytes(GameFilter.Size(game, platform)),9}  {game.Title}");
+            Console.Error.WriteLine("\nDry run, nothing downloaded.");
+            return 0;
         }
 
+        return await DownloadEachAsync(games, downloadOptions, flags, ct);
+    }
+
+    private static async Task<int> DownloadEachAsync(
+        List<LibraryEntry> games, DownloadOptions options, Dictionary<string, string> flags, CancellationToken ct)
+    {
+        var (api, content, _) = CommandLine.CreateContent(flags);
+        var downloader = new GameDownloader(api, content);
+
+        var completed = new List<string>();
+        var skipped = new List<string>();
+        var failed = new List<string>();
+
+        for (var i = 0; i < games.Count; i++)
+        {
+            var game = games[i];
+            if (games.Count > 1)
+                Console.Error.WriteLine($"\n[{i + 1}/{games.Count}] {game.Title}");
+
+            DownloadResult result;
+            try
+            {
+                result = await downloader.RunAsync(game, options, new ConsoleProgress(), ct);
+            }
+            catch (DownloadInterruptedException interrupted)
+            {
+                Console.Error.WriteLine();
+                OnInterrupted(interrupted.StagingDirectory, flags);
+                Summarise(completed, skipped, failed, games.Count);
+                return 130;
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // One bad game must not abandon an overnight batch of two hundred.
+                Console.Error.WriteLine($"\nFailed: {e.Message}");
+                failed.Add(game.Title);
+                continue;
+            }
+
+            Console.Error.WriteLine();
+            switch (result.Outcome)
+            {
+                case DownloadOutcome.Completed:
+                    Console.WriteLine($"Done: {result.ArchivePath}");
+                    completed.Add(game.Title);
+                    break;
+                case DownloadOutcome.AlreadyDone:
+                    Console.WriteLine(result.Detail);
+                    skipped.Add(game.Title);
+                    break;
+                default:
+                    Console.Error.WriteLine($"Skipped: {result.Detail}");
+                    skipped.Add(game.Title);
+                    break;
+            }
+        }
+
+        if (games.Count > 1) Summarise(completed, skipped, failed, games.Count);
+
+        // A single game keeps its old exit codes; a batch fails only if something failed.
+        if (games.Count == 1)
+            return failed.Count > 0 ? 1 : skipped.Count > 0 && completed.Count == 0 ? 3 : 0;
+
+        return failed.Count > 0 ? 1 : 0;
+    }
+
+    private static void Summarise(List<string> completed, List<string> skipped, List<string> failed, int total)
+    {
         Console.Error.WriteLine();
+        Console.Error.WriteLine($"{completed.Count} downloaded, {skipped.Count} skipped, {failed.Count} failed, of {total}.");
 
-        switch (result.Outcome)
-        {
-            case DownloadOutcome.Completed:
-                Console.WriteLine($"Done: {result.ArchivePath}");
-                return 0;
-            case DownloadOutcome.AlreadyDone:
-                Console.WriteLine(result.Detail);
-                return 0;
-            default:
-                Console.Error.WriteLine($"Skipped: {result.Detail}");
-                return 3;
-        }
+        foreach (var title in failed)
+            Console.Error.WriteLine($"  failed: {title}");
     }
 
     /// <summary>

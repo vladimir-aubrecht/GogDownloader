@@ -52,5 +52,13 @@ expect "download rejects unknown game" "is not in the library"     gogdl downloa
 expect "download refuses generation 1" "only 2 is supported"       gogdl download ancient_bundle
 expect "download refuses no depot"    "No Galaxy depot"            gogdl download ultima_1_2_3 --platform linux
 
+# Batch mode must select exactly what `library list` shows.
+expect "download --all lists every depot game" "3 games for windows"  gogdl download --all --dry-run --platform windows
+expect "download --all honours the search"     "1 game for windows"   gogdl download --all witcher --dry-run --platform windows
+expect "download --all honours --dlc"          "1 game for windows"   gogdl download --all --dlc --dry-run --platform windows
+expect "download --all skips depotless games"  "Ancient Bundle"       gogdl download --all --dry-run --platform windows
+expect "download --all reports no matches"     "Nothing matches"      gogdl download --all zzzznope --dry-run
+expect "download --all rejects bad platform"   "Unknown platform"     gogdl download --all --dry-run --platform amiga
+
 echo
 echo "All checks passed."

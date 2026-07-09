@@ -38,10 +38,8 @@ public static class LibraryCommands
     {
         if (await CommandLine.LoadSnapshotAsync(flags, ct) is not { } snapshot) return 1;
 
-        // Everything after "library list" that is not a flag is the search text.
-        var search = string.Join(' ', args.Skip(2).TakeWhile(a => !a.StartsWith('-')));
-
-        if (!TryPlatform(flags, out var platform)) return 1;
+        var search = GameFilter.SearchText(args, skip: 2);
+        if (!GameFilter.TryPlatform(flags, out var platform)) return 1;
 
         var depotOnly = flags.ContainsKey("depot");
         var dlcOnly = flags.ContainsKey("dlc");
@@ -52,14 +50,7 @@ public static class LibraryCommands
                 "Note: this snapshot predates DLC and size tracking, so both will be missing. " +
                 "Refresh it with: gogdl library sync");
 
-        var games = snapshot.Games
-            .Where(g => search.Length == 0
-                        || g.Title.Contains(search, StringComparison.OrdinalIgnoreCase)
-                        || g.Slug.Contains(search, StringComparison.OrdinalIgnoreCase))
-            .Where(g => platform is null || g.Platforms.ContainsKey(platform.Value))
-            .Where(g => !depotOnly || Depots(g, platform).Any())
-            .Where(g => !dlcOnly || g.Dlcs.Count > 0)
-            .ToList();
+        var games = GameFilter.Apply(snapshot, search, platform, depotOnly, dlcOnly);
 
         if (games.Count == 0)
         {
@@ -78,7 +69,7 @@ public static class LibraryCommands
 
         foreach (var game in games)
         {
-            var depots = string.Join(",", Depots(game, platform).Select(Short));
+            var depots = string.Join(",", GameFilter.Depots(game, platform).Select(Short));
             var installers = string.Join(",", game.Platforms
                 .Where(kv => (platform is null || kv.Key == platform) && !kv.Value.HasDepot && kv.Value.HasInstaller)
                 .Select(kv => Short(kv.Key)));
@@ -94,14 +85,14 @@ public static class LibraryCommands
             var dlc = game.Dlcs.Count > 0 ? $"+{game.Dlcs.Count} DLC" : "";
 
             Console.WriteLine(
-                $"{game.Slug.PadRight(slugWidth)}  {availability,-16}  {CommandLine.Bytes(Size(game, platform)),9}  " +
+                $"{game.Slug.PadRight(slugWidth)}  {availability,-16}  {CommandLine.Bytes(GameFilter.Size(game, platform)),9}  " +
                 $"{dlc,-8}  {game.Title}");
         }
 
         // A single hit is usually someone inspecting one game before downloading it.
         if (games is [var only])
         {
-            if (Depots(only, platform).Select(p => only.Platforms[p]).FirstOrDefault() is { } depot)
+            if (GameFilter.Depots(only, platform).Select(p => only.Platforms[p]).FirstOrDefault() is { } depot)
             {
                 Console.WriteLine();
                 Console.WriteLine($"  download {CommandLine.Bytes(depot.DownloadSize)}, unpacked {CommandLine.Bytes(depot.InstalledSize)}");
@@ -119,7 +110,7 @@ public static class LibraryCommands
         Console.WriteLine();
         Console.WriteLine(
             $"{games.Count} {(games.Count == 1 ? "game" : "games")}, " +
-            $"{CommandLine.Bytes(games.Sum(g => Size(g, platform)))} to download. " +
+            $"{CommandLine.Bytes(games.Sum(g => GameFilter.Size(g, platform)))} to download. " +
             "Plain = Galaxy depot, (parentheses) = installer only, not downloadable yet.");
         Console.WriteLine("Pass the slug to: gogdl download <slug>");
         return 0;
@@ -166,29 +157,6 @@ public static class LibraryCommands
 
         return 0;
     }
-
-    public static bool TryPlatform(Dictionary<string, string> flags, out GamePlatform? platform)
-    {
-        platform = null;
-        if (!flags.TryGetValue("platform", out var name)) return true;
-
-        platform = GamePlatformExtensions.FromApiName(name);
-        if (platform is not null) return true;
-
-        Console.Error.WriteLine($"Unknown platform '{name}'. Use windows, mac or linux.");
-        return false;
-    }
-
-    private static IEnumerable<GamePlatform> Depots(LibraryEntry game, GamePlatform? only) =>
-        game.Platforms
-            .Where(kv => (only is null || kv.Key == only) && kv.Value.HasDepot)
-            .Select(kv => kv.Key);
-
-    private static long Size(LibraryEntry game, GamePlatform? only) =>
-        only is not null
-            ? game.Platforms.GetValueOrDefault(only.Value)?.BestKnownSize ?? 0
-            // No platform picked: one download per game, so the largest is the honest guess.
-            : game.Platforms.Values.Select(p => p.BestKnownSize).DefaultIfEmpty(0).Max();
 
     private static string Short(GamePlatform platform) => platform switch
     {

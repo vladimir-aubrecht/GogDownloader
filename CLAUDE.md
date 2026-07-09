@@ -17,6 +17,10 @@ Přečti `docs/gog-api.md`. Je to ověřená cache endpointů — GOG nemá veř
 - **Path C (Inno Setup / Wine):** jen pro Windows/macOS tituly bez depotu. **Zatím se
   neimplementuje.** Nejdřív `library sync` ukáže, kolik takových titulů reálně je.
   V první verzi se přeskočí a nahlásí.
+- **DLC:** vlastněná DLC patří do zipu. Seznam DLC je `products[]` přímo v repository
+  manifestu, protne se s vlastněnými id — žádné extra volání API.
+- **Redistributables** (`dependencies` v manifestu): **nestahují se.** Zapíšou se do
+  `.gogdl.json` jako `skippedDependencies`, ať je vidět, co hra chtěla.
 - **Archiv:** zip všude. Symlinky se dereferencují, unixová práva neřešíme — uživatel
   to výslovně odsouhlasil a řeší si to mimo tento projekt.
 - **Spolehlivost:** práce ve staging adresáři, do cíle jen atomický `File.Move`.
@@ -46,3 +50,10 @@ Přečti `docs/gog-api.md`. Je to ověřená cache endpointů — GOG nemá veř
 dotnet build
 dotnet run --project src/GogDownloader.Cli -- <command>
 ```
+
+Pozn.: `dotnet run -v q --nologo -- <command>` argumenty spolkne. Používej tvar výše.
+
+## Release
+
+**Push = release.** Každý push zvedne verzi v `Directory.Build.props` (started 0.1.0)
+a dostane tag `vX.Y.Z`. Nepushovat rozdělanou práci.

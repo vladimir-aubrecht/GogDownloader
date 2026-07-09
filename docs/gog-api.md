@@ -82,15 +82,59 @@ Hash manifestu se na CDN mapuje na cestu vložením dvou adresářových úrovn�
 Generation 1 je starší formát — manifest je **nekomprimovaný JSON** a cesta obsahuje
 `timestamp` z produktových dat. Netriviální rozdíl oproti v2, počítat s oběma.
 
+### Schéma manifestů v2
+
+Repository manifest (URL z `build.repository_manifest`) po zlib dekompresi:
+
+| Pole | Význam |
+|---|---|
+| `baseProductId` | id základní hry |
+| `buildId` | potřeba pro patch endpoint |
+| `installDirectory` | jméno instalačního adresáře (**nepoužívat pro náš zip**) |
+| `dependencies[]` | id redistributables |
+| `products[]` | `productId` + `name` základní hry **a všech jejích DLC** |
+| `depots[]` | viz níže |
+
+Seznam DLC se tedy nikde nedotahuje zvlášť: vezme se `products[]` z manifestu, vyhodí
+se `baseProductId` a zbytek se protne s vlastněnými id z `{GOG_EMBED}/user/data/games`.
+
+Depot: `manifest` (hash), `productId`, `languages[]`, `osBitness`, `size`,
+`compressedSize`. Depot patří do stažení, když `productId` == základní hra nebo
+vlastněné DLC, **a zároveň** `languages` obsahuje `*` nebo cílový jazyk.
+
+Depot manifest (`{GOG_CDN}/content-system/v2/meta/{galaxy_path(depot.manifest)}`,
+opět zlib) má `depot.items[]`, každý s `type`:
+
+- `DepotFile` — `path`, `chunks[]`, volitelně `md5`, `sha256`, `flags[]`
+- `DepotDirectory` — jen `path`, adresář k vytvoření
+- `DepotLink` — `path` + `target`, symlink
+
+`flags` obsahuje `support` (soubor patří do `gog-support`, ne do hry) a `executable`.
+Cesty v `path` používají `\` jako oddělovač — na Linuxu je nutné je přeložit.
+
+Chunk: `compressedMd5`, `md5`, `size`, `compressedSize`. Identita souboru je
+`md5`, a když chybí, `chunks[0].md5` (platí jen pro jednochunkové soubory).
+
 ### Secure links (podepsané URL pro chunky)
 
 ```
-generation 2:  GET {GOG_CONTENT_SYSTEM}/products/{gameId}/secure_link?_version=2&generation=2&path={path}
-generation 1:  GET {GOG_CONTENT_SYSTEM}/products/{gameId}/secure_link?_version=2&type=depot&path={path}
+generation 2:  GET {GOG_CONTENT_SYSTEM}/products/{gameId}/secure_link?_version=2&generation=2&path=/
+generation 1:  GET {GOG_CONTENT_SYSTEM}/products/{gameId}/secure_link?_version=2&type=depot&path=/
 ```
 
 Vrací pole `urls`. Secure link se získává **zvlášť pro každý vlastněný DLC produkt**,
-ne jen pro základní hru.
+ne jen pro základní hru. (Volitelné `&root=/patches/store` pro patche.)
+
+Každý prvek `urls[]` má `url_format` a `parameters`. URL chunku se sestaví takto —
+pořadí kroků je podstatné:
+
+1. `parameters["path"] += "/" + galaxy_path(chunk.compressedMd5)`
+2. v `url_format` nahradit každé `{klíč}` hodnotou `parameters[klíč]`
+
+Tělo chunku je **zlib-komprimované**. MD5 se kontroluje proti `compressedMd5`, tedy
+nad *staženými* bajty před dekompresí, ne po ní.
+
+`401` u chunku znamená vypršelý secure link → vyžádat znovu, není to chyba stahování.
 
 ### Dependencies / redistributables
 

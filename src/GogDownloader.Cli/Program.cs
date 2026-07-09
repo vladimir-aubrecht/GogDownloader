@@ -1,6 +1,9 @@
+using System.Diagnostics;
 using GogDownloader.Core;
 using GogDownloader.Core.Api;
 using GogDownloader.Core.Auth;
+using GogDownloader.Core.Content;
+using GogDownloader.Core.Download;
 using GogDownloader.Core.Http;
 using GogDownloader.Core.Library;
 
@@ -24,10 +27,19 @@ catch (OperationCanceledException)
 
 internal static class Cli
 {
+    public static string Version =>
+        typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+
     public static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
         var command = string.Join(' ', args.TakeWhile(a => !a.StartsWith('-')));
         var flags = ParseFlags(args);
+
+        if (flags.ContainsKey("version"))
+        {
+            Console.WriteLine(Version);
+            return 0;
+        }
 
         return command switch
         {
@@ -36,14 +48,16 @@ internal static class Cli
             "auth logout" => AuthLogout(),
             "library sync" => await LibrarySyncAsync(flags, ct),
             "library stats" => await LibraryStatsAsync(ct),
+            _ when command.StartsWith("download", StringComparison.Ordinal)
+                => await DownloadAsync(args, flags, ct),
             _ => Usage(),
         };
     }
 
     private static int Usage()
     {
-        Console.WriteLine("""
-            gogdl — záloha vlastních her z GOG
+        Console.WriteLine($"""
+            gogdl {Version} — záloha vlastních her z GOG
 
               auth login [--code <code|url>]   přihlášení přes prohlížeč
               auth status                      stav tokenu
@@ -51,6 +65,14 @@ internal static class Cli
 
               library sync [--connections N]   načte knihovnu z GOG a uloží snapshot
               library stats                    rozpad knihovny podle dostupnosti depotů
+
+              download <slug|id>               stáhne hru z Galaxy depotů do zipu
+                --platform windows|mac|linux   výchozí windows
+                --language en                  výchozí en
+                --out DIR                      výchozí ./gog-backup
+                --connections N                souběžná spojení, výchozí 8
+                --limit-rate 5M                strop rychlosti (k/M/G)
+                --force                        stáhnout znovu i hotový build
             """);
         return 1;
     }
@@ -73,16 +95,45 @@ internal static class Cli
     private static GogHttpOptions OptionsFrom(Dictionary<string, string> flags) => new()
     {
         MaxConnections = flags.TryGetValue("connections", out var c) && int.TryParse(c, out var n) ? n : 8,
-        MaxBytesPerSecond = flags.TryGetValue("limit-rate", out var r) && long.TryParse(r, out var bps) ? bps : 0,
+        MaxBytesPerSecond = flags.TryGetValue("limit-rate", out var r) ? ParseRate(r) : 0,
     };
+
+    /// <summary>`5M` → 5 * 1024^2. Bez přípony bajty za sekundu.</summary>
+    private static long ParseRate(string value)
+    {
+        if (value.Length == 0) return 0;
+        var multiplier = char.ToLowerInvariant(value[^1]) switch
+        {
+            'k' => 1024L,
+            'm' => 1024L * 1024,
+            'g' => 1024L * 1024 * 1024,
+            _ => 1L,
+        };
+        var digits = multiplier == 1 ? value : value[..^1];
+        return long.TryParse(digits, out var n) && n > 0 ? n * multiplier : 0;
+    }
 
     private static (GogApiClient Api, GogHttpOptions Options) CreateApi(Dictionary<string, string> flags)
     {
         var options = OptionsFrom(flags);
-        var store = new TokenStore();
-        var authHttp = GogHttpFactory.Create(options);
-        var tokens = new TokenProvider(store, new GogAuthClient(authHttp));
-        return (new GogApiClient(GogHttpFactory.Create(options, tokens)), options);
+        return (new GogApiClient(GogHttpFactory.Create(options, Tokens(options))), options);
+    }
+
+    private static TokenProvider Tokens(GogHttpOptions options) =>
+        new(new TokenStore(), new GogAuthClient(GogHttpFactory.Create(options)));
+
+    private static (GogApiClient Api, ContentClient Content, GogHttpOptions Options) CreateContent(
+        Dictionary<string, string> flags)
+    {
+        var options = OptionsFrom(flags);
+        var tokens = Tokens(options);
+        var authed = GogHttpFactory.Create(options, tokens);
+
+        // Chunky jdou přes podepsanou URL — Bearer hlavička na CDN nepatří.
+        var cdn = GogHttpFactory.Create(options);
+
+        var limiter = new RateLimiter(options.MaxBytesPerSecond);
+        return (new GogApiClient(authed), new ContentClient(authed, cdn, limiter), options);
     }
 
     private static async Task<int> AuthLoginAsync(Dictionary<string, string> flags, CancellationToken ct)
@@ -213,5 +264,93 @@ internal static class Cli
         return 0;
     }
 
+    private static async Task<int> DownloadAsync(
+        string[] args, Dictionary<string, string> flags, CancellationToken ct)
+    {
+        var needle = args.Skip(1).FirstOrDefault(a => !a.StartsWith('-'));
+        if (needle is null)
+        {
+            Console.Error.WriteLine("Chybí hra. Použití: gogdl download <slug|id>");
+            return 1;
+        }
+
+        var snapshot = await LibrarySnapshot.LoadAsync(LibrarySnapshot.DefaultPath(), ct);
+        if (snapshot is null)
+        {
+            Console.Error.WriteLine("Snapshot chybí. Spusť nejdřív: gogdl library sync");
+            return 1;
+        }
+
+        var game = snapshot.Games.FirstOrDefault(g =>
+            string.Equals(g.Slug, needle, StringComparison.OrdinalIgnoreCase)
+            || g.Id.ToString() == needle);
+
+        if (game is null)
+        {
+            Console.Error.WriteLine($"Hra '{needle}' není ve snapshotu knihovny.");
+            return 1;
+        }
+
+        var platformName = flags.GetValueOrDefault("platform", "windows");
+        if (GamePlatformExtensions.FromApiName(platformName) is not { } platform)
+        {
+            Console.Error.WriteLine($"Neznámá platforma '{platformName}'. Použij windows, mac nebo linux.");
+            return 1;
+        }
+
+        var (api, content, options) = CreateContent(flags);
+
+        var downloadOptions = new DownloadOptions
+        {
+            OutputRoot = Path.GetFullPath(flags.GetValueOrDefault("out", "gog-backup")),
+            Platform = platform,
+            Language = flags.GetValueOrDefault("language", "en"),
+            MaxConnections = options.MaxConnections,
+            Force = flags.ContainsKey("force"),
+        };
+
+        Console.Error.WriteLine($"{game.Title} → {downloadOptions.OutputRoot}/{game.DirectoryName}");
+
+        var result = await new GameDownloader(api, content)
+            .RunAsync(game, downloadOptions, new ConsoleProgress(), ct);
+
+        Console.Error.WriteLine();
+
+        switch (result.Outcome)
+        {
+            case DownloadOutcome.Completed:
+                Console.WriteLine($"Hotovo: {result.ArchivePath}");
+                return 0;
+            case DownloadOutcome.AlreadyDone:
+                Console.WriteLine(result.Detail);
+                return 0;
+            default:
+                Console.Error.WriteLine($"Přeskočeno: {result.Detail}");
+                return 3;
+        }
+    }
+
     private static double Gib(long bytes) => bytes / 1024d / 1024d / 1024d;
+}
+
+/// <summary>Přepisuje jeden řádek, ne aby to zaplavilo terminál.</summary>
+internal sealed class ConsoleProgress : IProgress<DownloadProgress>
+{
+    private readonly long _startedAt = Stopwatch.GetTimestamp();
+    private long _lastRender;
+
+    public void Report(DownloadProgress p)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var since = (now - Interlocked.Read(ref _lastRender)) / (double)Stopwatch.Frequency;
+        if (since < 0.2 && p.Bytes < p.TotalBytes) return;
+        Interlocked.Exchange(ref _lastRender, now);
+
+        var elapsed = (now - _startedAt) / (double)Stopwatch.Frequency;
+        var speed = elapsed > 0 ? p.Bytes / elapsed / 1024 / 1024 : 0;
+        var percent = p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes : 0;
+
+        Console.Error.Write(
+            $"\r  {p.Phase,-8} {percent,5:F1} %  {p.Files}/{p.TotalFiles} souborů  {speed,6:F1} MiB/s   ");
+    }
 }

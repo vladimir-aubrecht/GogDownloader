@@ -5,3 +5,7 @@ obj/
 # Tokeny GOG — nikdy necommitovat
 .gogdl/
 *.token.json
+
+# Výstup stahování
+gog-backup/
+.gogdl-staging/

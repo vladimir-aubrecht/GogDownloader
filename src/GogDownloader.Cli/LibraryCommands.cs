@@ -69,18 +69,23 @@ public static class LibraryCommands
 
         foreach (var game in games)
         {
-            var depots = string.Join(",", GameFilter.Depots(game, platform).Select(Short));
-            var installers = string.Join(",", game.Platforms
-                .Where(kv => (platform is null || kv.Key == platform) && !kv.Value.HasDepot && kv.Value.HasInstaller)
-                .Select(kv => Short(kv.Key)));
+            var parts = new List<string>();
 
-            var availability = (depots.Length, installers.Length) switch
-            {
-                (0, 0) => "-",
-                (_, 0) => depots,
-                (0, _) => $"({installers})",
-                _ => $"{depots} ({installers})",
-            };
+            if (GameFilter.Depots(game, platform).ToList() is { Count: > 0 } depots)
+                parts.Add(string.Join(",", depots.Select(Short)));
+
+            // Generation 1 has a depot but no way to fetch it, and no size in the manifest.
+            if (GameFilter.LegacyDepots(game, platform).ToList() is { Count: > 0 } legacy)
+                parts.Add(string.Join(",", legacy.Select(p => Short(p) + ":gen1")));
+
+            var installers = game.Platforms
+                .Where(kv => (platform is null || kv.Key == platform) && !kv.Value.HasDepot && kv.Value.HasInstaller)
+                .Select(kv => Short(kv.Key))
+                .ToList();
+
+            if (installers.Count > 0) parts.Add($"({string.Join(",", installers)})");
+
+            var availability = parts.Count > 0 ? string.Join(" ", parts) : "-";
 
             var dlc = game.Dlcs.Count > 0 ? $"+{game.Dlcs.Count} DLC" : "";
 
@@ -110,8 +115,13 @@ public static class LibraryCommands
         Console.WriteLine();
         Console.WriteLine(
             $"{games.Count} {(games.Count == 1 ? "game" : "games")}, " +
-            $"{CommandLine.Bytes(games.Sum(g => GameFilter.Size(g, platform)))} to download. " +
-            "Plain = Galaxy depot, (parentheses) = installer only, not downloadable yet.");
+            $"{CommandLine.Bytes(games.Sum(g => GameFilter.Size(g, platform)))} to download.");
+        Console.WriteLine(
+            "  win        Galaxy depot, downloadable now");
+        Console.WriteLine(
+            "  win:gen1   old depot format, not supported yet, size unknown");
+        Console.WriteLine(
+            "  (win)      installer only, no depot");
         Console.WriteLine("Pass the slug to: gogdl download <slug>");
         return 0;
     }
@@ -130,13 +140,14 @@ public static class LibraryCommands
                 .OfType<PlatformAvailability>()
                 .ToList();
 
-            var depot = present.Count(p => p.HasDepot);
+            var depot = present.Count(p => p.HasDownloadableDepot);
+            var legacy = present.Count(p => p.HasLegacyDepot);
             var installerOnly = present.Count(p => !p.HasDepot && p.HasInstaller);
             var size = present.Sum(p => p.BestKnownSize);
 
             var noun = present.Count == 1 ? "title " : "titles";
             Console.WriteLine(
-                $"{platform,-8} {present.Count,4} {noun}   depot: {depot,4}   " +
+                $"{platform,-8} {present.Count,4} {noun}   depot: {depot,4}   gen1: {legacy,4}   " +
                 $"installer only: {installerOnly,4}   {CommandLine.Bytes(size),9} to download");
         }
 

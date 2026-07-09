@@ -34,6 +34,8 @@ public static class CommandLine
                 => await LibraryCommands.ListAsync(args, flags, ct),
             _ when command.StartsWith("download", StringComparison.Ordinal)
                 => await DownloadCommands.RunAsync(args, flags, ct),
+            _ when command.StartsWith("diff", StringComparison.Ordinal)
+                => await DiffCommands.RunAsync(args, flags, ct),
             _ => Usage(),
         };
     }
@@ -70,6 +72,12 @@ public static class CommandLine
                 --keep                         on interrupt keep downloads without asking
                 --no-verify                    skip reading the archive back to check it
                 --force                        re-download even a completed build
+
+              diff [text]                     compare a backup directory against the library
+                --out DIR                      default ./gog-backup
+                --platform windows|mac|linux   default windows
+                --all                          also list what is up to date
+                --slugs                        print slugs of missing and outdated games
 
             Any command: --snapshot FILE       use this library snapshot (or $GOGDL_SNAPSHOT)
             """);

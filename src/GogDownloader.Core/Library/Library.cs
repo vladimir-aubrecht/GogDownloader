@@ -28,6 +28,16 @@ public sealed record PlatformAvailability
     public long InstalledSize { get; init; }
 
     public bool HasDepot => Depot is not null;
+
+    /// <summary>
+    /// Only generation 2 depots can be fetched. Generation 1 uses a different manifest format —
+    /// nested under `product`, `Neutral` instead of `*`, no `compressedSize` — so a snapshot
+    /// cannot even size it, which is why such games list without a size.
+    /// </summary>
+    public bool HasDownloadableDepot => Depot is { Generation: 2 };
+
+    public bool HasLegacyDepot => Depot is { Generation: 1 };
+
     public bool HasInstaller => Installers.Count > 0;
     public bool Unavailable => !HasDepot && !HasInstaller;
 

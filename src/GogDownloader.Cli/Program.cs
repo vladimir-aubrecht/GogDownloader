@@ -29,3 +29,12 @@ catch (OperationCanceledException)
     Console.Error.WriteLine("Interrupted.");
     return 130;
 }
+catch (IOException ex)
+{
+    // Most often the disk filled up mid-download. A stack trace would bury the one fact that
+    // matters: nothing was lost, and running the same command again resumes.
+    Console.Error.WriteLine();
+    Console.Error.WriteLine($"I/O error: {ex.Message}");
+    Console.Error.WriteLine("Downloaded files were kept. Run the same command again to resume.");
+    return 4;
+}

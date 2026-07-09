@@ -284,6 +284,19 @@ public static class DownloadProbes
         }
 
         Probe.Check("paths under one root share a volume", GameDownloader.SameVolume(root, target));
+
+        // A full target volume raises IOException, not cancellation. The partial copy must go
+        // either way, or a .tmp would sit next to the archive it pretends to be.
+        var unwritable = Path.Combine(root, "nosuchdir", "deep", "target.zip");
+        var brokeAndCleaned = false;
+        try { GameDownloader.PublishArchive(zipPath, unwritable, sameVolume: false, null); }
+        catch (IOException) { brokeAndCleaned = !File.Exists(unwritable + ".tmp"); }
+        Probe.Check("a failed copy leaves no .tmp", brokeAndCleaned);
+        Probe.Check("a failed copy keeps the staging zip", File.Exists(zipPath));
+
+        Probe.Group("Directory size");
+        Probe.Check("counts nested files", GameDownloader.DirectorySize(staging) > 400L * 1024 * 1024);
+        Probe.Check("a missing directory is zero", GameDownloader.DirectorySize(Path.Combine(root, "gone")) == 0);
     }
 
     private static bool Throws(Action action)

@@ -126,9 +126,19 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         Directory.CreateDirectory(options.StagingDirectory);
         Directory.CreateDirectory(gameDirectory);
 
+        // Staging survives an interrupted run so the next one can resume, but only when it
+        // belongs to this exact build and language; otherwise its files are stale.
+        var state = new StagingState(build.BuildId, options.Language, options.Platform.ContentSystemName());
+        var resumable = !options.Clean && StagingState.Load(staging) == state;
+
+        // Bytes already on disk do not need to be found again, or a resume would be refused on
+        // a volume that in fact has room for what is left.
+        var alreadyStaged = resumable ? DirectorySize(staging) : 0;
+        var stagingNeeds = Math.Max(0, installedSize + totalCompressed - alreadyStaged);
+
         // Staging holds the unpacked game and the zip side by side; the target only needs the
         // zip. Failing here beats failing after an hour of downloading.
-        if (FreeSpaceShortfall(options.StagingDirectory, installedSize + totalCompressed) is { } short1)
+        if (FreeSpaceShortfall(options.StagingDirectory, stagingNeeds) is { } short1)
             return new DownloadResult(DownloadOutcome.NotEnoughSpace,
                 Detail: $"{options.StagingDirectory} needs {Human(short1)} more free. Pick another --staging.");
 
@@ -136,11 +146,6 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             && FreeSpaceShortfall(gameDirectory, totalCompressed) is { } short2)
             return new DownloadResult(DownloadOutcome.NotEnoughSpace,
                 Detail: $"{gameDirectory} needs {Human(short2)} more free.");
-
-        // Staging survives an interrupted run so the next one can resume, but only when it
-        // belongs to this exact build and language; otherwise its files are stale.
-        var state = new StagingState(build.BuildId, options.Language, options.Platform.ContentSystemName());
-        var resumable = !options.Clean && StagingState.Load(staging) == state;
 
         if (!resumable) StagingState.Discard(staging);
         Directory.CreateDirectory(staging);
@@ -258,6 +263,21 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
     private static string Human(long bytes) => $"{bytes / 1024d / 1024 / 1024:F1} GiB";
 
+    /// <summary>Bytes already on disk, used both to size a resume and to report one.</summary>
+    public static long DirectorySize(string path)
+    {
+        if (!Directory.Exists(path)) return 0;
+        try
+        {
+            return Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+                .Sum(file => new FileInfo(file).Length);
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
+    }
+
     /// <summary>A rename is only atomic within one volume.</summary>
     internal static bool SameVolume(string a, string b) => string.Equals(
         Path.GetPathRoot(Path.GetFullPath(a)),
@@ -293,9 +313,11 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                 CopyInterruptibly(source, destination, ct, written =>
                     progress?.Report(new DownloadProgress("copy", copied += written, total, 0, 1)));
         }
-        catch (OperationCanceledException)
+        catch
         {
-            File.Delete(temp);
+            // Cancelled, or the target volume filled up. Either way the partial copy must not
+            // survive next to the archive it pretends to be.
+            if (File.Exists(temp)) File.Delete(temp);
             throw;
         }
 

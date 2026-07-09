@@ -32,9 +32,18 @@ public static class GameFilter
             .Where(g => !dlcOnly || g.Dlcs.Count > 0)
             .ToList();
 
+    /// <summary>
+    /// Depots a download could actually fetch. Generation 1 is deliberately excluded: offering
+    /// it would put thirty titles into a batch only for each to report that it is unsupported.
+    /// </summary>
     public static IEnumerable<GamePlatform> Depots(LibraryEntry game, GamePlatform? only) =>
         game.Platforms
-            .Where(kv => (only is null || kv.Key == only) && kv.Value.HasDepot)
+            .Where(kv => (only is null || kv.Key == only) && kv.Value.HasDownloadableDepot)
+            .Select(kv => kv.Key);
+
+    public static IEnumerable<GamePlatform> LegacyDepots(LibraryEntry game, GamePlatform? only) =>
+        game.Platforms
+            .Where(kv => (only is null || kv.Key == only) && kv.Value.HasLegacyDepot)
             .Select(kv => kv.Key);
 
     public static long Size(LibraryEntry game, GamePlatform? only) =>

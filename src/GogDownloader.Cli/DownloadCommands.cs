@@ -49,13 +49,33 @@ public static class DownloadCommands
             MaxConnections = options.MaxConnections,
             StagingRoot = flags.TryGetValue("staging", out var staging) ? Path.GetFullPath(staging) : null,
             Force = flags.ContainsKey("force"),
+            Clean = flags.ContainsKey("clean"),
+            VerifyArchive = !flags.ContainsKey("no-verify"),
+            MaxCompressionThreads = flags.TryGetValue("compression-threads", out var t) && int.TryParse(t, out var n) && n > 0
+                ? n
+                : Environment.ProcessorCount,
         };
 
         Console.Error.WriteLine($"{game.Title} → {Path.Combine(downloadOptions.OutputRoot, game.DirectoryName)}");
-        Console.Error.WriteLine($"staging in {downloadOptions.StagingDirectory}");
+        Console.Error.WriteLine(
+            $"staging in {downloadOptions.StagingDirectory}, " +
+            $"zipping on {downloadOptions.MaxCompressionThreads} threads");
 
-        var result = await new GameDownloader(api, content)
-            .RunAsync(game, downloadOptions, new ConsoleProgress(), ct);
+        DownloadResult result;
+        try
+        {
+            result = await new GameDownloader(api, content)
+                .RunAsync(game, downloadOptions, new ConsoleProgress(), ct);
+        }
+        catch (DownloadInterruptedException interrupted)
+        {
+            // Deleting tens of gigabytes on the user's behalf is not ours to decide.
+            Console.Error.WriteLine();
+            Console.Error.WriteLine($"Interrupted. Downloaded files kept in:");
+            Console.Error.WriteLine($"  {interrupted.StagingDirectory}");
+            Console.Error.WriteLine("Run the same command again to resume, or add --clean to start over.");
+            return 130;
+        }
 
         Console.Error.WriteLine();
 

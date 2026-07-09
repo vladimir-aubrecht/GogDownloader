@@ -61,6 +61,9 @@ public static class CommandLine
                 --connections N                concurrent connections, default 8
                 --limit-rate 5M                speed cap (k/M/G)
                 --staging DIR                  where to assemble and zip, default local app data
+                --compression-threads N        deflate workers, default one per core
+                --clean                        discard a staging dir left by an interrupted run
+                --no-verify                    skip reading the archive back to check it
                 --force                        re-download even a completed build
 
             Any command: --snapshot FILE       use this library snapshot (or $GOGDL_SNAPSHOT)

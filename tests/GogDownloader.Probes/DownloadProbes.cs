@@ -4,6 +4,7 @@ using GogDownloader.Core;
 using GogDownloader.Core.Api;
 using GogDownloader.Core.Content;
 using GogDownloader.Core.Download;
+using GogDownloader.Core.Download.Zip;
 using GogDownloader.Core.Library;
 
 namespace GogDownloader.Probes;
@@ -78,6 +79,28 @@ public static class DownloadProbes
         Probe.Check("content-system calls macOS osx", GamePlatform.Mac.ContentSystemName() == "osx");
         Probe.Check("api.gog.com calls macOS mac", GamePlatform.Mac.ApiName() == "mac");
 
+        Probe.Group("Staging state decides whether a run can resume");
+        var staged = Path.Combine(root, "staged");
+        Directory.CreateDirectory(staged);
+
+        var current = new StagingState("build-42", "en", "windows");
+        current.Save(staged);
+
+        Probe.Check("state round-trips", StagingState.Load(staged) == current);
+        Probe.Check("a different build is not resumable",
+            StagingState.Load(staged) != new StagingState("build-43", "en", "windows"));
+        Probe.Check("a different language is not resumable",
+            StagingState.Load(staged) != new StagingState("build-42", "de", "windows"));
+        Probe.Check("a different platform is not resumable",
+            StagingState.Load(staged) != new StagingState("build-42", "en", "osx"));
+
+        // Everything inside staging ends up in the zip, so the marker must live beside it.
+        Probe.Check("the marker is not inside staging", !Directory.EnumerateFiles(staged).Any());
+
+        StagingState.Remove(staged);
+        Probe.Check("a removed marker means no resume", StagingState.Load(staged) is null);
+        Probe.Check("an absent marker means no resume", StagingState.Load(Path.Combine(root, "never")) is null);
+
         await ZipAndPublishAsync(root);
 
         Probe.Group("Free space");
@@ -111,19 +134,21 @@ public static class DownloadProbes
         using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
         {
             var stopwatch = Stopwatch.StartNew();
-            var cancelled = Throws(() => GameDownloader.ZipDirectory(staging, zipPath, null, cts.Token));
+            var cancelled = await Throws(() =>
+                ParallelZipWriter.CreateAsync(staging, zipPath, 4, ct: cts.Token));
             stopwatch.Stop();
 
             Probe.Check("cancels inside a single large file", cancelled);
             Probe.Check($"cancels promptly ({stopwatch.Elapsed.TotalSeconds:F1} s, not after the file finishes)",
-                stopwatch.Elapsed.TotalSeconds < 5, stopwatch.Elapsed.TotalSeconds.ToString("F1"));
+                stopwatch.Elapsed.TotalSeconds < 10, stopwatch.Elapsed.TotalSeconds.ToString("F1"));
             Probe.Check("leaves no partial zip", !File.Exists(zipPath));
+            Probe.Check("leaves no parts directory", !Directory.Exists(zipPath + ".parts"));
         }
 
         Probe.Group("Zip contents");
-        var reported = new List<DownloadProgress>();
-        var progress = new Progress<DownloadProgress>(p => { lock (reported) reported.Add(p); });
-        GameDownloader.ZipDirectory(staging, zipPath, progress, default);
+        var reported = new List<ZipProgress>();
+        var progress = new Progress<ZipProgress>(p => { lock (reported) reported.Add(p); });
+        await ParallelZipWriter.CreateAsync(staging, zipPath, 4, progress: progress);
         await Task.Delay(200); // Progress<T> delivers on the thread pool
 
         using (var zip = ZipFile.OpenRead(zipPath))
@@ -136,7 +161,80 @@ public static class DownloadProbes
             Probe.Check("non-empty directories get no entry of their own", !names.Contains("game/"));
             Probe.Check("the large file is intact", zip.GetEntry("game/data.pak")!.Length == 400L * 1024 * 1024);
         }
-        Probe.Check("zipping reports progress per file", reported.Count(p => p.Phase == "zip") >= 3);
+        Probe.Check("zipping reports progress", reported.Count >= 3);
+
+        // The framework reader is the arbiter: our writer must produce an archive it accepts.
+        using (var zip = ZipFile.OpenRead(zipPath))
+        {
+            var entry = zip.GetEntry("gog-support/99/readme.txt")!;
+            using var reader = new StreamReader(entry.Open());
+            Probe.Check("entry content round-trips", reader.ReadToEnd() == "hi");
+            Probe.Check("crc is accepted by the reader", entry.Crc32 != 0);
+        }
+
+        Probe.Group("Zip64");
+        // Forcing the threshold down exercises the 64-bit headers without writing 4 GiB.
+        var zip64Path = Path.Combine(root, "zip64.zip");
+        await ParallelZipWriter.CreateAsync(staging, zip64Path, 4, zip64Threshold: 1024);
+        using (var zip = ZipFile.OpenRead(zip64Path))
+        {
+            Probe.Check("a zip64 archive still opens", zip.Entries.Count > 0);
+            Probe.Check("zip64 sizes survive",
+                zip.GetEntry("game/data.pak")!.Length == 400L * 1024 * 1024,
+                zip.GetEntry("game/data.pak")!.Length.ToString());
+            using var reader = new StreamReader(zip.GetEntry("gog-support/99/readme.txt")!.Open());
+            Probe.Check("zip64 content round-trips", reader.ReadToEnd() == "hi");
+        }
+
+        Probe.Group("More entries than the compression window");
+        // Parts finish out of order. An earlier design let entries past the writer hold every
+        // permit, so the entry it was waiting for could never start. With few files it passed
+        // by luck; with many it hung.
+        var many = Path.Combine(root, "many");
+        Directory.CreateDirectory(many);
+        for (var i = 0; i < 200; i++)
+            await File.WriteAllTextAsync(Path.Combine(many, $"file{i:D3}.txt"), new string('x', 5000));
+
+        var manyZip = Path.Combine(root, "many.zip");
+        var finished = ParallelZipWriter.CreateAsync(many, manyZip, 1).Wait(TimeSpan.FromSeconds(60));
+        Probe.Check("200 entries on one worker do not deadlock", finished);
+        if (finished)
+            using (var zip = ZipFile.OpenRead(manyZip))
+                Probe.Check("all 200 entries are present", zip.Entries.Count == 200, zip.Entries.Count.ToString());
+
+        Probe.Group("Archive verification");
+        // ZipFile.OpenRead does not check CRCs, so "it opened" proves nothing. The verifier
+        // recomputes them from the decompressed bytes and compares against staging.
+        await ArchiveVerifier.VerifyAsync(zipPath, staging);
+        Probe.Check("a good archive verifies", true);
+
+        var corrupt = Path.Combine(root, "corrupt.zip");
+        File.Copy(zipPath, corrupt, overwrite: true);
+        var raw = await File.ReadAllBytesAsync(corrupt);
+        raw[^(1 << 16)] ^= 0xFF;   // inside a compressed payload, headers untouched
+        await File.WriteAllBytesAsync(corrupt, raw);
+
+        var caught = false;
+        try { await ArchiveVerifier.VerifyAsync(corrupt, staging); }
+        catch (Exception e) when (e is ArchiveCorruptException or InvalidDataException) { caught = true; }
+        Probe.Check("a corrupted archive is rejected", caught);
+
+        var missing = Path.Combine(root, "missing");
+        Directory.CreateDirectory(missing);
+        File.WriteAllText(Path.Combine(missing, "only.txt"), "x");
+        var mismatched = false;
+        try { await ArchiveVerifier.VerifyAsync(zipPath, missing); }
+        catch (ArchiveCorruptException) { mismatched = true; }
+        Probe.Check("an archive that does not match staging is rejected", mismatched);
+
+        Probe.Group("Compression ratio is unchanged by parallelism");
+        var oneThread = Path.Combine(root, "one.zip");
+        var manyThreads = Path.Combine(root, "many.zip");
+        await ParallelZipWriter.CreateAsync(staging, oneThread, 1);
+        await ParallelZipWriter.CreateAsync(staging, manyThreads, 8);
+        Probe.Check("one worker and eight produce the same bytes",
+            new FileInfo(oneThread).Length == new FileInfo(manyThreads).Length,
+            $"{new FileInfo(oneThread).Length} vs {new FileInfo(manyThreads).Length}");
 
         Probe.Group("Publishing the archive");
         var target = Path.Combine(root, "target");

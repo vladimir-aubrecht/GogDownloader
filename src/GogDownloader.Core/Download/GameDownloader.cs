@@ -1,8 +1,9 @@
 using System.Buffers;
-using System.IO.Compression;
+using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
 using GogDownloader.Core.Api;
 using GogDownloader.Core.Content;
+using GogDownloader.Core.Download.Zip;
 using GogDownloader.Core.Library;
 
 namespace GogDownloader.Core.Download;
@@ -23,6 +24,21 @@ public sealed record DownloadOptions
 
     /// <summary>Re-download even what the manifest already reports as done.</summary>
     public bool Force { get; init; }
+
+    /// <summary>Discard a staging directory left by an interrupted run instead of resuming it.</summary>
+    public bool Clean { get; init; }
+
+    /// <summary>
+    /// Read the finished archive back and compare it against staging. Costs one extra pass over
+    /// the data; the ZIP writer is hand-rolled, so this is on by default.
+    /// </summary>
+    public bool VerifyArchive { get; init; } = true;
+
+    /// <summary>
+    /// Deflate is single-threaded per entry, and ZIP compresses entries independently, so this
+    /// is what decides how long zipping takes. Defaults to every core.
+    /// </summary>
+    public int MaxCompressionThreads { get; init; } = Environment.ProcessorCount;
 
     /// <summary>
     /// Local app data, not <see cref="Path.GetTempPath"/>: on Linux temp is often a tmpfs
@@ -121,16 +137,35 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             return new DownloadResult(DownloadOutcome.NotEnoughSpace,
                 Detail: $"{gameDirectory} needs {Human(short2)} more free.");
 
-        if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+        // Staging survives an interrupted run so the next one can resume, but only when it
+        // belongs to this exact build and language; otherwise its files are stale.
+        var state = new StagingState(build.BuildId, options.Language, options.Platform.ContentSystemName());
+        var resumable = !options.Clean && StagingState.Load(staging) == state;
+
+        if (Directory.Exists(staging) && !resumable) Directory.Delete(staging, recursive: true);
         Directory.CreateDirectory(staging);
+        state.Save(staging);
 
         try
         {
-            await MaterializeAsync(staging, files, directories, links, totalCompressed, options, progress, ct);
+            await MaterializeAsync(staging, files, directories, links, totalCompressed, resumable, options, progress, ct);
 
             var stagingZip = staging + ".zip";
             if (File.Exists(stagingZip)) File.Delete(stagingZip);
-            ZipDirectory(staging, stagingZip, progress, ct);
+
+            await ParallelZipWriter.CreateAsync(
+                staging, stagingZip, options.MaxCompressionThreads,
+                progress: new Progress<ZipProgress>(z => progress?.Report(
+                    new DownloadProgress("zip", z.BytesRead, z.BytesTotal, z.EntriesDone, z.EntriesTotal))),
+                ct: ct);
+
+            // The zip writer is ours, so the archive is proven against staging before anything
+            // records it as done.
+            if (options.VerifyArchive)
+                await ArchiveVerifier.VerifyAsync(stagingZip, staging,
+                    new Progress<ZipProgress>(z => progress?.Report(
+                        new DownloadProgress("check", z.BytesRead, z.BytesTotal, z.EntriesDone, z.EntriesTotal))),
+                    ct);
 
             var archivePath = Path.Combine(gameDirectory, archiveName);
             PublishArchive(stagingZip, archivePath, SameVolume(stagingZip, archivePath), progress, ct);
@@ -166,11 +201,16 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             // Only now does the game count as downloaded.
             await manifest.SaveAsync(gameDirectory, ct);
 
+            // Only a finished backup may throw its staging away. An interrupted run keeps it,
+            // so the next one resumes instead of re-downloading tens of gigabytes.
+            Directory.Delete(staging, recursive: true);
+            StagingState.Remove(staging);
+
             return new DownloadResult(DownloadOutcome.Completed, archivePath);
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            throw new DownloadInterruptedException(staging);
         }
     }
 
@@ -179,63 +219,6 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
     /// <see cref="ZipFile.CreateFromDirectory(string, string)"/>, so that a multi-hour archive
     /// of a large game still reports progress.
     /// </summary>
-    internal static void ZipDirectory(
-        string staging, string zipPath, IProgress<DownloadProgress>? progress, CancellationToken ct)
-    {
-        var entries = Directory
-            .EnumerateFileSystemEntries(staging, "*", SearchOption.AllDirectories)
-            .OrderBy(p => p, StringComparer.Ordinal)
-            .ToList();
-
-        try
-        {
-            using var stream = File.Create(zipPath);
-            using var archive = new ZipArchive(stream, ZipArchiveMode.Create);
-
-            var done = 0;
-            foreach (var entry in entries)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                var relative = Path.GetRelativePath(staging, entry).Replace('\\', '/');
-
-                if (Directory.Exists(entry))
-                {
-                    // Empty directories only survive as an explicit trailing-slash entry.
-                    if (!Directory.EnumerateFileSystemEntries(entry).Any())
-                        archive.CreateEntry(relative + "/");
-                }
-                else
-                {
-                    AddFile(archive, entry, relative, ct);
-                }
-
-                progress?.Report(new DownloadProgress("zip", 0, 0, ++done, entries.Count));
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // A half-written zip must not survive; the next run would have to distrust it.
-            File.Delete(zipPath);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// The equivalent of <see cref="ZipFileExtensions.CreateEntryFromFile"/>, except that it
-    /// checks for cancellation while copying. Games ship multi-gigabyte archives in a single
-    /// file, and the framework call would ignore Ctrl+C for as long as one takes to compress.
-    /// </summary>
-    private static void AddFile(ZipArchive archive, string path, string entryName, CancellationToken ct)
-    {
-        var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
-        entry.LastWriteTime = File.GetLastWriteTime(path);
-
-        using var source = File.OpenRead(path);
-        using var destination = entry.Open();
-        CopyInterruptibly(source, destination, ct);
-    }
-
     private static void CopyInterruptibly(Stream source, Stream destination, CancellationToken ct)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
@@ -364,18 +347,52 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         return normalized;
     }
 
+    /// <summary>
+    /// A file left by an interrupted run counts as done only when its size matches and, when
+    /// the depot gives us a hash, its content does too. Trusting size alone would keep a file
+    /// truncated exactly at a chunk boundary.
+    /// </summary>
+    private static bool AlreadyMaterialized(string fullPath, DepotItem item)
+    {
+        if (!File.Exists(fullPath)) return false;
+        if (new FileInfo(fullPath).Length != item.Size) return false;
+        if (item.Identity is not { } expected) return true;
+
+        using var stream = File.OpenRead(fullPath);
+        var actual = Convert.ToHexStringLower(MD5.HashData(stream));
+        return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task MaterializeAsync(
         string staging,
         List<PlannedFile> files,
         List<string> directories,
         List<DepotItem> links,
         long totalCompressed,
+        bool resuming,
         DownloadOptions options,
         IProgress<DownloadProgress>? progress,
         CancellationToken ct)
     {
         foreach (var directory in directories)
             Directory.CreateDirectory(Path.Combine(staging, directory));
+
+        if (resuming)
+        {
+            progress?.Report(new DownloadProgress("verify", 0, 0, 0, files.Count));
+
+            var verified = 0;
+            var complete = new bool[files.Count];
+            Parallel.For(0, files.Count, new ParallelOptions { CancellationToken = ct }, i =>
+            {
+                complete[i] = AlreadyMaterialized(Path.Combine(staging, files[i].RelativePath), files[i].Item);
+                progress?.Report(new DownloadProgress("verify", 0, 0, Interlocked.Increment(ref verified), files.Count));
+            });
+
+            var kept = files.Where((_, i) => complete[i]).ToList();
+            totalCompressed -= kept.Sum(f => f.Item.Chunks.Sum(c => c.CompressedSize));
+            files = files.Where((_, i) => !complete[i]).ToList();
+        }
 
         var secureLinks = new SecureLinkCache(content);
         var slots = new SemaphoreSlim(options.MaxConnections, options.MaxConnections);

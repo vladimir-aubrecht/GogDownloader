@@ -1,0 +1,78 @@
+{
+  "SchemaVersion": 4,
+  "SyncedAt": "2026-07-09T17:52:00+00:00",
+  "Failures": {},
+  "Games": [
+    {
+      "Id": 1207658930,
+      "Title": "The Witcher 3: Wild Hunt",
+      "Slug": "the_witcher_3_wild_hunt",
+      "EarlyAccess": false,
+      "Dlcs": [
+        { "ProductId": "1640424747", "Name": "Hearts of Stone" },
+        { "ProductId": "1495134380", "Name": "Blood and Wine" }
+      ],
+      "Platforms": {
+        "Windows": {
+          "Depot": { "BuildId": "b1", "Generation": 2, "VersionName": "1.32", "Manifest": "http://example.invalid/m" },
+          "Installers": [],
+          "DownloadSize": 32212254720,
+          "InstalledSize": 51539607552
+        },
+        "Mac": {
+          "Depot": { "BuildId": "b2", "Generation": 2, "VersionName": "1.32", "Manifest": "http://example.invalid/m" },
+          "Installers": [],
+          "DownloadSize": 30000000000,
+          "InstalledSize": 48000000000
+        }
+      }
+    },
+    {
+      "Id": 1207666073,
+      "Title": "FTL: Faster Than Light",
+      "Slug": "faster_than_light",
+      "EarlyAccess": false,
+      "Dlcs": [],
+      "Platforms": {
+        "Windows": {
+          "Depot": { "BuildId": "b3", "Generation": 2, "VersionName": "1.6", "Manifest": "http://example.invalid/m" },
+          "Installers": [],
+          "DownloadSize": 178257920,
+          "InstalledSize": 241172480
+        },
+        "Linux": {
+          "Depot": null,
+          "Installers": [{ "Language": "en", "Version": null, "TotalSize": 190000000 }]
+        }
+      }
+    },
+    {
+      "Id": 1207662883,
+      "Title": "Ultima 1+2+3",
+      "Slug": "ultima_1_2_3",
+      "EarlyAccess": false,
+      "Dlcs": [],
+      "Platforms": {
+        "Windows": {
+          "Depot": null,
+          "Installers": [{ "Language": "en", "Version": null, "TotalSize": 45088768 }]
+        }
+      }
+    },
+    {
+      "Id": 9999999999,
+      "Title": "Ancient Bundle (GOTY)",
+      "Slug": "ancient_bundle",
+      "EarlyAccess": true,
+      "Dlcs": [],
+      "Platforms": {
+        "Windows": {
+          "Depot": { "BuildId": "old", "Generation": 1, "VersionName": null, "Manifest": "http://example.invalid/v1" },
+          "Installers": [],
+          "DownloadSize": 1048576,
+          "InstalledSize": 2097152
+        }
+      }
+    }
+  ]
+}

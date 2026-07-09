@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>GogDownloader.Probes</AssemblyName>
+    <RootNamespace>GogDownloader.Probes</RootNamespace>
+  </PropertyGroup>
+
+  <!-- No test framework on purpose: this project depends on nothing outside the SDK,
+       matching the rest of the repo. `Probe.Check` is all the assertion machinery needed. -->
+  <ItemGroup>
+    <ProjectReference Include="../../src/GogDownloader.Core/GogDownloader.Core.csproj" />
+    <ProjectReference Include="../../src/GogDownloader.Cli/GogDownloader.Cli.csproj" />
+  </ItemGroup>
+
+</Project>

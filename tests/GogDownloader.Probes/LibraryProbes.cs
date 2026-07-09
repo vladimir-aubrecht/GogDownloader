@@ -1,0 +1,55 @@
+using GogDownloader.Cli;
+using GogDownloader.Core.Content;
+using GogDownloader.Core.Download;
+using GogDownloader.Core.Library;
+
+namespace GogDownloader.Probes;
+
+/// <summary>
+/// Snapshot semantics. A stale snapshot silently reporting zeros is the failure mode worth
+/// guarding, so the schema gates get their own checks.
+/// </summary>
+public static class LibraryProbes
+{
+    public static void Run()
+    {
+        Probe.Group("Size reported for a game");
+        var withDepot = new PlatformAvailability
+        {
+            Depot = new BuildRef("b", 2, "1", "http://x"),
+            DownloadSize = 5_000_000_000,
+            InstalledSize = 12_000_000_000,
+            Installers = [new InstallerRef("en", null, 999)],
+        };
+        Probe.Check("a depot wins over an installer", withDepot.BestKnownSize == 5_000_000_000);
+        Probe.Check("without a depot the installer is used",
+            new PlatformAvailability { Installers = [new InstallerRef("en", null, 777)] }.BestKnownSize == 777);
+        Probe.Check("with neither the size is zero", new PlatformAvailability().BestKnownSize == 0);
+
+        Probe.Group("Depot language filter drives the recorded size");
+        Probe.Check("a neutral depot counts", new DepotRef { Languages = ["*"] }.MatchesLanguage("en"));
+        Probe.Check("a German depot does not count towards English",
+            !new DepotRef { Languages = ["de"] }.MatchesLanguage("en"));
+
+        Probe.Group("Snapshot schema gates");
+        Probe.Check("schema 0 knows neither DLC nor sizes",
+            new LibrarySnapshot { SchemaVersion = 0 } is { KnowsDlcs: false, KnowsDepotSizes: false });
+        Probe.Check("schema 2 knows DLC but not sizes",
+            new LibrarySnapshot { SchemaVersion = 2 } is { KnowsDlcs: true, KnowsDepotSizes: false });
+        Probe.Check("schema 3 knows sizes but not early access",
+            new LibrarySnapshot { SchemaVersion = 3 } is { KnowsDepotSizes: true, KnowsEarlyAccess: false });
+        Probe.Check("schema 4 knows everything",
+            new LibrarySnapshot { SchemaVersion = 4 } is { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true });
+        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 4);
+
+        Probe.Group("Human-readable sizes");
+        Probe.Check("an unknown size is a dash, not '0 B'", CommandLine.Bytes(0) == "-", CommandLine.Bytes(0));
+        Probe.Check("bytes", CommandLine.Bytes(512) == "512 B", CommandLine.Bytes(512));
+        Probe.Check("the KiB boundary", CommandLine.Bytes(1024) == "1.0 KiB", CommandLine.Bytes(1024));
+        Probe.Check("megabytes", CommandLine.Bytes(190_000_000) == "181 MiB", CommandLine.Bytes(190_000_000));
+        Probe.Check("gigabytes", CommandLine.Bytes(32_212_254_720) == "30 GiB", CommandLine.Bytes(32_212_254_720));
+        Probe.Check("small values keep a decimal", CommandLine.Bytes(1_610_612_736) == "1.5 GiB", CommandLine.Bytes(1_610_612_736));
+        Probe.Check("TiB is the largest unit",
+            CommandLine.Bytes(5L * 1024 * 1024 * 1024 * 1024).EndsWith("TiB"));
+    }
+}

@@ -69,6 +69,7 @@ internal static class Cli
               library list [text]              list games and their slugs, filtered by text
                 --platform windows|mac|linux   only games available for this platform
                 --depot                        only games with a Galaxy depot (downloadable now)
+                --dlc                          only games with owned DLC
               library stats                    library breakdown by depot availability
 
               download <slug|id>               download a game from Galaxy depots into a zip
@@ -196,7 +197,7 @@ internal static class Cli
 
     private static async Task<int> LibrarySyncAsync(Dictionary<string, string> flags, CancellationToken ct)
     {
-        var (api, options) = CreateApi(flags);
+        var (api, content, options) = CreateContent(flags);
 
         if (options.MaxBytesPerSecond > 0)
             Console.Error.WriteLine("Note: --limit-rate has no effect here, it applies to game downloads.");
@@ -209,7 +210,7 @@ internal static class Cli
                 Console.Error.Write($"\r  {p.Done}/{p.Total} games");
         });
 
-        var sync = new LibrarySync(api, options.MaxConnections);
+        var sync = new LibrarySync(api, content, options.MaxConnections);
         var snapshot = await sync.RunAsync(progress, ct);
         Console.Error.WriteLine();
 
@@ -248,6 +249,13 @@ internal static class Cli
         }
 
         var depotOnly = flags.ContainsKey("depot");
+        var dlcOnly = flags.ContainsKey("dlc");
+
+        // Without this a stale snapshot would quietly report that nothing has DLC.
+        if (!snapshot.KnowsDlcs)
+            Console.Error.WriteLine(
+                "Note: this snapshot predates DLC tracking, so no DLC will be shown. " +
+                "Refresh it with: gogdl library sync");
 
         var games = snapshot.Games
             .Where(g => search.Length == 0
@@ -255,6 +263,7 @@ internal static class Cli
                         || g.Slug.Contains(search, StringComparison.OrdinalIgnoreCase))
             .Where(g => platform is null || g.Platforms.ContainsKey(platform.Value))
             .Where(g => !depotOnly || Depots(g, platform).Any())
+            .Where(g => !dlcOnly || g.Dlcs.Count > 0)
             .ToList();
 
         if (games.Count == 0)
@@ -280,7 +289,18 @@ internal static class Cli
                 _ => $"{depots} ({installers})",
             };
 
-            Console.WriteLine($"{game.Slug.PadRight(slugWidth)}  {availability,-22}  {game.Title}");
+            var dlc = game.Dlcs.Count > 0 ? $"+{game.Dlcs.Count} DLC" : "";
+
+            Console.WriteLine($"{game.Slug.PadRight(slugWidth)}  {availability,-16}  {dlc,-8}  {game.Title}");
+        }
+
+        // A single hit is usually someone inspecting one game before downloading it.
+        if (games is [{ Dlcs.Count: > 0 } only])
+        {
+            Console.WriteLine();
+            Console.WriteLine("Owned DLC, all of which go into the zip:");
+            foreach (var dlc in only.Dlcs)
+                Console.WriteLine($"  {dlc.Name}");
         }
 
         Console.WriteLine();

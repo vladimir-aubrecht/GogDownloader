@@ -105,6 +105,13 @@ A depot has `manifest` (hash), `productId`, `languages[]`, `osBitness`, `size` a
 `compressedSize`. A depot belongs in the download when `productId` is the base game or an
 owned DLC, **and** `languages` contains `*` or the target language.
 
+> **Language tags are full codes**, `en-US` and `de-DE`, never `en` or `de`. Comparing the
+> raw string a user typed matches only the `*` depots, and the game downloads as a near-empty
+> archive — this is exactly what happened to Agony, which listed as 44 B. gogdl resolves the
+> request first and then matches on the code, the English name, or a deprecated alias
+> (`en` → `en-US`, `cz` → `cs-CZ`). Beware that `en` must **not** match `en-GB`. The table
+> lives in `GogLanguage`, generated from gogdl's `languages.py`.
+
 The depot manifest (`{GOG_CDN}/content-system/v2/meta/{galaxy_path(depot.manifest)}`, zlib
 again) has `depot.items[]`, each with a `type`:
 

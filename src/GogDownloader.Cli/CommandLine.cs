@@ -52,6 +52,7 @@ public static class CommandLine
                 --platform windows|mac|linux   only games available for this platform
                 --depot                        only games with a Galaxy depot (downloadable now)
                 --dlc                          only games with owned DLC
+                --slugs                        print bare slugs, one per line, for scripting
               library stats                    library breakdown by depot availability
 
               download <slug|id>               download a game from Galaxy depots into a zip

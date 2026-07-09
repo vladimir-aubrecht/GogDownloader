@@ -67,6 +67,13 @@ public static class LibraryCommands
             return 1;
         }
 
+        // Bare slugs, one per line, for feeding into a loop. Everything else goes to stderr.
+        if (flags.ContainsKey("slugs"))
+        {
+            foreach (var game in games) Console.WriteLine(game.Slug);
+            return 0;
+        }
+
         var slugWidth = Math.Min(games.Max(g => g.Slug.Length), 44);
 
         foreach (var game in games)

@@ -42,6 +42,7 @@ expect "list filters by DLC"          "1 game,"                    gogdl library
 expect "list marks installer-only"    "(win)"                      gogdl library list ultima
 expect "list rejects bad platform"    "Unknown platform"           gogdl library list --platform amiga
 expect "list reports no matches"      "Nothing matches"            gogdl library list zzzznope
+expect "list --slugs prints bare slugs" "faster_than_light"        gogdl library list --slugs --depot --platform windows
 expect "stats counts depotless games" "without a depot: 1"         gogdl library stats
 expect "stats pluralises correctly"   "1 title "                   gogdl library stats
 expect "download needs a game"        "Missing game"               gogdl download

@@ -36,11 +36,13 @@ public static class LibraryProbes
             new LibrarySnapshot { SchemaVersion = 0 } is { KnowsDlcs: false, KnowsDepotSizes: false });
         Probe.Check("schema 2 knows DLC but not sizes",
             new LibrarySnapshot { SchemaVersion = 2 } is { KnowsDlcs: true, KnowsDepotSizes: false });
-        Probe.Check("schema 3 knows sizes but not early access",
-            new LibrarySnapshot { SchemaVersion = 3 } is { KnowsDepotSizes: true, KnowsEarlyAccess: false });
-        Probe.Check("schema 4 knows everything",
-            new LibrarySnapshot { SchemaVersion = 4 } is { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true });
-        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 4);
+        // Schema 3 and 4 recorded sizes, but a broken language filter made them far too small,
+        // so they must not be trusted any more than a missing field.
+        Probe.Check("schema 4 knows early access but not trustworthy sizes",
+            new LibrarySnapshot { SchemaVersion = 4 } is { KnowsEarlyAccess: true, KnowsDepotSizes: false });
+        Probe.Check("schema 5 knows everything",
+            new LibrarySnapshot { SchemaVersion = 5 } is { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true });
+        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 5);
 
         Probe.Group("Human-readable sizes");
         Probe.Check("an unknown size is a dash, not '0 B'", CommandLine.Bytes(0) == "-", CommandLine.Bytes(0));

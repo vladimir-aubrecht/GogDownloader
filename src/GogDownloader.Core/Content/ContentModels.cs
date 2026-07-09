@@ -24,9 +24,18 @@ public sealed record DepotRef
     [JsonPropertyName("size")] public long Size { get; init; }
     [JsonPropertyName("compressedSize")] public long CompressedSize { get; init; }
 
-    /// <summary>`*` means a language-neutral depot (binaries, assets).</summary>
-    public bool MatchesLanguage(string language) =>
-        Languages.Any(l => l == "*" || string.Equals(l, language, StringComparison.OrdinalIgnoreCase));
+    /// <summary>
+    /// `*` means a language-neutral depot (binaries, assets). Everything else is tagged with a
+    /// full code such as `en-US`, so the request has to be resolved before comparing — matching
+    /// the raw string would drop every localised depot and leave a near-empty archive.
+    /// </summary>
+    public bool MatchesLanguage(string requested)
+    {
+        if (Languages.Contains("*")) return true;
+
+        var language = GogLanguage.Parse(requested);
+        return language is not null && Languages.Any(language.Matches);
+    }
 }
 
 /// <summary>The contents of `build.repository_manifest` after zlib decompression.</summary>

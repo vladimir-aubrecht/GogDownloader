@@ -64,6 +64,31 @@ public static class ContentProbes
         Probe.Check("'de' does not match 'en'", !new DepotRef { Languages = ["de"] }.MatchesLanguage("en"));
         Probe.Check("matching ignores case", new DepotRef { Languages = ["de"] }.MatchesLanguage("DE"));
 
+        // Depots carry full codes. Comparing the raw request would match nothing but the
+        // neutral depots, and the game would download as a near-empty archive.
+        Probe.Check("'en' matches a depot tagged en-US",
+            new DepotRef { Languages = ["en-US"] }.MatchesLanguage("en"));
+        Probe.Check("'en' does not match British English",
+            !new DepotRef { Languages = ["en-GB"] }.MatchesLanguage("en"));
+        Probe.Check("'de' matches a depot tagged de-DE",
+            new DepotRef { Languages = ["de-DE"] }.MatchesLanguage("de"));
+        Probe.Check("'cz' matches a depot tagged cs-CZ",
+            new DepotRef { Languages = ["cs-CZ"] }.MatchesLanguage("cz"));
+        Probe.Check("'en' does not match a German depot",
+            !new DepotRef { Languages = ["de-DE"] }.MatchesLanguage("en"));
+        Probe.Check("a depot listing several languages matches any of them",
+            new DepotRef { Languages = ["de-DE", "en-US"] }.MatchesLanguage("en"));
+        Probe.Check("an unknown request matches nothing",
+            !new DepotRef { Languages = ["en-US"] }.MatchesLanguage("klingon"));
+
+        Probe.Group("Language table");
+        Probe.Check("'en' resolves to en-US", GogLanguage.Parse("en")?.Code == "en-US", GogLanguage.Parse("en")?.Code);
+        Probe.Check("the full code resolves to itself", GogLanguage.Parse("en-US")?.Code == "en-US");
+        Probe.Check("the English name resolves", GogLanguage.Parse("English")?.Code == "en-US");
+        Probe.Check("'cz' resolves to cs-CZ", GogLanguage.Parse("cz")?.Code == "cs-CZ");
+        Probe.Check("an unknown language resolves to null", GogLanguage.Parse("klingon") is null);
+        Probe.Check("the table came from gogdl in full", GogLanguage.All.Length == 84, GogLanguage.All.Length.ToString());
+
         Probe.Group("Repository manifest");
         const string repository = """
             {"version":2,"baseProductId":"1207658930","buildId":"55","installDirectory":"The Game",

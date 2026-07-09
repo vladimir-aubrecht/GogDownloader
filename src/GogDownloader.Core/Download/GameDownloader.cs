@@ -219,7 +219,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
     /// <see cref="ZipFile.CreateFromDirectory(string, string)"/>, so that a multi-hour archive
     /// of a large game still reports progress.
     /// </summary>
-    private static void CopyInterruptibly(Stream source, Stream destination, CancellationToken ct)
+    private static void CopyInterruptibly(
+        Stream source, Stream destination, CancellationToken ct, Action<int>? onWritten = null)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
         try
@@ -229,6 +230,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             {
                 ct.ThrowIfCancellationRequested();
                 destination.Write(buffer, 0, read);
+                onWritten?.Invoke(read);
             }
         }
         finally
@@ -277,16 +279,19 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             return;
         }
 
-        progress?.Report(new DownloadProgress("copy", 0, 0, 0, 0));
+        var total = new FileInfo(stagingZip).Length;
+        long copied = 0;
 
         var temp = archivePath + ".tmp";
         try
         {
             // File.Copy would ignore Ctrl+C for the whole transfer, which over a network
-            // share is exactly the part worth interrupting.
+            // share is exactly the part worth interrupting. It would also say nothing while
+            // tens of gigabytes crawl across the wire.
             using (var source = File.OpenRead(stagingZip))
             using (var destination = File.Create(temp))
-                CopyInterruptibly(source, destination, ct);
+                CopyInterruptibly(source, destination, ct, written =>
+                    progress?.Report(new DownloadProgress("copy", copied += written, total, 0, 1)));
         }
         catch (OperationCanceledException)
         {
@@ -296,6 +301,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
         File.Move(temp, archivePath, overwrite: true);
         File.Delete(stagingZip);
+        progress?.Report(new DownloadProgress("copy", total, total, 1, 1));
     }
 
     private async Task<(List<PlannedFile> Files, List<string> Directories, List<DepotItem> Links)> PlanAsync(

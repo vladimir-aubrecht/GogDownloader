@@ -64,7 +64,7 @@ public sealed record LibraryEntry
 public sealed record LibrarySnapshot
 {
     /// <summary>Bumped when a sync starts recording something older snapshots lack.</summary>
-    public const int CurrentSchema = 4;
+    public const int CurrentSchema = 5;
 
     /// <summary>Absent in snapshots written before schema versioning, hence 0.</summary>
     public int SchemaVersion { get; init; }
@@ -72,8 +72,11 @@ public sealed record LibrarySnapshot
     /// <summary>Schema 2 added the DLC list; older snapshots would report no DLC at all.</summary>
     public bool KnowsDlcs => SchemaVersion >= 2;
 
-    /// <summary>Schema 3 added depot sizes; older snapshots would report zero bytes.</summary>
-    public bool KnowsDepotSizes => SchemaVersion >= 3;
+    /// <summary>
+    /// Schema 3 added depot sizes, but schema 4 and older computed them with a broken language
+    /// filter that matched only language-neutral depots, so they read far too small.
+    /// </summary>
+    public bool KnowsDepotSizes => SchemaVersion >= 5;
 
     /// <summary>Schema 4 added the early-access flag, which names the archive for GameVault.</summary>
     public bool KnowsEarlyAccess => SchemaVersion >= 4;

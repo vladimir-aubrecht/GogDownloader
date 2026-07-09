@@ -142,7 +142,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         var state = new StagingState(build.BuildId, options.Language, options.Platform.ContentSystemName());
         var resumable = !options.Clean && StagingState.Load(staging) == state;
 
-        if (Directory.Exists(staging) && !resumable) Directory.Delete(staging, recursive: true);
+        if (!resumable) StagingState.Discard(staging);
         Directory.CreateDirectory(staging);
         state.Save(staging);
 

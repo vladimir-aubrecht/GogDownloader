@@ -35,6 +35,17 @@ public sealed record StagingState(string BuildId, string Language, string Platfo
         var path = PathFor(staging);
         if (File.Exists(path)) File.Delete(path);
     }
+
+    /// <summary>Throw away a staging directory and its marker together; one without the other
+    /// would either strand gigabytes or offer a resume with nothing to resume from.</summary>
+    public static void Discard(string staging)
+    {
+        if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+        Remove(staging);
+
+        var zip = staging + ".zip";
+        if (File.Exists(zip)) File.Delete(zip);
+    }
 }
 
 /// <summary>Carries the staging path so the CLI can tell the user how to resume.</summary>

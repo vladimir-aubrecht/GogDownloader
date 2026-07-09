@@ -62,7 +62,8 @@ public static class CommandLine
                 --limit-rate 5M                speed cap (k/M/G)
                 --staging DIR                  where to assemble and zip, default local app data
                 --compression-threads N        deflate workers, default one per core
-                --clean                        discard a staging dir left by an interrupted run
+                --clean                        start over, and delete downloads on interrupt
+                --keep                         on interrupt keep downloads without asking
                 --no-verify                    skip reading the archive back to check it
                 --force                        re-download even a completed build
 

@@ -101,6 +101,21 @@ public static class DownloadProbes
         Probe.Check("a removed marker means no resume", StagingState.Load(staged) is null);
         Probe.Check("an absent marker means no resume", StagingState.Load(Path.Combine(root, "never")) is null);
 
+        // Discarding must take the marker and any half-built zip with it, or the next run
+        // would offer to resume from nothing.
+        var discardable = Path.Combine(root, "discardable");
+        Directory.CreateDirectory(discardable);
+        File.WriteAllText(Path.Combine(discardable, "game.bin"), "data");
+        File.WriteAllText(discardable + ".zip", "half a zip");
+        new StagingState("b", "en", "windows").Save(discardable);
+
+        StagingState.Discard(discardable);
+        Probe.Check("discard removes the files", !Directory.Exists(discardable));
+        Probe.Check("discard removes the marker", StagingState.Load(discardable) is null);
+        Probe.Check("discard removes a half-built zip", !File.Exists(discardable + ".zip"));
+        StagingState.Discard(discardable);   // must not throw on an already-clean directory
+        Probe.Check("discarding twice is harmless", true);
+
         await ZipAndPublishAsync(root);
 
         Probe.Group("Free space");

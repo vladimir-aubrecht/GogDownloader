@@ -6,13 +6,13 @@ var interrupts = 0;
 
 Console.CancelKeyPress += (_, e) =>
 {
-    // Cleaning up a staging directory of tens of gigabytes takes a while. A second Ctrl+C
+    // Unwinding a download and asking what to do with it takes a moment. A second Ctrl+C
     // means the user wants out now, so let it kill the process.
     if (Interlocked.Increment(ref interrupts) > 1) return;
 
     e.Cancel = true;
     cts.Cancel();
-    Console.Error.WriteLine("\nInterrupting, cleaning up... press Ctrl+C again to force quit.");
+    Console.Error.WriteLine("\nInterrupting... press Ctrl+C again to force quit.");
 };
 
 try

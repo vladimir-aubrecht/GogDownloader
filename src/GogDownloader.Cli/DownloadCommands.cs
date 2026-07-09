@@ -69,11 +69,7 @@ public static class DownloadCommands
         }
         catch (DownloadInterruptedException interrupted)
         {
-            // Deleting tens of gigabytes on the user's behalf is not ours to decide.
-            Console.Error.WriteLine();
-            Console.Error.WriteLine($"Interrupted. Downloaded files kept in:");
-            Console.Error.WriteLine($"  {interrupted.StagingDirectory}");
-            Console.Error.WriteLine("Run the same command again to resume, or add --clean to start over.");
+            OnInterrupted(interrupted.StagingDirectory, flags);
             return 130;
         }
 
@@ -90,6 +86,62 @@ public static class DownloadCommands
             default:
                 Console.Error.WriteLine($"Skipped: {result.Detail}");
                 return 3;
+        }
+    }
+
+    /// <summary>
+    /// Whether to throw away a partly downloaded game is the user's call, so ask. Without a
+    /// terminal there is nobody to ask, and discarding gigabytes unattended is the worse
+    /// mistake, so the files stay.
+    /// </summary>
+    private static void OnInterrupted(string staging, Dictionary<string, string> flags)
+    {
+        Console.Error.WriteLine();
+
+        var size = DirectorySize(staging);
+        Console.Error.WriteLine($"Interrupted. Downloaded files in {staging}");
+        if (size > 0) Console.Error.WriteLine($"  {CommandLine.Bytes(size)} downloaded so far.");
+
+        if (flags.ContainsKey("clean")) { Discard(staging); return; }
+        if (flags.ContainsKey("keep")) { Keep(); return; }
+
+        if (Console.IsInputRedirected)
+        {
+            Console.Error.WriteLine("No terminal to ask, so the files are kept.");
+            Keep();
+            return;
+        }
+
+        Console.Error.Write("Delete them? Keeping lets the next run resume. [y/N] ");
+        var answer = Console.ReadLine()?.Trim() ?? "";
+
+        // Anything but an explicit yes keeps the data: a stray keypress must not cost a download.
+        if (answer.StartsWith('y') || answer.StartsWith('Y'))
+            Discard(staging);
+        else
+            Keep();
+
+        void Keep() =>
+            Console.Error.WriteLine("Kept. Run the same command again to resume.");
+
+        void Discard(string path)
+        {
+            StagingState.Discard(path);
+            Console.Error.WriteLine("Deleted.");
+        }
+    }
+
+    private static long DirectorySize(string path)
+    {
+        if (!Directory.Exists(path)) return 0;
+        try
+        {
+            return Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+                .Sum(f => new FileInfo(f).Length);
+        }
+        catch (IOException)
+        {
+            return 0;
         }
     }
 }

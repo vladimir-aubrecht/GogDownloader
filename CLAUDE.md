@@ -26,6 +26,12 @@ documentation. **Do not go hunting for endpoints on the web.** Refresh it with
   bundles and compilations (Ultima, Might and Magic, Commandos 2+3).
 - **DLC:** owned DLC belongs in the zip. The DLC list is `products[]` straight from the
   repository manifest, intersected with owned ids — no extra API call.
+- **Sizes** live in the repository manifest (`compressedSize` = bytes downloaded, `size` = bytes
+  on disk) and are recorded by `library sync`. They are language-dependent, so the snapshot
+  records them for `en`, matching the default of `download --language`.
+- **Snapshot schema** is versioned. When a sync starts recording something older snapshots
+  lack, bump `LibrarySnapshot.CurrentSchema` and warn on read — a stale snapshot silently
+  reporting zero is worse than an error.
 - **Redistributables** (`dependencies` in the manifest): **not downloaded.** They are
   recorded in `.gogdl.json` as `skippedDependencies` so it stays visible what the game wanted.
 - **Archive:** zip everywhere. Symlinks are dereferenced; unix permissions are not preserved —

@@ -25,7 +25,7 @@ catch (OperationCanceledException)
     return 130;
 }
 
-internal static class Cli
+public static class Cli
 {
     public static string Version =>
         typeof(Cli).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
@@ -117,12 +117,6 @@ internal static class Cli
         };
         var digits = multiplier == 1 ? value : value[..^1];
         return long.TryParse(digits, out var n) && n > 0 ? n * multiplier : 0;
-    }
-
-    private static (GogApiClient Api, GogHttpOptions Options) CreateApi(Dictionary<string, string> flags)
-    {
-        var options = OptionsFrom(flags);
-        return (new GogApiClient(GogHttpFactory.Create(options, Tokens(options))), options);
     }
 
     private static TokenProvider Tokens(GogHttpOptions options) =>
@@ -251,10 +245,10 @@ internal static class Cli
         var depotOnly = flags.ContainsKey("depot");
         var dlcOnly = flags.ContainsKey("dlc");
 
-        // Without this a stale snapshot would quietly report that nothing has DLC.
-        if (!snapshot.KnowsDlcs)
+        // Without this a stale snapshot would quietly report no DLC and zero bytes.
+        if (!snapshot.KnowsDlcs || !snapshot.KnowsDepotSizes)
             Console.Error.WriteLine(
-                "Note: this snapshot predates DLC tracking, so no DLC will be shown. " +
+                "Note: this snapshot predates DLC and size tracking, so both will be missing. " +
                 "Refresh it with: gogdl library sync");
 
         var games = snapshot.Games
@@ -291,23 +285,47 @@ internal static class Cli
 
             var dlc = game.Dlcs.Count > 0 ? $"+{game.Dlcs.Count} DLC" : "";
 
-            Console.WriteLine($"{game.Slug.PadRight(slugWidth)}  {availability,-16}  {dlc,-8}  {game.Title}");
+            Console.WriteLine(
+                $"{game.Slug.PadRight(slugWidth)}  {availability,-16}  {Bytes(Size(game, platform)),9}  " +
+                $"{dlc,-8}  {game.Title}");
         }
 
+        var total = games.Sum(g => Size(g, platform));
+
         // A single hit is usually someone inspecting one game before downloading it.
-        if (games is [{ Dlcs.Count: > 0 } only])
+        if (games is [var only])
         {
-            Console.WriteLine();
-            Console.WriteLine("Owned DLC, all of which go into the zip:");
-            foreach (var dlc in only.Dlcs)
-                Console.WriteLine($"  {dlc.Name}");
+            var depot = Depots(only, platform)
+                .Select(p => only.Platforms[p])
+                .FirstOrDefault();
+
+            if (depot is not null)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"  download {Bytes(depot.DownloadSize)}, " +
+                                  $"unpacked {Bytes(depot.InstalledSize)}");
+            }
+
+            if (only.Dlcs.Count > 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Owned DLC, all of which go into the zip:");
+                foreach (var dlc in only.Dlcs)
+                    Console.WriteLine($"  {dlc.Name}");
+            }
         }
 
         Console.WriteLine();
-        Console.WriteLine($"{games.Count} {(games.Count == 1 ? "game" : "games")}. " +
+        Console.WriteLine($"{games.Count} {(games.Count == 1 ? "game" : "games")}, {Bytes(total)} to download. " +
                           "Plain = Galaxy depot, (parentheses) = installer only, not downloadable yet.");
         Console.WriteLine("Pass the slug to: gogdl download <slug>");
         return 0;
+
+        static long Size(LibraryEntry game, GamePlatform? only) =>
+            only is not null
+                ? game.Platforms.GetValueOrDefault(only.Value)?.BestKnownSize ?? 0
+                // No platform picked: one download per game, so the largest is the honest guess.
+                : game.Platforms.Values.Select(p => p.BestKnownSize).DefaultIfEmpty(0).Max();
 
         static IEnumerable<GamePlatform> Depots(LibraryEntry game, GamePlatform? only) =>
             game.Platforms
@@ -343,11 +361,11 @@ internal static class Cli
 
             var depot = present.Count(p => p.HasDepot);
             var installerOnly = present.Count(p => !p.HasDepot && p.HasInstaller);
-            var size = present.Sum(p => p.LargestInstallerSize);
+            var size = present.Sum(p => p.BestKnownSize);
 
             Console.WriteLine(
-                $"{platform,-8} {present.Count,4} games   depot: {depot,4}   " +
-                $"installer only: {installerOnly,4}   ~{Gib(size):N0} GiB");
+                $"{platform,-8} {present.Count,4} titles   depot: {depot,4}   " +
+                $"installer only: {installerOnly,4}   {Bytes(size),9} to download");
         }
 
         Console.WriteLine();
@@ -434,11 +452,28 @@ internal static class Cli
         }
     }
 
-    private static double Gib(long bytes) => bytes / 1024d / 1024d / 1024d;
+    /// <summary>Human-readable size. Unknown sizes print as a dash, not as "0 B".</summary>
+    public static string Bytes(long bytes)
+    {
+        if (bytes <= 0) return "-";
+
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        double value = bytes;
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        return value < 10 && unit > 0
+            ? $"{value:F1} {units[unit]}"
+            : $"{value:F0} {units[unit]}";
+    }
 }
 
 /// <summary>Rewrites a single line instead of flooding the terminal.</summary>
-internal sealed class ConsoleProgress : IProgress<DownloadProgress>
+public sealed class ConsoleProgress : IProgress<DownloadProgress>
 {
     private readonly long _startedAt = Stopwatch.GetTimestamp();
     private long _lastRender;
@@ -454,7 +489,17 @@ internal sealed class ConsoleProgress : IProgress<DownloadProgress>
         var speed = elapsed > 0 ? p.Bytes / elapsed / 1024 / 1024 : 0;
         var percent = p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes : 0;
 
+        // Remaining time is only meaningful once the speed has settled a little.
+        var eta = speed > 0.1 && p.Bytes > 0 && p.TotalBytes > p.Bytes
+            ? TimeSpan.FromSeconds((p.TotalBytes - p.Bytes) / (p.Bytes / elapsed))
+            : (TimeSpan?)null;
+
+        // The manifest phase has nothing to size yet; "-/-" would just be noise.
+        var size = p.TotalBytes > 0 ? $"{Cli.Bytes(p.Bytes)}/{Cli.Bytes(p.TotalBytes)}" : "";
+        var remaining = eta is { } left ? $"  ETA {left:hh\\:mm\\:ss}" : "";
+
         Console.Error.Write(
-            $"\r  {p.Phase,-8} {percent,5:F1} %  {p.Files}/{p.TotalFiles} files  {speed,6:F1} MiB/s   ");
+            $"\r  {p.Phase,-8} {percent,5:F1} %  {size,-20}  {p.Files}/{p.TotalFiles} files  " +
+            $"{speed,6:F1} MiB/s{remaining}   ");
     }
 }

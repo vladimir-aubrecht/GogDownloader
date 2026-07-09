@@ -18,11 +18,23 @@ public sealed record PlatformAvailability
     /// <summary>Offline installers from api.gog.com.</summary>
     public List<InstallerRef> Installers { get; init; } = [];
 
+    /// <summary>
+    /// Bytes actually transferred from the CDN: the sum of `compressedSize` over the depots
+    /// that would be downloaded. Assumes the default language, see <see cref="LibrarySync"/>.
+    /// </summary>
+    public long DownloadSize { get; init; }
+
+    /// <summary>Bytes the assembled game occupies before zipping: the sum of depot `size`.</summary>
+    public long InstalledSize { get; init; }
+
     public bool HasDepot => Depot is not null;
     public bool HasInstaller => Installers.Count > 0;
     public bool Unavailable => !HasDepot && !HasInstaller;
 
     public long LargestInstallerSize => Installers.Count == 0 ? 0 : Installers.Max(i => i.TotalSize);
+
+    /// <summary>What to show as "size": the depot if there is one, otherwise the installer.</summary>
+    public long BestKnownSize => HasDepot ? DownloadSize : LargestInstallerSize;
 }
 
 public sealed record DlcRef(string ProductId, string Name);
@@ -49,13 +61,16 @@ public sealed record LibraryEntry
 public sealed record LibrarySnapshot
 {
     /// <summary>Bumped when a sync starts recording something older snapshots lack.</summary>
-    public const int CurrentSchema = 2;
+    public const int CurrentSchema = 3;
 
     /// <summary>Absent in snapshots written before schema versioning, hence 0.</summary>
     public int SchemaVersion { get; init; }
 
     /// <summary>Schema 2 added the DLC list; older snapshots would report no DLC at all.</summary>
     public bool KnowsDlcs => SchemaVersion >= 2;
+
+    /// <summary>Schema 3 added depot sizes; older snapshots would report zero bytes.</summary>
+    public bool KnowsDepotSizes => SchemaVersion >= 3;
 
     public DateTimeOffset SyncedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<LibraryEntry> Games { get; init; } = [];
@@ -93,6 +108,13 @@ public sealed record LibrarySnapshot
 public sealed class LibrarySync(GogApiClient api, ContentClient content, int maxParallelism)
 {
     private static readonly GamePlatform[] DepotPlatforms = [GamePlatform.Windows, GamePlatform.Mac];
+
+    /// <summary>
+    /// Depot sizes are language-dependent, so a snapshot has to pick one. This matches the
+    /// default of `download --language`; other languages will differ by the size of their
+    /// voice-over depots.
+    /// </summary>
+    private const string SizeLanguage = "en";
 
     public async Task<LibrarySnapshot> RunAsync(
         IProgress<(int done, int total)>? progress = null, CancellationToken ct = default)
@@ -151,15 +173,34 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
             list.Add(new InstallerRef(installer.Language, installer.Version, installer.TotalSize));
         }
 
+        var dlcs = new List<DlcRef>();
+
         // Depots exist only for Windows and macOS. Linux always goes through an installer.
         foreach (var platform in DepotPlatforms)
         {
             var build = await api.GetLatestBuildAsync(id, platform, ct);
             if (build is null) continue;
+
+            var repository = build.Manifest is null
+                ? null
+                : await content.GetRepositoryManifestAsync(build.Manifest, ct);
+
+            var wanted = WantedProducts(repository, owned);
+
+            // The DLC list is the same for every platform, so the first manifest wins.
+            if (dlcs.Count == 0 && repository is not null)
+                dlcs = OwnedDlcs(repository, owned);
+
+            var depots = repository?.Depots
+                .Where(d => wanted.Contains(d.ProductId) && d.MatchesLanguage(SizeLanguage))
+                .ToList() ?? [];
+
             platforms[platform] = new PlatformAvailability
             {
                 Depot = new BuildRef(build.BuildId, build.Generation, build.VersionName, build.Manifest),
                 Installers = installers.GetValueOrDefault(platform, []),
+                DownloadSize = depots.Sum(d => d.CompressedSize),
+                InstalledSize = depots.Sum(d => d.Size),
             };
         }
 
@@ -177,30 +218,27 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
             Title = product.Title,
             Slug = string.IsNullOrEmpty(product.Slug) ? id.ToString() : product.Slug,
             Platforms = platforms,
-            Dlcs = await OwnedDlcsAsync(platforms, owned, ct),
+            Dlcs = dlcs,
         };
     }
 
     /// <summary>
-    /// The DLC list lives in `products[]` of the repository manifest, so it exists only for
-    /// games that have a depot. Any depot platform will do — the product list is the same.
+    /// Owned DLC from `products[]` of the repository manifest — the same source the downloader
+    /// uses, so a listing cannot disagree with what ends up in the zip.
     /// </summary>
-    private async Task<List<DlcRef>> OwnedDlcsAsync(
-        Dictionary<GamePlatform, PlatformAvailability> platforms, HashSet<long> owned, CancellationToken ct)
-    {
-        var manifestUrl = DepotPlatforms
-            .Select(p => platforms.GetValueOrDefault(p)?.Depot?.Manifest)
-            .FirstOrDefault(url => url is not null);
-
-        if (manifestUrl is null) return [];
-
-        var repository = await content.GetRepositoryManifestAsync(manifestUrl, ct);
-        if (repository is null) return [];
-
-        return repository.Products
+    private static List<DlcRef> OwnedDlcs(RepositoryManifest repository, HashSet<long> owned) =>
+        repository.Products
             .Where(p => p.ProductId != repository.BaseProductId
                         && long.TryParse(p.ProductId, out var n) && owned.Contains(n))
             .Select(p => new DlcRef(p.ProductId, p.Name))
             .ToList();
+
+    /// <summary>Base game plus owned DLC — exactly the depots a download would pull.</summary>
+    private static HashSet<string> WantedProducts(RepositoryManifest? repository, HashSet<long> owned)
+    {
+        if (repository is null) return [];
+        var wanted = OwnedDlcs(repository, owned).Select(d => d.ProductId).ToHashSet();
+        wanted.Add(repository.BaseProductId);
+        return wanted;
     }
 }

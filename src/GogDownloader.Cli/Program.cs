@@ -8,7 +8,18 @@ using GogDownloader.Core.Http;
 using GogDownloader.Core.Library;
 
 var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+var interrupts = 0;
+
+Console.CancelKeyPress += (_, e) =>
+{
+    // Cleaning up a staging directory of tens of gigabytes takes a while. A second Ctrl+C
+    // means the user wants out now, so let it kill the process.
+    if (Interlocked.Increment(ref interrupts) > 1) return;
+
+    e.Cancel = true;
+    cts.Cancel();
+    Console.Error.WriteLine("\nInterrupting, cleaning up... press Ctrl+C again to force quit.");
+};
 
 try
 {

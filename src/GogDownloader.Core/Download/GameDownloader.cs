@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Compression;
 using Microsoft.Win32.SafeHandles;
 using GogDownloader.Core.Api;
@@ -14,21 +15,28 @@ public sealed record DownloadOptions
     public int MaxConnections { get; init; } = 8;
 
     /// <summary>
-    /// Where the game is assembled and zipped. Defaults to local temp, never to
-    /// <see cref="OutputRoot"/>: staging on a network share would push every byte across the
-    /// wire three times (write files, read them back to zip, write the zip).
-    /// Needs room for the unpacked game plus the zip.
+    /// Where the game is assembled and zipped. Never <see cref="OutputRoot"/>: staging on a
+    /// network share would push every byte across the wire three times (write files, read them
+    /// back to zip, write the zip). Needs room for the unpacked game plus the zip.
     /// </summary>
     public string? StagingRoot { get; init; }
 
     /// <summary>Re-download even what the manifest already reports as done.</summary>
     public bool Force { get; init; }
 
-    public string StagingDirectory =>
-        StagingRoot ?? Path.Combine(Path.GetTempPath(), "gogdl-staging");
+    /// <summary>
+    /// Local app data, not <see cref="Path.GetTempPath"/>: on Linux temp is often a tmpfs
+    /// living in RAM, and a large game would exhaust it.
+    /// </summary>
+    public string StagingDirectory => StagingRoot ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "gogdownloader", "staging");
 }
 
-public enum DownloadOutcome { Completed, AlreadyDone, NoDepot, UnsupportedGeneration, NoDepotForLanguage }
+public enum DownloadOutcome
+{
+    Completed, AlreadyDone, NoDepot, UnsupportedGeneration, NoDepotForLanguage, NotEnoughSpace,
+}
 
 public sealed record DownloadResult(DownloadOutcome Outcome, string? ArchivePath = null, string? Detail = null);
 
@@ -98,6 +106,21 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
         var staging = Path.Combine(
             options.StagingDirectory, $"{game.DirectoryName}__{options.Platform.ContentSystemName()}");
+
+        Directory.CreateDirectory(options.StagingDirectory);
+        Directory.CreateDirectory(gameDirectory);
+
+        // Staging holds the unpacked game and the zip side by side; the target only needs the
+        // zip. Failing here beats failing after an hour of downloading.
+        if (FreeSpaceShortfall(options.StagingDirectory, installedSize + totalCompressed) is { } short1)
+            return new DownloadResult(DownloadOutcome.NotEnoughSpace,
+                Detail: $"{options.StagingDirectory} needs {Human(short1)} more free. Pick another --staging.");
+
+        if (!SameVolume(options.StagingDirectory, gameDirectory)
+            && FreeSpaceShortfall(gameDirectory, totalCompressed) is { } short2)
+            return new DownloadResult(DownloadOutcome.NotEnoughSpace,
+                Detail: $"{gameDirectory} needs {Human(short2)} more free.");
+
         if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
         Directory.CreateDirectory(staging);
 
@@ -109,9 +132,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             if (File.Exists(stagingZip)) File.Delete(stagingZip);
             ZipDirectory(staging, stagingZip, progress, ct);
 
-            Directory.CreateDirectory(gameDirectory);
             var archivePath = Path.Combine(gameDirectory, archiveName);
-            PublishArchive(stagingZip, archivePath, SameVolume(stagingZip, archivePath), progress);
+            PublishArchive(stagingZip, archivePath, SameVolume(stagingZip, archivePath), progress, ct);
 
             var manifest = existing ?? new BackupManifest
             {
@@ -159,30 +181,91 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToList();
 
-        using var stream = File.Create(zipPath);
-        using var archive = new ZipArchive(stream, ZipArchiveMode.Create);
-
-        var done = 0;
-        foreach (var entry in entries)
+        try
         {
-            ct.ThrowIfCancellationRequested();
+            using var stream = File.Create(zipPath);
+            using var archive = new ZipArchive(stream, ZipArchiveMode.Create);
 
-            var relative = Path.GetRelativePath(staging, entry).Replace('\\', '/');
-
-            if (Directory.Exists(entry))
+            var done = 0;
+            foreach (var entry in entries)
             {
-                // Empty directories only survive as an explicit trailing-slash entry.
-                if (!Directory.EnumerateFileSystemEntries(entry).Any())
-                    archive.CreateEntry(relative + "/");
-            }
-            else
-            {
-                archive.CreateEntryFromFile(entry, relative, CompressionLevel.Optimal);
-            }
+                ct.ThrowIfCancellationRequested();
 
-            progress?.Report(new DownloadProgress("zip", 0, 0, ++done, entries.Count));
+                var relative = Path.GetRelativePath(staging, entry).Replace('\\', '/');
+
+                if (Directory.Exists(entry))
+                {
+                    // Empty directories only survive as an explicit trailing-slash entry.
+                    if (!Directory.EnumerateFileSystemEntries(entry).Any())
+                        archive.CreateEntry(relative + "/");
+                }
+                else
+                {
+                    AddFile(archive, entry, relative, ct);
+                }
+
+                progress?.Report(new DownloadProgress("zip", 0, 0, ++done, entries.Count));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // A half-written zip must not survive; the next run would have to distrust it.
+            File.Delete(zipPath);
+            throw;
         }
     }
+
+    /// <summary>
+    /// The equivalent of <see cref="ZipFileExtensions.CreateEntryFromFile"/>, except that it
+    /// checks for cancellation while copying. Games ship multi-gigabyte archives in a single
+    /// file, and the framework call would ignore Ctrl+C for as long as one takes to compress.
+    /// </summary>
+    private static void AddFile(ZipArchive archive, string path, string entryName, CancellationToken ct)
+    {
+        var entry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
+        entry.LastWriteTime = File.GetLastWriteTime(path);
+
+        using var source = File.OpenRead(path);
+        using var destination = entry.Open();
+        CopyInterruptibly(source, destination, ct);
+    }
+
+    private static void CopyInterruptibly(Stream source, Stream destination, CancellationToken ct)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+        try
+        {
+            int read;
+            while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                destination.Write(buffer, 0, read);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
+    /// How many bytes short the volume is, or null when it fits. Returns null when the volume
+    /// cannot be inspected — a network share is worth attempting rather than refusing.
+    /// </summary>
+    internal static long? FreeSpaceShortfall(string path, long needed)
+    {
+        try
+        {
+            var free = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(path))!).AvailableFreeSpace;
+            return free < needed ? needed - free : null;
+        }
+        catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static string Human(long bytes) => $"{bytes / 1024d / 1024 / 1024:F1} GiB";
 
     /// <summary>A rename is only atomic within one volume.</summary>
     internal static bool SameVolume(string a, string b) => string.Equals(
@@ -196,7 +279,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
     /// name still appears atomically and a crash cannot leave a half-written archive.
     /// </summary>
     internal static void PublishArchive(
-        string stagingZip, string archivePath, bool sameVolume, IProgress<DownloadProgress>? progress)
+        string stagingZip, string archivePath, bool sameVolume,
+        IProgress<DownloadProgress>? progress, CancellationToken ct = default)
     {
         if (sameVolume)
         {
@@ -207,7 +291,20 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         progress?.Report(new DownloadProgress("copy", 0, 0, 0, 0));
 
         var temp = archivePath + ".tmp";
-        File.Copy(stagingZip, temp, overwrite: true);
+        try
+        {
+            // File.Copy would ignore Ctrl+C for the whole transfer, which over a network
+            // share is exactly the part worth interrupting.
+            using (var source = File.OpenRead(stagingZip))
+            using (var destination = File.Create(temp))
+                CopyInterruptibly(source, destination, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            File.Delete(temp);
+            throw;
+        }
+
         File.Move(temp, archivePath, overwrite: true);
         File.Delete(stagingZip);
     }

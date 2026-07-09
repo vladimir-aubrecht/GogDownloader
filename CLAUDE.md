@@ -40,7 +40,13 @@ documentation. **Do not go hunting for endpoints on the web.** Refresh it with
   staging there would push every byte across the wire three times (write the files, read them
   back to zip, write the zip). Override with `--staging`. When staging and target sit on
   different volumes the zip is copied to a sibling `.tmp` and then renamed, so the final name
-  still appears atomically.
+  still appears atomically. Staging defaults to local app data, **not** `Path.GetTempPath()`:
+  on Linux temp is often a tmpfs in RAM and a large game would exhaust it.
+- **Long operations must stay interruptible.** `ZipFile.CreateFromDirectory`, `CreateEntryFromFile`
+  and `File.Copy` all ignore cancellation for the length of one file, and games ship
+  multi-gigabyte archives in a single file. Copy through a buffer and check the token each
+  block. A cancelled run deletes its partial zip and `.tmp`.
+- **Free space is checked before downloading**, not discovered an hour in.
 - **Reliability:** work in a staging directory, only an atomic `File.Move` into the target.
   The `.gogdl.json` manifest is written **as the very last step** — until it exists the game
   counts as not downloaded and a restart redoes it. A corrupted "done" state cannot arise.

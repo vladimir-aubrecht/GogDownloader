@@ -65,7 +65,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                 Detail: $"Build is generation {build.Generation}; only 2 is supported so far.");
 
         var gameDirectory = Path.Combine(options.OutputRoot, game.DirectoryName);
-        var archiveName = $"{options.Platform.ContentSystemName()}.zip";
+        var archiveName = GameVaultName.For(game, options.Platform, build.VersionName);
 
         var existing = await BackupManifest.LoadAsync(gameDirectory, ct);
         if (!options.Force
@@ -134,6 +134,12 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
             var archivePath = Path.Combine(gameDirectory, archiveName);
             PublishArchive(stagingZip, archivePath, SameVolume(stagingZip, archivePath), progress, ct);
+
+            // A new build renames the archive, so the old one would linger and GameVault would
+            // index the same game twice.
+            var previous = existing?.Platforms.GetValueOrDefault(options.Platform)?.ArchiveName;
+            if (previous is not null && previous != archiveName)
+                File.Delete(Path.Combine(gameDirectory, previous));
 
             var manifest = existing ?? new BackupManifest
             {

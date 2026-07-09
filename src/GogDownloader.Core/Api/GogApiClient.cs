@@ -31,12 +31,22 @@ public sealed record Downloads
     [JsonPropertyName("installers")] public List<Installer> Installers { get; init; } = [];
 }
 
+/// <summary>GOG reports development status as an object, not a bare flag.</summary>
+public sealed record InDevelopment
+{
+    [JsonPropertyName("active")] public bool Active { get; init; }
+}
+
 public sealed record Product
 {
     [JsonPropertyName("id")] public long Id { get; init; }
     [JsonPropertyName("title")] public string Title { get; init; } = "";
     [JsonPropertyName("slug")] public string Slug { get; init; } = "";
     [JsonPropertyName("downloads")] public Downloads? Downloads { get; init; }
+    [JsonPropertyName("in_development")] public InDevelopment? InDevelopment { get; init; }
+
+    // `release_date` is deliberately not read: it is not the game's release year.
+    // See GameVaultName for the evidence.
 }
 
 public sealed record Build

@@ -47,6 +47,9 @@ public sealed record LibraryEntry
 
     public Dictionary<GamePlatform, PlatformAvailability> Platforms { get; init; } = [];
 
+    /// <summary>Still in development on GOG; becomes GameVault's `(EA)` flag.</summary>
+    public bool EarlyAccess { get; init; }
+
     /// <summary>
     /// Owned DLC, read from `products[]` in the repository manifest — the same source the
     /// downloader uses, so the listing cannot disagree with what ends up in the zip.
@@ -61,7 +64,7 @@ public sealed record LibraryEntry
 public sealed record LibrarySnapshot
 {
     /// <summary>Bumped when a sync starts recording something older snapshots lack.</summary>
-    public const int CurrentSchema = 3;
+    public const int CurrentSchema = 4;
 
     /// <summary>Absent in snapshots written before schema versioning, hence 0.</summary>
     public int SchemaVersion { get; init; }
@@ -71,6 +74,9 @@ public sealed record LibrarySnapshot
 
     /// <summary>Schema 3 added depot sizes; older snapshots would report zero bytes.</summary>
     public bool KnowsDepotSizes => SchemaVersion >= 3;
+
+    /// <summary>Schema 4 added the early-access flag, which names the archive for GameVault.</summary>
+    public bool KnowsEarlyAccess => SchemaVersion >= 4;
 
     public DateTimeOffset SyncedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<LibraryEntry> Games { get; init; } = [];
@@ -218,6 +224,7 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
             Title = product.Title,
             Slug = string.IsNullOrEmpty(product.Slug) ? id.ToString() : product.Slug,
             Platforms = platforms,
+            EarlyAccess = product.InDevelopment?.Active ?? false,
             Dlcs = dlcs,
         };
     }

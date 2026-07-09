@@ -36,6 +36,13 @@ documentation. **Do not go hunting for endpoints on the web.** Refresh it with
   recorded in `.gogdl.json` as `skippedDependencies` so it stays visible what the game wanted.
 - **Archive:** zip everywhere. Symlinks are dereferenced; unix permissions are not preserved —
   the user explicitly agreed and handles that outside this project.
+- **Archive names follow GameVault's convention:** `Title (vVersion) (EA) (GameType).zip`, see
+  `GameVaultName`. GameVault indexes recursively (`GAMES_SEARCH_RECURSIVE` defaults to true) and
+  filters by extension, so the `{slug}__{gameId}` directory and `.gogdl.json` beside the zip are
+  both fine. Verified against gamevault-backend `files.service.ts` (f95cc9f), not just the docs.
+- **No release year in the archive name.** GOG's `release_date` is not the release year: The
+  Witcher 2 reports 1991, Akalabeth (1979) reports 2014, and some titles report null. GameVault
+  feeds the year to its metadata matcher, so a wrong year is worse than none.
 - **Staging goes on a local disk**, never in `--out`. Users back up onto network shares, and
   staging there would push every byte across the wire three times (write the files, read them
   back to zip, write the zip). Override with `--staging`. When staging and target sit on

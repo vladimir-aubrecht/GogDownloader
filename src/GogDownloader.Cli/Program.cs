@@ -432,6 +432,11 @@ public static class Cli
             return 1;
         }
 
+        if (!snapshot.KnowsEarlyAccess)
+            Console.Error.WriteLine(
+                "Note: this snapshot predates the early-access flag, so an (EA) game will be " +
+                "named without it. Refresh it with: gogdl library sync");
+
         var (api, content, options) = CreateContent(flags);
 
         var downloadOptions = new DownloadOptions

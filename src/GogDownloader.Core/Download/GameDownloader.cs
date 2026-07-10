@@ -29,6 +29,12 @@ public sealed record DownloadOptions
     public bool Clean { get; init; }
 
     /// <summary>
+    /// Lift unchanged files out of the previous backup rather than downloading them again. Every
+    /// reused file is hashed, so this cannot smuggle stale content into a new archive.
+    /// </summary>
+    public bool Reuse { get; init; } = true;
+
+    /// <summary>
     /// Read the finished archive back and compare it against staging. Costs one extra pass over
     /// the data; the ZIP writer is hand-rolled, so this is on by default.
     /// </summary>
@@ -198,7 +204,15 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 await new InnoSetupExtractor(api, cdn)
                     .FillAsync(setup!, staging, staging + ".installer", progress, ct);
             else
-                await MaterializeAsync(staging, source!, plan!, resumable, options, progress, ct);
+            {
+                // The previous backup of this platform is a cache: a new build changes a few
+                // files, and the rest can be lifted out of the old zip instead of the network.
+                using var cache = options.Reuse && existing?.Platforms.GetValueOrDefault(options.Platform) is { } old
+                    ? ArchiveCache.Open(Path.Combine(gameDirectory, old.ArchiveName), old.Files)
+                    : null;
+
+                await MaterializeAsync(staging, source!, plan!, resumable, cache, options, progress, ct);
+            }
 
             var stagingZip = staging + ".zip";
             if (File.Exists(stagingZip)) File.Delete(stagingZip);
@@ -397,6 +411,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         ContentSource source,
         DepotPlan plan,
         bool resuming,
+        ArchiveCache? cache,
         DownloadOptions options,
         IProgress<DownloadProgress>? progress,
         CancellationToken ct)
@@ -421,6 +436,28 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
             totalBytes -= files.Where((_, i) => complete[i]).Sum(f => f.DownloadSize);
             files = files.Where((_, i) => !complete[i]).ToList();
+        }
+
+        if (cache is not null && files.Count > 0)
+        {
+            progress?.Report(new DownloadProgress("reuse", 0, 0, 0, files.Count));
+
+            var restored = new List<PlannedFile>();
+            var seen = 0;
+
+            foreach (var file in files)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (file.Identity is { } identity
+                    && await cache.TryRestoreAsync(identity, Path.Combine(staging, file.RelativePath), file.Size, ct))
+                    restored.Add(file);
+
+                progress?.Report(new DownloadProgress("reuse", 0, 0, ++seen, files.Count));
+            }
+
+            totalBytes -= restored.Sum(f => f.DownloadSize);
+            files = files.Except(restored).ToList();
         }
 
         var slots = new SemaphoreSlim(options.MaxConnections, options.MaxConnections);

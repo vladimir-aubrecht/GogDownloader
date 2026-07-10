@@ -67,6 +67,7 @@ public static class DownloadCommands
             Force = flags.ContainsKey("force"),
             Clean = flags.ContainsKey("clean"),
             VerifyArchive = !flags.ContainsKey("no-verify"),
+            Reuse = !flags.ContainsKey("no-reuse"),
             MaxCompressionThreads = flags.TryGetValue("compression-threads", out var t) && int.TryParse(t, out var n) && n > 0
                 ? n
                 : Environment.ProcessorCount,

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using GogDownloader.Core;
 using GogDownloader.Core.Api;
 using GogDownloader.Core.Content;
@@ -118,12 +119,82 @@ public static class DownloadProbes
 
         await ZipAndPublishAsync(root);
 
+        await ArchiveCacheAsync(root);
+
         Probe.Group("Free space");
         Probe.Check("an impossible request is caught up front", GameDownloader.FreeSpaceShortfall(root, long.MaxValue / 2) is > 0);
         Probe.Check("a reasonable request passes", GameDownloader.FreeSpaceShortfall(root, 1024) is null);
         Probe.Check("an unreadable volume does not block the run", GameDownloader.FreeSpaceShortfall("\0::invalid", 1024) is null);
 
         Directory.Delete(root, recursive: true);
+    }
+
+    /// <summary>
+    /// The old backup is a cache for the next one. It must save real downloads, and it must never
+    /// let stale bytes through: the manifest is a claim, the hash is the proof.
+    /// </summary>
+    private static async Task ArchiveCacheAsync(string root)
+    {
+        Probe.Group("Reusing the previous backup");
+
+        var source = Path.Combine(root, "cache-src");
+        Directory.CreateDirectory(Path.Combine(source, "game"));
+
+        var unchangedPath = Path.Combine(source, "game", "unchanged.bin");
+        await File.WriteAllTextAsync(unchangedPath, new string('u', 50_000));
+        await File.WriteAllTextAsync(Path.Combine(source, "game", "changed.bin"), new string('c', 10_000));
+
+        var archive = Path.Combine(root, "previous.zip");
+        await ParallelZipWriter.CreateAsync(source, archive, 2);
+
+        string Md5Of(string path)
+        {
+            using var stream = File.OpenRead(path);
+            return Convert.ToHexStringLower(MD5.HashData(stream));
+        }
+
+        var unchangedHash = Md5Of(unchangedPath);
+        var files = new Dictionary<string, BackedUpFile>
+        {
+            ["game/unchanged.bin"] = new(unchangedHash, 50_000),
+            ["game/changed.bin"] = new(Md5Of(Path.Combine(source, "game", "changed.bin")), 10_000),
+        };
+
+        using (var cache = ArchiveCache.Open(archive, files))
+        {
+            Probe.Check("the previous archive opens as a cache", cache is not null);
+
+            var destination = Path.Combine(root, "restored.bin");
+            Probe.Check("an unchanged file is lifted out of it",
+                await cache!.TryRestoreAsync(unchangedHash, destination, 50_000, default));
+            Probe.Check("and it arrives byte for byte", Md5Of(destination) == unchangedHash);
+
+            // Content-addressed: a file that merely moved is still a hit.
+            Probe.Check("a hash that is not in the archive is a miss",
+                !await cache.TryRestoreAsync(new string('0', 32), destination, 50_000, default));
+            Probe.Check("a size mismatch is a miss",
+                !await cache.TryRestoreAsync(unchangedHash, destination, 49_999, default));
+        }
+
+        Probe.Check("no cache without a previous archive",
+            ArchiveCache.Open(Path.Combine(root, "absent.zip"), files) is null);
+        Probe.Check("no cache without a manifest", ArchiveCache.Open(archive, new Dictionary<string, BackedUpFile>()) is null);
+
+        // The manifest claims a hash the archive does not actually contain. Trusting it would
+        // copy the wrong file into a new backup and record it as correct.
+        var lying = new Dictionary<string, BackedUpFile> { ["game/changed.bin"] = new(unchangedHash, 50_000) };
+        using (var cache = ArchiveCache.Open(archive, lying))
+        {
+            var destination = Path.Combine(root, "lied.bin");
+            Probe.Check("a file whose content contradicts the manifest is refused",
+                !await cache!.TryRestoreAsync(unchangedHash, destination, 50_000, default));
+            Probe.Check("and the bad copy is not left behind", !File.Exists(destination));
+        }
+
+        var corrupt = Path.Combine(root, "corrupt.zip");
+        await File.WriteAllTextAsync(corrupt, "this is not a zip");
+        Probe.Check("a corrupt previous archive is a miss, not a crash",
+            ArchiveCache.Open(corrupt, files) is null);
     }
 
     private static async Task ZipAndPublishAsync(string root)

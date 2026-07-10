@@ -71,6 +71,7 @@ public static class CommandLine
                 --clean                        start over, and delete downloads on interrupt
                 --keep                         on interrupt keep downloads without asking
                 --no-verify                    skip reading the archive back to check it
+                --no-reuse                     do not reuse unchanged files from the old backup
                 --force                        re-download even a completed build
 
               diff [text]                     compare a backup directory against the library
@@ -90,7 +91,7 @@ public static class CommandLine
     /// </summary>
     private static readonly HashSet<string> Switches = new(StringComparer.OrdinalIgnoreCase)
     {
-        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "dry-run",
+        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "no-reuse", "dry-run",
     };
 
     public static Dictionary<string, string> ParseFlags(string[] args)

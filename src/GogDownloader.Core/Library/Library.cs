@@ -30,13 +30,19 @@ public sealed record PlatformAvailability
     public bool HasDepot => Depot is not null;
 
     /// <summary>
-    /// Whether a backup can be made. Linux has no depots at all, so its games are read out of a
-    /// MojoSetup installer instead — see <see cref="Download.InstallerSource"/>.
+    /// Whether a backup can be made. Linux reads its game out of a MojoSetup installer over
+    /// Range; Windows without a depot goes through innoextract. Only macOS without a depot has
+    /// nowhere to go, because its installers are neither.
     /// </summary>
-    public bool CanBackUp => Depot is not null || (IsLinux && HasInstaller);
+    public bool CanBackUp => Depot is not null || (HasInstaller && !IsMac);
 
     /// <summary>Set by the sync so availability can answer without knowing its own key.</summary>
     public bool IsLinux { get; init; }
+
+    public bool IsMac { get; init; }
+
+    /// <summary>Windows without a depot: needs innoextract on PATH.</summary>
+    public bool NeedsInnoExtract => Depot is null && HasInstaller && !IsLinux && !IsMac;
 
     /// <summary>
     /// The old content system. Still fetched, but its manifest has no compressed size, so
@@ -232,6 +238,7 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
                 {
                     Installers = list,
                     IsLinux = platform == GamePlatform.Linux,
+                    IsMac = platform == GamePlatform.Mac,
                 };
         }
 

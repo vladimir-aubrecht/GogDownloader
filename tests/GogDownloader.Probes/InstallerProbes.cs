@@ -65,6 +65,31 @@ public static class InstallerProbes
         var costOfSmall = server.BytesServed - beforeSmall;
         Probe.Check($"reading a 21-byte file cost {costOfSmall} bytes", costOfSmall < 1024, costOfSmall.ToString());
 
+        Probe.Group("Path C: Inno Setup installers");
+        Probe.Check("innoextract is detected on PATH", InnoSetupExtractor.IsAvailable);
+        Probe.Check("the real filename is kept, or slices are not recognised as one installer",
+            InnoSetupExtractor.FileNameFrom("https://cdn/x/setup_quake_1.0.exe?token=1", "id") == "setup_quake_1.0.exe");
+        Probe.Check("a .bin slice keeps its name",
+            InnoSetupExtractor.FileNameFrom("https://cdn/setup_game-1.bin", "id") == "setup_game-1.bin");
+        Probe.Check("a nameless URL falls back to the file id",
+            InnoSetupExtractor.FileNameFrom("https://cdn/", "77") == "setup_77.exe");
+
+        // Feeding it something that is not an Inno Setup installer must fail loudly, and clean up.
+        var scratch = Probe.ScratchDirectory();
+        var notAnInstaller = Path.Combine(scratch, "setup.exe");
+        await File.WriteAllTextAsync(notAnInstaller, "MZ this is not Inno Setup");
+
+        var target = Path.Combine(scratch, "staging");
+        Directory.CreateDirectory(target);
+
+        var failed = false;
+        try { await InnoSetupExtractor.ExtractAsync(notAnInstaller, target, default); }
+        catch (InnoExtractFailedException) { failed = true; }
+
+        Probe.Check("a file that is not an installer is rejected", failed);
+        Probe.Check("a failed extraction leaves no scratch directory", !Directory.Exists(target + ".extract"));
+        Directory.Delete(scratch, recursive: true);
+
         Probe.Group("Symlink targets are resolved from the install root");
         Probe.Check("a sibling target", InstallerSource.ResolveLink("game/lib/a.so", "b.so") == "game/lib/b.so");
         Probe.Check("a parent target", InstallerSource.ResolveLink("game/lib/a.so", "../bin/b.so") == "game/bin/b.so");

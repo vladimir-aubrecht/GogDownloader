@@ -36,7 +36,7 @@ public static class DiffCommands
             var size = GameFilter.Size(game, platform);
 
             if (!availability.CanBackUp)
-                rows.Add(new Row(State.Unsupported, game, "no depot, no installer", size));
+                rows.Add(new Row(State.Unsupported, game, availability.HasInstaller ? "macOS installer, not extractable" : "no depot, no installer", size));
             else if (backup is null)
                 rows.Add(new Row(State.Missing, game, "not backed up", size));
             else if (availability.Depot is not null && backup.BuildId != availability.Depot.BuildId)

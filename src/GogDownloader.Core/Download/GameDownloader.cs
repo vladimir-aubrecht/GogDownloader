@@ -88,9 +88,21 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
         // Linux has no Galaxy depots at all, so its build identity is the installer version.
         var build = availability.Depot;
-        if (build is null && !(options.Platform == GamePlatform.Linux && availability.HasInstaller))
+        var fromInstaller = build is null && availability.HasInstaller;
+
+        if (build is null && !availability.HasInstaller)
             return new DownloadResult(DownloadOutcome.NoDepot,
-                Detail: "No Galaxy depot and no installer for this platform (path C, not implemented yet).");
+                Detail: $"Neither a depot nor an installer for {options.Platform.ApiName()}.");
+
+        // macOS installers are .pkg inside .dmg, which innoextract does not read.
+        if (fromInstaller && options.Platform == GamePlatform.Mac)
+            return new DownloadResult(DownloadOutcome.NoDepot,
+                Detail: "macOS titles without a depot are not supported: their installers are not Inno Setup.");
+
+        var innoSetup = fromInstaller && options.Platform == GamePlatform.Windows;
+        if (innoSetup && !InnoSetupExtractor.IsAvailable)
+            return new DownloadResult(DownloadOutcome.NoDepot,
+                Detail: new InnoExtractMissingException().Message);
 
         var buildId = build?.BuildId ?? InstallerBuildId(availability);
         var versionName = build?.VersionName ?? availability.Installers.FirstOrDefault()?.Version;
@@ -110,26 +122,44 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
         progress?.Report(new DownloadProgress("manifest", 0, 0, 0, 0));
 
-        // Everything the content sources disagree about lives behind this.
-        ContentSource source = build switch
-        {
-            null => new InstallerSource(api, cdn, game.Id, options.Language),
-            { Generation: 1 } => new DepotSourceV1(content, api, build.Manifest!, options.Platform.ContentSystemName(), options.Language),
-            _ => new DepotSourceV2(content, api, build.Manifest!, options.Language),
-        };
+        // Everything the content sources disagree about lives behind this. Inno Setup is the
+        // exception: it cannot be planned file by file, only downloaded and extracted whole.
+        ContentSource? source = null;
+        DepotPlan? plan = null;
+        Installer? setup = null;
 
-        DepotPlan plan;
-        try
+        if (innoSetup)
         {
-            plan = await source.PlanAsync(ct);
+            var product = await api.GetProductAsync(game.Id, ct);
+            setup = InnoSetupExtractor.Select(product?.Downloads?.Installers ?? [], options.Platform, options.Language);
+            if (setup is null)
+                return new DownloadResult(DownloadOutcome.NoDepotForLanguage,
+                    Detail: $"No Windows installer for language '{options.Language}'.");
         }
-        catch (Exception e) when (e is NoDepotForLanguageException or NoLinuxInstallerException)
+        else
         {
-            return new DownloadResult(DownloadOutcome.NoDepotForLanguage, Detail: e.Message);
+            source = build switch
+            {
+                null => new InstallerSource(api, cdn, game.Id, options.Language),
+                { Generation: 1 } => new DepotSourceV1(content, api, build.Manifest!, options.Platform.ContentSystemName(), options.Language),
+                _ => new DepotSourceV2(content, api, build.Manifest!, options.Language),
+            };
+
+            try
+            {
+                plan = await source.PlanAsync(ct);
+            }
+            catch (Exception e) when (e is NoDepotForLanguageException or NoLinuxInstallerException)
+            {
+                return new DownloadResult(DownloadOutcome.NoDepotForLanguage, Detail: e.Message);
+            }
         }
 
-        var totalCompressed = plan.DownloadBytes;
-        var installedSize = plan.InstalledBytes;
+        var totalCompressed = plan?.DownloadBytes ?? setup!.TotalSize;
+
+        // An Inno Setup installer does not say how large the game unpacks to. Three times the
+        // installer is the rule of thumb, and the check is a courtesy anyway.
+        var installedSize = plan?.InstalledBytes ?? setup!.TotalSize * 3;
 
         var staging = Path.Combine(
             options.StagingDirectory, $"{game.DirectoryName}__{options.Platform.ContentSystemName()}");
@@ -164,7 +194,11 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
         try
         {
-            await MaterializeAsync(staging, source, plan, resumable, options, progress, ct);
+            if (innoSetup)
+                await new InnoSetupExtractor(api, cdn)
+                    .FillAsync(setup!, staging, staging + ".installer", progress, ct);
+            else
+                await MaterializeAsync(staging, source!, plan!, resumable, options, progress, ct);
 
             var stagingZip = staging + ".zip";
             if (File.Exists(stagingZip)) File.Delete(stagingZip);
@@ -207,11 +241,13 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 ArchiveName = archiveName,
                 ArchiveSize = new FileInfo(archivePath).Length,
                 InstalledSize = installedSize,
-                Dlcs = plan.DlcIds,
-                SkippedDependencies = plan.Dependencies,
-                Files = plan.Files
+                Dlcs = plan?.DlcIds ?? [],
+                SkippedDependencies = plan?.Dependencies ?? [],
+
+                // Inno Setup yields no per-file hashes, so a later patch cannot reuse this zip.
+                Files = plan?.Files
                     .Where(f => f.Identity is not null)
-                    .ToDictionary(f => f.RelativePath, f => new BackedUpFile(f.Identity!, f.Size)),
+                    .ToDictionary(f => f.RelativePath, f => new BackedUpFile(f.Identity!, f.Size)) ?? [],
             };
 
             // Only now does the game count as downloaded.
@@ -221,6 +257,9 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             // so the next one resumes instead of re-downloading tens of gigabytes.
             Directory.Delete(staging, recursive: true);
             StagingState.Remove(staging);
+
+            if (Directory.Exists(staging + ".installer"))
+                Directory.Delete(staging + ".installer", recursive: true);
 
             return new DownloadResult(DownloadOutcome.Completed, archivePath);
         }

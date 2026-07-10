@@ -39,11 +39,12 @@ expect "list searches by title"       "the_witcher_3_wild_hunt"    gogdl library
 expect "list shows owned DLC"         "Blood and Wine"             gogdl library list witcher
 expect "list shows sizes"             "30 GiB"                     gogdl library list witcher
 expect "list filters by DLC"          "1 game,"                    gogdl library list --dlc
-expect "list marks installer-only"    "(win)"                      gogdl library list ultima
+expect "list marks installer-only"    "(osx)"                      gogdl library list ultima
 expect "list rejects bad platform"    "Unknown platform"           gogdl library list --platform amiga
 expect "list reports no matches"      "Nothing matches"            gogdl library list zzzznope
 expect "list --slugs prints bare slugs" "faster_than_light"        gogdl library list --slugs --depot --platform windows
-expect "stats counts depotless games" "without a depot: 1"         gogdl library stats
+expect "stats counts inno titles"     "needing innoextract: 1"     gogdl library stats
+expect "stats counts unsupported"     "cannot be backed up at all: 0"  gogdl library stats
 expect "stats counts gen1 depots"     "gen1:    1"                 gogdl library stats
 expect "stats pluralises correctly"   "1 title "                   gogdl library stats
 expect "download needs a game"        "Missing game"               gogdl download
@@ -51,13 +52,17 @@ expect "download needs a game"        "Missing game"               gogdl downloa
 expect "download ignores flag values" "Missing game"               gogdl download --platform windows
 expect "download rejects unknown game" "is not in the library"     gogdl download nonexistent
 expect "download refuses no depot"    "The library has nothing"    gogdl download ultima_1_2_3 --platform linux
+# macOS installers are neither a depot nor Inno Setup, so they stay unsupported.
+expect "macOS installers stay unsupported" "not Inno Setup"        gogdl download ultima_1_2_3 --platform mac
+expect "list marks inno titles"       "win:inno"                   gogdl library list ultima
+
 
 # Linux has no depots at all; its games come out of the installer.
 expect "linux games are backupable"   "1 game for linux"           gogdl download --all --dry-run --platform linux
-expect "list stops calling linux installer-only" "lin " gogdl library list faster_than_light --platform linux
+expect "list marks the linux installer path" "lin:installer"       gogdl library list faster_than_light --platform linux
 
 # Batch mode must select exactly what `library list` shows.
-expect "download --all includes gen1"    "3 games for windows"       gogdl download --all --dry-run --platform windows
+expect "download --all includes gen1 and inno" "4 games for windows"  gogdl download --all --dry-run --platform windows
 expect "download --all lists the gen1 title" "Ancient Bundle"        gogdl download --all --dry-run --platform windows
 expect "list marks gen1 depots"          "win:gen1"                  gogdl library list ancient
 expect "download --all honours the search"     "1 game for windows"   gogdl download --all witcher --dry-run --platform windows
@@ -93,11 +98,12 @@ diffcmd() { dotnet run --project src/GogDownloader.Cli -- diff "$@" --out "$BACK
 
 expect "diff finds an outdated build"   "have 1.5 (b0), GOG has 1.6 (b3)"  diffcmd --platform windows
 expect "diff counts what is current"    "1 up to date"                     diffcmd --platform windows
-expect "diff flags a depotless game"    "no depot"                         diffcmd --platform windows
 expect "diff reports orphan directories" "stranger__42"                    diffcmd --platform windows
 expect "diff totals what is missing"    "to download"                      diffcmd --platform windows
-expect "diff counts the gen1 game as missing" "1 missing, 1 outdated"       diffcmd --platform windows
+expect "diff counts the gen1 game as missing" "2 missing, 1 outdated"       diffcmd --platform windows
 expect "diff --slugs feeds a download"  "faster_than_light"                diffcmd --slugs --platform windows
+# macOS installers are neither a depot nor Inno Setup, so diff must say why.
+expect "diff explains the macOS gap"   "not extractable"                  diffcmd --platform mac
 
 echo
 echo "All checks passed."

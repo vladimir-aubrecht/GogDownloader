@@ -28,10 +28,16 @@ public static class LibraryProbes
         // Linux has no depots at all; its installer is the only source there is.
         Probe.Check("a Linux installer can be backed up",
             new PlatformAvailability { IsLinux = true, Installers = [new InstallerRef("en", null, 5)] }.CanBackUp);
-        Probe.Check("a Windows installer without a depot cannot",
-            !new PlatformAvailability { Installers = [new InstallerRef("en", null, 5)] }.CanBackUp);
+        // Windows without a depot goes through innoextract; only macOS has nowhere to go.
+        Probe.Check("a Windows installer goes through innoextract",
+            new PlatformAvailability { Installers = [new InstallerRef("en", null, 5)] } is
+                { CanBackUp: true, NeedsInnoExtract: true });
+        Probe.Check("a macOS installer cannot be extracted",
+            !new PlatformAvailability { IsMac = true, Installers = [new InstallerRef("en", null, 5)] }.CanBackUp);
         Probe.Check("a Linux entry with no installer cannot",
             !new PlatformAvailability { IsLinux = true }.CanBackUp);
+        Probe.Check("a depot never needs innoextract",
+            !new PlatformAvailability { Depot = new BuildRef("b", 2, null, "u"), Installers = [new InstallerRef("en", null, 5)] }.NeedsInnoExtract);
         Probe.Check("without a depot the installer is used",
             new PlatformAvailability { Installers = [new InstallerRef("en", null, 777)] }.BestKnownSize == 777);
         Probe.Check("with neither the size is zero", new PlatformAvailability().BestKnownSize == 0);

@@ -71,10 +71,9 @@ public static class LibraryCommands
         {
             var parts = new List<string>();
 
-            // gen1 still downloads, but its size is the unpacked one, not the transfer.
+            // Three ways in, and they cost different things, so say which.
             if (GameFilter.Depots(game, platform).ToList() is { Count: > 0 } depots)
-                parts.Add(string.Join(",", depots.Select(p =>
-                    Short(p) + (game.Platforms[p].HasLegacyDepot ? ":gen1" : ""))));
+                parts.Add(string.Join(",", depots.Select(p => Short(p) + Suffix(game.Platforms[p]))));
 
             var installers = game.Platforms
                 .Where(kv => (platform is null || kv.Key == platform)
@@ -117,10 +116,10 @@ public static class LibraryCommands
             $"{CommandLine.Bytes(games.Sum(g => GameFilter.Size(g, platform)))} to download.");
         Console.WriteLine(
             "  win        Galaxy depot, downloadable now");
-        Console.WriteLine(
-            "  win:gen1   old depot format, downloadable, size shown unpacked");
-        Console.WriteLine(
-            "  (win)      installer only, no depot");
+        Console.WriteLine("  win:gen1   old depot format, size shown unpacked");
+        Console.WriteLine("  win:inno   no depot, extracted from the installer (needs innoextract)");
+        Console.WriteLine("  lin:installer  read out of the MojoSetup installer over HTTP Range");
+        Console.WriteLine("  (osx)      installer only, and macOS installers cannot be extracted");
         Console.WriteLine("Pass the slug to: gogdl download <slug>");
         return 0;
     }
@@ -139,34 +138,48 @@ public static class LibraryCommands
                 .OfType<PlatformAvailability>()
                 .ToList();
 
-            var depot = present.Count(p => p.CanBackUp);
+            var depot = present.Count(p => p.Depot is { Generation: 2 });
             var legacy = present.Count(p => p.HasLegacyDepot);
-            var installerOnly = present.Count(p => !p.HasDepot && p.HasInstaller);
+            var installer = present.Count(p => !p.HasDepot && p.CanBackUp);
+            var blocked = present.Count(p => !p.CanBackUp);
             var size = present.Sum(p => p.BestKnownSize);
 
             var noun = present.Count == 1 ? "title " : "titles";
             Console.WriteLine(
                 $"{platform,-8} {present.Count,4} {noun}   depot: {depot,4}   gen1: {legacy,4}   " +
-                $"installer only: {installerOnly,4}   {CommandLine.Bytes(size),9} to download");
+                $"installer: {installer,4}   cannot back up: {blocked,4}   " +
+                $"{CommandLine.Bytes(size),9} to download");
         }
 
         Console.WriteLine();
 
-        // This is the number the sync exists for: how many titles would need
-        // innoextract/Wine because no Galaxy depot exists for them.
-        var needsInstallerPath = snapshot.Games
-            .Where(g => new[] { GamePlatform.Windows, GamePlatform.Mac }
-                .Any(p => g.Platforms.GetValueOrDefault(p) is { HasDepot: false, HasInstaller: true }))
+        // Windows without a depot is extracted with innoextract, so say how many need it.
+        var needsInnoExtract = snapshot.Games
+            .Count(g => g.Platforms.Values.Any(p => p.NeedsInnoExtract));
+
+        Console.WriteLine($"Titles needing innoextract: {needsInnoExtract}");
+
+        // What is left over: macOS installers, which are neither a depot nor Inno Setup.
+        var unsupported = snapshot.Games
+            .Where(g => g.Platforms.Count > 0 && g.Platforms.Values.All(p => !p.CanBackUp))
             .ToList();
 
-        Console.WriteLine($"Windows/macOS titles without a depot: {needsInstallerPath.Count}");
-        foreach (var game in needsInstallerPath.Take(30))
+        Console.WriteLine($"Titles that cannot be backed up at all: {unsupported.Count}");
+        foreach (var game in unsupported.Take(30))
             Console.WriteLine($"  {game.Title}");
-        if (needsInstallerPath.Count > 30)
-            Console.WriteLine($"  ... and {needsInstallerPath.Count - 30} more");
+        if (unsupported.Count > 30)
+            Console.WriteLine($"  ... and {unsupported.Count - 30} more");
 
         return 0;
     }
+
+    private static string Suffix(PlatformAvailability availability) => availability switch
+    {
+        { HasLegacyDepot: true } => ":gen1",
+        { NeedsInnoExtract: true } => ":inno",
+        { IsLinux: true, HasDepot: false } => ":installer",
+        _ => "",
+    };
 
     private static string Short(GamePlatform platform) => platform switch
     {

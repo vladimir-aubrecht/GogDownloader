@@ -56,7 +56,12 @@
       "Platforms": {
         "Windows": {
           "Depot": null,
-          "Installers": [{ "Language": "en", "Version": null, "TotalSize": 45088768 }]
+          "Installers": [{ "Language": "en", "Version": "1.0", "TotalSize": 45088768 }]
+        },
+        "Mac": {
+          "Depot": null,
+          "IsMac": true,
+          "Installers": [{ "Language": "en", "Version": "1.0", "TotalSize": 45088768 }]
         }
       }
     },

@@ -36,11 +36,7 @@ public static class DiffCommands
             var size = GameFilter.Size(game, platform);
 
             if (!availability.HasDownloadableDepot)
-            {
-                // Nothing to compare against: these cannot be backed up yet either way.
-                var why = availability.HasLegacyDepot ? "generation 1 depot" : "no depot";
-                rows.Add(new Row(State.Unsupported, game, why, size));
-            }
+                rows.Add(new Row(State.Unsupported, game, "no depot", size));
             else if (backup is null)
                 rows.Add(new Row(State.Missing, game, "not backed up", size));
             else if (backup.BuildId != availability.Depot!.BuildId)

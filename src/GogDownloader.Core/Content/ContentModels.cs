@@ -98,7 +98,14 @@ public sealed record SecureLinkEndpoint
     /// The chunk's galaxy_path is appended to `parameters["path"]` and only then are the
     /// values substituted into `url_format`. The order matters — see docs/gog-api.md.
     /// </summary>
-    public string ChunkUrl(string compressedMd5)
+    public string ChunkUrl(string compressedMd5) => UrlWith("/" + GalaxyPath.For(compressedMd5));
+
+    /// <summary>
+    /// Generation 1 keeps every file of a depot inside one blob, addressed by byte range.
+    /// </summary>
+    public string BlobUrl() => UrlWith("/main.bin");
+
+    private string UrlWith(string pathSuffix)
     {
         var url = UrlFormat;
         foreach (var (key, element) in Parameters)
@@ -107,8 +114,7 @@ public sealed record SecureLinkEndpoint
                 ? element.GetString() ?? ""
                 : element.GetRawText();
 
-            if (key == "path")
-                value += "/" + GalaxyPath.For(compressedMd5);
+            if (key == "path") value += pathSuffix;
 
             url = url.Replace("{" + key + "}", value, StringComparison.Ordinal);
         }

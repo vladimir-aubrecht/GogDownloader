@@ -22,6 +22,9 @@ public static class LibraryProbes
             Installers = [new InstallerRef("en", null, 999)],
         };
         Probe.Check("a depot wins over an installer", withDepot.BestKnownSize == 5_000_000_000);
+        Probe.Check("a generation 1 depot is downloadable too",
+            new PlatformAvailability { Depot = new BuildRef("b", 1, null, "u") } is
+                { HasDownloadableDepot: true, HasLegacyDepot: true });
         Probe.Check("without a depot the installer is used",
             new PlatformAvailability { Installers = [new InstallerRef("en", null, 777)] }.BestKnownSize == 777);
         Probe.Check("with neither the size is zero", new PlatformAvailability().BestKnownSize == 0);
@@ -38,11 +41,11 @@ public static class LibraryProbes
             new LibrarySnapshot { SchemaVersion = 2 } is { KnowsDlcs: true, KnowsDepotSizes: false });
         // Schema 3 and 4 recorded sizes, but a broken language filter made them far too small,
         // so they must not be trusted any more than a missing field.
-        Probe.Check("schema 4 knows early access but not trustworthy sizes",
-            new LibrarySnapshot { SchemaVersion = 4 } is { KnowsEarlyAccess: true, KnowsDepotSizes: false });
-        Probe.Check("schema 5 knows everything",
-            new LibrarySnapshot { SchemaVersion = 5 } is { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true });
-        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 5);
+        Probe.Check("schema 5 knows early access but not trustworthy sizes",
+            new LibrarySnapshot { SchemaVersion = 5 } is { KnowsEarlyAccess: true, KnowsDepotSizes: false });
+        Probe.Check("schema 6 knows everything",
+            new LibrarySnapshot { SchemaVersion = 6 } is { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true });
+        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 6);
 
         Probe.Group("Argument parsing");
         // A switch that swallows the next word turns `download --all witcher` into a request

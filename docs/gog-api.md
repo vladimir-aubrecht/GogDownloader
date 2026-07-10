@@ -84,6 +84,42 @@ A manifest hash maps onto a CDN path by inserting two directory levels:
 Generation 1 is the older format — its manifest is **uncompressed JSON** and the path contains
 a `timestamp` from the product data. A non-trivial difference from v2; expect both.
 
+### Schema of v1 manifests
+
+The repository manifest is `build.link` (zlib, sometimes plain). Everything hangs off `product`:
+
+| Field | Meaning |
+|---|---|
+| `product.rootGameID` | id of the base game |
+| `product.timestamp` | part of every v1 URL below |
+| `product.installDirectory` | install directory name (unused here) |
+| `product.depots[]` | see below |
+
+A v1 depot has `manifest` (hash), `gameIDs[]`, `languages[]` and `size` (**a string**). A depot
+carrying a `redist` key is a redistributable, not game content, and is skipped. Language-neutral
+depots are tagged `Neutral`, **not** `*`. There is no `compressedSize`, so v1 downloads can only
+be sized by their unpacked size.
+
+```
+depot manifest (v1):  {GOG_CDN}/content-system/v1/manifests/{gameID}/{platform}/{timestamp}/{manifest}
+```
+
+Plain JSON, with `depot.files[]`. A record is a directory when it has `directory`; otherwise it
+is a file with `path`, `size`, `offset`, `hash` (md5) and optional `support` / `executable`.
+Files of size 0 are skipped.
+
+### Fetching v1 files
+
+There are no chunks. All of a depot's files live inside one blob, and each file is a byte range:
+
+```
+GET {GOG_CONTENT_SYSTEM}/products/{gameId}/secure_link?_version=2&type=depot&path=/{platform}/{timestamp}/
+```
+
+Append `/main.bin` to `parameters["path"]`, substitute as for v2, then request
+`Range: bytes={offset}-{offset+size-1}`. The bytes are **not compressed**; verify them against
+the file's `hash`.
+
 ### Schema of v2 manifests
 
 The repository manifest (the URL in `build.repository_manifest`) after zlib decompression:

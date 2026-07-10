@@ -101,6 +101,54 @@ public static class ContentProbes
         Probe.Check("reads dependencies", repo.Dependencies is ["MSVC2015"]);
         Probe.Check("reads depot productId", repo.Depots[0].ProductId == "99");
 
+        Probe.Group("Generation 1 manifests");
+        const string repositoryV1 = """
+            {"product":{"rootGameID":"1207658930","timestamp":1445945558,"installDirectory":"Quake",
+             "depots":[
+               {"manifest":"aaa","gameIDs":["1207658930"],"languages":["Neutral"],"size":"12345"},
+               {"manifest":"bbb","gameIDs":["1207658930"],"languages":["de-DE"],"size":"999"},
+               {"manifest":"ccc","gameIDs":["99"],"languages":["Neutral"],"size":"50"},
+               {"redist":"MSVC2015","size":"1","targetDir":"__redist"}]}}
+            """;
+        var v1 = JsonSerializer.Deserialize<RepositoryManifestV1>(repositoryV1, Json)!;
+        Probe.Check("reads rootGameID", v1.Product.RootGameId == "1207658930");
+        Probe.Check("a numeric timestamp becomes the string used in URLs",
+            v1.Product.TimestampText == "1445945558", v1.Product.TimestampText);
+        Probe.Check("size is a string in the JSON but a number to us",
+            v1.Product.Depots[0].Size == 12345, v1.Product.Depots[0].Size.ToString());
+        Probe.Check("a redist depot is not game content", v1.Product.Depots[3].IsRedistributable);
+        Probe.Check("a content depot is not a redist", !v1.Product.Depots[0].IsRedistributable);
+
+        // v1 spells the neutral tag differently; treating `*` as universal would drop everything.
+        Probe.Check("'Neutral' matches any language", v1.Product.Depots[0].MatchesLanguage("en"));
+        Probe.Check("a German v1 depot does not match English", !v1.Product.Depots[1].MatchesLanguage("en"));
+        Probe.Check("a full code still matches", new DepotRefV1 { Languages = ["en-US"] }.MatchesLanguage("en"));
+
+        const string depotV1 = """
+            {"depot":{"files":[
+              {"path":"quake/id1/pak0.pak","size":18689235,"offset":0,"hash":"abc"},
+              {"path":"quake","directory":true},
+              {"path":"goggame.script","size":10,"offset":18689235,"hash":"def","support":true},
+              {"path":"empty.txt","size":0,"offset":0,"hash":"000"}]}}
+            """;
+        var depotFiles = JsonSerializer.Deserialize<DepotManifestV1>(depotV1, Json)!.Depot.Files;
+        Probe.Check("reads every record", depotFiles.Count == 4);
+        Probe.Check("a directory record is marked", depotFiles[1].Directory);
+        Probe.Check("a file carries offset and hash",
+            depotFiles[0] is { Offset: 0, Size: 18689235, Hash: "abc" });
+        Probe.Check("support files are flagged", depotFiles[2].Support);
+
+        Probe.Group("Generation 1 blob URLs");
+        var v1Endpoint = JsonSerializer.Deserialize<SecureLinkResponse>("""
+            {"urls":[{"priority":0,"url_format":"https://cdn.invalid{path}?t={token}",
+            "parameters":{"path":"/windows/1445945558","token":"abc"}}]}
+            """, Json)!.Urls[0];
+
+        Probe.Check("every v1 file comes from one main.bin",
+            v1Endpoint.BlobUrl() == "https://cdn.invalid/windows/1445945558/main.bin?t=abc", v1Endpoint.BlobUrl());
+        Probe.Check("asking twice does not accumulate the suffix",
+            v1Endpoint.BlobUrl() == v1Endpoint.BlobUrl());
+
         Probe.Group("Rate limiter");
         // The bucket starts full: 1 MiB is free, the remaining 0.5 MiB costs half a second.
         var limiter = new RateLimiter(1024 * 1024);

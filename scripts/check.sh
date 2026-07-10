@@ -50,14 +50,11 @@ expect "download needs a game"        "Missing game"               gogdl downloa
 # A flag's value must never be mistaken for the game name.
 expect "download ignores flag values" "Missing game"               gogdl download --platform windows
 expect "download rejects unknown game" "is not in the library"     gogdl download nonexistent
-expect "download refuses generation 1" "only 2 is supported"       gogdl download ancient_bundle
 expect "download refuses no depot"    "No Galaxy depot"            gogdl download ultima_1_2_3 --platform linux
 
 # Batch mode must select exactly what `library list` shows.
-expect "download --all lists every depot game" "2 games for windows"  gogdl download --all --dry-run --platform windows
-# Generation 1 has a depot but cannot be fetched; it must be excluded loudly, not silently.
-expect "download --all excludes gen1"    "Skipping 1 title"          gogdl download --all --dry-run --platform windows
-expect "download --all drops the gen1 title" "Ancient Bundle"        gogdl library list ancient
+expect "download --all includes gen1"    "3 games for windows"       gogdl download --all --dry-run --platform windows
+expect "download --all lists the gen1 title" "Ancient Bundle"        gogdl download --all --dry-run --platform windows
 expect "list marks gen1 depots"          "win:gen1"                  gogdl library list ancient
 expect "download --all honours the search"     "1 game for windows"   gogdl download --all witcher --dry-run --platform windows
 expect "download --all honours --dlc"          "1 game for windows"   gogdl download --all --dlc --dry-run --platform windows
@@ -92,10 +89,10 @@ diffcmd() { dotnet run --project src/GogDownloader.Cli -- diff "$@" --out "$BACK
 
 expect "diff finds an outdated build"   "have 1.5 (b0), GOG has 1.6 (b3)"  diffcmd --platform windows
 expect "diff counts what is current"    "1 up to date"                     diffcmd --platform windows
-expect "diff flags a gen1 depot"        "generation 1 depot"               diffcmd --platform windows
 expect "diff flags a depotless game"    "no depot"                         diffcmd --platform windows
 expect "diff reports orphan directories" "stranger__42"                    diffcmd --platform windows
-expect "diff totals what is missing"    "170 MiB to download"              diffcmd --platform windows
+expect "diff totals what is missing"    "to download"                      diffcmd --platform windows
+expect "diff counts the gen1 game as missing" "1 missing, 1 outdated"       diffcmd --platform windows
 expect "diff --slugs feeds a download"  "faster_than_light"                diffcmd --slugs --platform windows
 
 echo

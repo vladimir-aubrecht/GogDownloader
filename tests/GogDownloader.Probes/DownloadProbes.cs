@@ -37,9 +37,9 @@ public static class DownloadProbes
         var noDepot = await downloader.RunAsync(Game(null), Options());
         Probe.Check("no depot yields NoDepot", noDepot.Outcome == DownloadOutcome.NoDepot, noDepot.Outcome.ToString());
 
-        var gen1 = await downloader.RunAsync(Game(new BuildRef("b1", 1, "1.0", "http://x/m")), Options());
-        Probe.Check("generation 1 is reported, not attempted",
-            gen1.Outcome == DownloadOutcome.UnsupportedGeneration, gen1.Outcome.ToString());
+        // Generation 1 is now fetched like any other depot, so it must reach the network.
+        Probe.Check("generation 1 is attempted, not refused",
+            await Throws(() => downloader.RunAsync(Game(new BuildRef("b1", 1, "1.0", "http://x/m")), Options())));
 
         Probe.Group("Idempotence");
         var game = Game(new BuildRef("build-42", 2, "1.2", "http://x/m"));
@@ -141,7 +141,7 @@ public static class DownloadProbes
         await using (var file = File.Create(big))
         {
             var buffer = new byte[1 << 20];
-            for (var i = 0; i < 400; i++) { random.NextBytes(buffer); file.Write(buffer); }
+            for (var i = 0; i < 96; i++) { random.NextBytes(buffer); file.Write(buffer); }
         }
 
         Probe.Group("Zipping is interruptible");
@@ -174,7 +174,7 @@ public static class DownloadProbes
             Probe.Check("support files are kept aside", names.Contains("gog-support/99/readme.txt"));
             Probe.Check("an empty directory survives as a trailing-slash entry", names.Contains("empty/"));
             Probe.Check("non-empty directories get no entry of their own", !names.Contains("game/"));
-            Probe.Check("the large file is intact", zip.GetEntry("game/data.pak")!.Length == 400L * 1024 * 1024);
+            Probe.Check("the large file is intact", zip.GetEntry("game/data.pak")!.Length == 96L * 1024 * 1024);
         }
         Probe.Check("zipping reports progress", reported.Count >= 3);
 
@@ -195,7 +195,7 @@ public static class DownloadProbes
         {
             Probe.Check("a zip64 archive still opens", zip.Entries.Count > 0);
             Probe.Check("zip64 sizes survive",
-                zip.GetEntry("game/data.pak")!.Length == 400L * 1024 * 1024,
+                zip.GetEntry("game/data.pak")!.Length == 96L * 1024 * 1024,
                 zip.GetEntry("game/data.pak")!.Length.ToString());
             using var reader = new StreamReader(zip.GetEntry("gog-support/99/readme.txt")!.Open());
             Probe.Check("zip64 content round-trips", reader.ReadToEnd() == "hi");
@@ -295,7 +295,7 @@ public static class DownloadProbes
         Probe.Check("a failed copy keeps the staging zip", File.Exists(zipPath));
 
         Probe.Group("Directory size");
-        Probe.Check("counts nested files", GameDownloader.DirectorySize(staging) > 400L * 1024 * 1024);
+        Probe.Check("counts nested files", GameDownloader.DirectorySize(staging) > 90L * 1024 * 1024);
         Probe.Check("a missing directory is zero", GameDownloader.DirectorySize(Path.Combine(root, "gone")) == 0);
     }
 

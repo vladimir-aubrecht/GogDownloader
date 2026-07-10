@@ -1,5 +1,5 @@
 {
-  "SchemaVersion": 5,
+  "SchemaVersion": 6,
   "SyncedAt": "2026-07-09T17:52:00+00:00",
   "Failures": {},
   "Games": [
@@ -69,7 +69,7 @@
         "Windows": {
           "Depot": { "BuildId": "old", "Generation": 1, "VersionName": null, "Manifest": "http://example.invalid/v1" },
           "Installers": [],
-          "DownloadSize": 1048576,
+          "DownloadSize": 2097152,
           "InstalledSize": 2097152
         }
       }

@@ -24,17 +24,6 @@ public static class DownloadCommands
             var search = GameFilter.SearchText(args, skip: 1);
             games = GameFilter.Apply(snapshot, search, platform, depotOnly: true, dlcOnly: flags.ContainsKey("dlc"));
 
-            // Generation 1 has a depot but an unsupported one. Dropping those silently would
-            // leave the user wondering why a batch of 210 fetched 180.
-            var legacy = GameFilter
-                .Apply(snapshot, search, platform, depotOnly: false, dlcOnly: flags.ContainsKey("dlc"))
-                .Count(g => GameFilter.LegacyDepots(g, platform).Any());
-
-            if (legacy > 0)
-                Console.Error.WriteLine(
-                    $"Skipping {legacy} {(legacy == 1 ? "title" : "titles")} with an old " +
-                    "(generation 1) depot, which is not supported yet.");
-
             if (games.Count == 0)
             {
                 Console.Error.WriteLine("Nothing matches.");

@@ -71,12 +71,10 @@ public static class LibraryCommands
         {
             var parts = new List<string>();
 
+            // gen1 still downloads, but its size is the unpacked one, not the transfer.
             if (GameFilter.Depots(game, platform).ToList() is { Count: > 0 } depots)
-                parts.Add(string.Join(",", depots.Select(Short)));
-
-            // Generation 1 has a depot but no way to fetch it, and no size in the manifest.
-            if (GameFilter.LegacyDepots(game, platform).ToList() is { Count: > 0 } legacy)
-                parts.Add(string.Join(",", legacy.Select(p => Short(p) + ":gen1")));
+                parts.Add(string.Join(",", depots.Select(p =>
+                    Short(p) + (game.Platforms[p].HasLegacyDepot ? ":gen1" : ""))));
 
             var installers = game.Platforms
                 .Where(kv => (platform is null || kv.Key == platform) && !kv.Value.HasDepot && kv.Value.HasInstaller)
@@ -119,7 +117,7 @@ public static class LibraryCommands
         Console.WriteLine(
             "  win        Galaxy depot, downloadable now");
         Console.WriteLine(
-            "  win:gen1   old depot format, not supported yet, size unknown");
+            "  win:gen1   old depot format, downloadable, size shown unpacked");
         Console.WriteLine(
             "  (win)      installer only, no depot");
         Console.WriteLine("Pass the slug to: gogdl download <slug>");

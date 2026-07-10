@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -23,11 +24,26 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
         GetZlibJsonAsync<DepotManifest>(
             $"{GogConstants.Cdn}/content-system/v2/meta/{GalaxyPath.For(manifestHash)}", ct);
 
+    public Task<RepositoryManifestV1?> GetRepositoryManifestV1Async(string url, CancellationToken ct) =>
+        GetZlibJsonAsync<RepositoryManifestV1>(url, ct);
+
+    public Task<DepotManifestV1?> GetDepotManifestV1Async(
+        string gameId, string platform, string timestamp, string manifest, CancellationToken ct) =>
+        GetZlibJsonAsync<DepotManifestV1>(
+            $"{GogConstants.Cdn}/content-system/v1/manifests/{gameId}/{platform}/{timestamp}/{manifest}", ct);
+
+    /// <summary>
+    /// Generation 2 signs the store root; generation 1 signs one platform-and-timestamp folder,
+    /// and asks for `type=depot` rather than a generation.
+    /// </summary>
     public async Task<IReadOnlyList<SecureLinkEndpoint>> GetSecureLinkAsync(
-        string productId, CancellationToken ct)
+        string productId, CancellationToken ct, int generation = 2, string path = "/")
     {
-        var url = $"{GogConstants.ContentSystem}/products/{productId}" +
-                  "/secure_link?_version=2&generation=2&path=/";
+        var query = generation == 1
+            ? $"_version=2&type=depot&path={path}"
+            : $"_version=2&generation=2&path={path}";
+
+        var url = $"{GogConstants.ContentSystem}/products/{productId}/secure_link?{query}";
 
         var response = await authed.GetFromJsonAsync<SecureLinkResponse>(url, Json, ct);
         var urls = response?.Urls ?? [];
@@ -35,6 +51,55 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
             throw new InvalidOperationException($"GOG returned no secure link for product {productId}.");
 
         return urls.OrderBy(u => u.Priority).ToList();
+    }
+
+    /// <summary>
+    /// Reads one file out of a v1 depot blob. The bytes are stored uncompressed, so the file's
+    /// own md5 verifies them directly.
+    /// </summary>
+    public async Task<byte[]> DownloadRangeAsync(
+        SecureLinkEndpoint endpoint, long offset, long size, string? md5,
+        IProgress<long>? bytes, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, endpoint.BlobUrl());
+        request.Headers.Range = new RangeHeaderValue(offset, offset + size - 1);
+
+        using var response = await cdn.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (response.StatusCode == HttpStatusCode.Unauthorized) throw new SecureLinkExpiredException();
+        response.EnsureSuccessStatusCode();
+
+        var buffer = new MemoryStream(capacity: (int)Math.Max(size, 1));
+        await using (var stream = await response.Content.ReadAsStreamAsync(ct))
+        {
+            var scratch = ArrayPool<byte>.Shared.Rent(64 * 1024);
+            try
+            {
+                int read;
+                while ((read = await stream.ReadAsync(scratch, ct)) > 0)
+                {
+                    await limiter.ConsumeAsync(read, ct);
+                    buffer.Write(scratch, 0, read);
+                    bytes?.Report(read);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(scratch);
+            }
+        }
+
+        var data = buffer.GetBuffer().AsMemory(0, (int)buffer.Length);
+        if (data.Length != size)
+            throw new ChunkChecksumException($"{size} bytes", $"{data.Length} bytes");
+
+        if (md5 is { Length: > 0 })
+        {
+            var actual = Convert.ToHexStringLower(MD5.HashData(data.Span));
+            if (!string.Equals(actual, md5, StringComparison.OrdinalIgnoreCase))
+                throw new ChunkChecksumException(md5, actual);
+        }
+
+        return data.ToArray();
     }
 
     /// <summary>Downloads a chunk, verifies the MD5 over the *compressed* bytes, and inflates it.</summary>

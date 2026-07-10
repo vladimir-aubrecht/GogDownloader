@@ -64,8 +64,6 @@ public sealed record DownloadProgress(string Phase, long Bytes, long TotalBytes,
 /// </summary>
 public sealed class GameDownloader(GogApiClient api, ContentClient content)
 {
-    private sealed record PlannedFile(string RelativePath, string ProductId, DepotItem Item);
-
     public async Task<DownloadResult> RunAsync(
         LibraryEntry game,
         DownloadOptions options,
@@ -75,10 +73,6 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         if (game.Platforms.GetValueOrDefault(options.Platform) is not { Depot: { } build })
             return new DownloadResult(DownloadOutcome.NoDepot,
                 Detail: "No Galaxy depot for this platform (path B/C, not implemented yet).");
-
-        if (build.Generation != 2)
-            return new DownloadResult(DownloadOutcome.UnsupportedGeneration,
-                Detail: $"Build is generation {build.Generation}; only 2 is supported so far.");
 
         var gameDirectory = Path.Combine(options.OutputRoot, game.DirectoryName);
         var archiveName = GameVaultName.For(game, options.Platform, build.VersionName);
@@ -95,30 +89,23 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
         progress?.Report(new DownloadProgress("manifest", 0, 0, 0, 0));
 
-        var repository = await content.GetRepositoryManifestAsync(build.Manifest!, ct)
-            ?? throw new InvalidOperationException("Failed to load the repository manifest.");
+        // Everything the two depot generations disagree about lives behind this.
+        DepotSource source = build.Generation == 1
+            ? new DepotSourceV1(content, api, build.Manifest!, options.Platform.ContentSystemName(), options.Language)
+            : new DepotSourceV2(content, api, build.Manifest!, options.Language);
 
-        var owned = (await api.GetOwnedGameIdsAsync(ct)).ToHashSet();
-        var dlcIds = repository.Products
-            .Select(p => p.ProductId)
-            .Where(id => id != repository.BaseProductId
-                         && long.TryParse(id, out var n) && owned.Contains(n))
-            .ToList();
+        DepotPlan plan;
+        try
+        {
+            plan = await source.PlanAsync(ct);
+        }
+        catch (NoDepotForLanguageException e)
+        {
+            return new DownloadResult(DownloadOutcome.NoDepotForLanguage, Detail: e.Message);
+        }
 
-        var wanted = new HashSet<string>(dlcIds) { repository.BaseProductId };
-
-        var depots = repository.Depots
-            .Where(d => wanted.Contains(d.ProductId) && d.MatchesLanguage(options.Language))
-            .ToList();
-
-        if (depots.Count == 0)
-            return new DownloadResult(DownloadOutcome.NoDepotForLanguage,
-                Detail: $"No depot for language '{options.Language}'.");
-
-        var (files, directories, links) = await PlanAsync(depots, ct);
-
-        var totalCompressed = files.Sum(f => f.Item.Chunks.Sum(c => c.CompressedSize));
-        var installedSize = files.Sum(f => f.Item.Size);
+        var totalCompressed = plan.DownloadBytes;
+        var installedSize = plan.InstalledBytes;
 
         var staging = Path.Combine(
             options.StagingDirectory, $"{game.DirectoryName}__{options.Platform.ContentSystemName()}");
@@ -153,7 +140,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
         try
         {
-            await MaterializeAsync(staging, files, directories, links, totalCompressed, resumable, options, progress, ct);
+            await MaterializeAsync(staging, source, plan, resumable, options, progress, ct);
 
             var stagingZip = staging + ".zip";
             if (File.Exists(stagingZip)) File.Delete(stagingZip);
@@ -196,11 +183,11 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                 ArchiveName = archiveName,
                 ArchiveSize = new FileInfo(archivePath).Length,
                 InstalledSize = installedSize,
-                Dlcs = dlcIds,
-                SkippedDependencies = repository.Dependencies,
-                Files = files
-                    .Where(f => f.Item.Identity is not null)
-                    .ToDictionary(f => f.RelativePath, f => new BackedUpFile(f.Item.Identity!, f.Item.Size)),
+                Dlcs = plan.DlcIds,
+                SkippedDependencies = plan.Dependencies,
+                Files = plan.Files
+                    .Where(f => f.Identity is not null)
+                    .ToDictionary(f => f.RelativePath, f => new BackedUpFile(f.Identity!, f.Size)),
             };
 
             // Only now does the game count as downloaded.
@@ -326,65 +313,16 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         progress?.Report(new DownloadProgress("copy", total, total, 1, 1));
     }
 
-    private async Task<(List<PlannedFile> Files, List<string> Directories, List<DepotItem> Links)> PlanAsync(
-        List<DepotRef> depots, CancellationToken ct)
-    {
-        var files = new Dictionary<string, PlannedFile>(StringComparer.OrdinalIgnoreCase);
-        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var links = new List<DepotItem>();
-
-        foreach (var depot in depots)
-        {
-            var manifest = await content.GetDepotManifestAsync(depot.Manifest, ct);
-            if (manifest is null) continue;
-
-            foreach (var item in manifest.Depot.Items)
-            {
-                switch (item.Type)
-                {
-                    case "DepotFile":
-                        var relative = RelativePathFor(item, depot.ProductId);
-                        files.TryAdd(relative, new PlannedFile(relative, depot.ProductId, item));
-                        break;
-                    case "DepotDirectory":
-                        directories.Add(SafeRelative(item.Path));
-                        break;
-                    case "DepotLink":
-                        links.Add(item);
-                        break;
-                }
-            }
-        }
-
-        return (files.Values.ToList(), directories.ToList(), links);
-    }
-
-    private static string RelativePathFor(DepotItem item, string productId)
-    {
-        var relative = SafeRelative(item.Path);
-        // `support` files do not belong in the game, Galaxy keeps them aside.
-        return item.IsSupport ? $"gog-support/{productId}/{relative}" : relative;
-    }
-
-    /// <summary>Depot paths use `\`. This also prevents escaping the staging directory.</summary>
-    private static string SafeRelative(string path)
-    {
-        var normalized = path.Replace('\\', '/').Trim('/');
-        if (normalized.Split('/').Any(s => s is ".." or "."))
-            throw new InvalidOperationException($"Suspicious path in depot: {path}");
-        return normalized;
-    }
-
     /// <summary>
-    /// A file left by an interrupted run counts as done only when its size matches and, when
-    /// the depot gives us a hash, its content does too. Trusting size alone would keep a file
+    /// A file left by an interrupted run counts as done only when its size matches and, when the
+    /// depot gives us a hash, its content does too. Trusting size alone would keep a file
     /// truncated exactly at a chunk boundary.
     /// </summary>
-    private static bool AlreadyMaterialized(string fullPath, DepotItem item)
+    private static bool AlreadyMaterialized(string fullPath, PlannedFile file)
     {
         if (!File.Exists(fullPath)) return false;
-        if (new FileInfo(fullPath).Length != item.Size) return false;
-        if (item.Identity is not { } expected) return true;
+        if (new FileInfo(fullPath).Length != file.Size) return false;
+        if (file.Identity is not { } expected) return true;
 
         using var stream = File.OpenRead(fullPath);
         var actual = Convert.ToHexStringLower(MD5.HashData(stream));
@@ -393,17 +331,18 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
     private async Task MaterializeAsync(
         string staging,
-        List<PlannedFile> files,
-        List<string> directories,
-        List<DepotItem> links,
-        long totalCompressed,
+        DepotSource source,
+        DepotPlan plan,
         bool resuming,
         DownloadOptions options,
         IProgress<DownloadProgress>? progress,
         CancellationToken ct)
     {
-        foreach (var directory in directories)
+        foreach (var directory in plan.Directories)
             Directory.CreateDirectory(Path.Combine(staging, directory));
+
+        var files = plan.Files;
+        var totalBytes = plan.DownloadBytes;
 
         if (resuming)
         {
@@ -411,18 +350,16 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
             var verified = 0;
             var complete = new bool[files.Count];
-            Parallel.For(0, files.Count, new ParallelOptions { CancellationToken = ct }, i =>
+            Parallel.For(0, files.Count, new ParallelOptions { CancellationToken = ct }, (int i) =>
             {
-                complete[i] = AlreadyMaterialized(Path.Combine(staging, files[i].RelativePath), files[i].Item);
+                complete[i] = AlreadyMaterialized(Path.Combine(staging, files[i].RelativePath), files[i]);
                 progress?.Report(new DownloadProgress("verify", 0, 0, Interlocked.Increment(ref verified), files.Count));
             });
 
-            var kept = files.Where((_, i) => complete[i]).ToList();
-            totalCompressed -= kept.Sum(f => f.Item.Chunks.Sum(c => c.CompressedSize));
+            totalBytes -= files.Where((_, i) => complete[i]).Sum(f => f.DownloadSize);
             files = files.Where((_, i) => !complete[i]).ToList();
         }
 
-        var secureLinks = new SecureLinkCache(content);
         var slots = new SemaphoreSlim(options.MaxConnections, options.MaxConnections);
 
         long downloaded = 0;
@@ -430,7 +367,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
         var bytesProgress = new Progress<long>(n =>
         {
             var total = Interlocked.Add(ref downloaded, n);
-            progress?.Report(new DownloadProgress("download", total, totalCompressed, filesDone, files.Count));
+            progress?.Report(new DownloadProgress("download", total, totalBytes, filesDone, files.Count));
         });
 
         await Parallel.ForEachAsync(
@@ -441,20 +378,13 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                 var fullPath = Path.Combine(staging, file.RelativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
 
-                var size = file.Item.Size;
                 using (var handle = File.OpenHandle(
                            fullPath, FileMode.Create, FileAccess.Write, FileShare.None,
-                           FileOptions.Asynchronous, preallocationSize: size))
+                           FileOptions.Asynchronous, preallocationSize: file.Size))
                 {
-                    long offset = 0;
-                    var writes = new List<Task>(file.Item.Chunks.Count);
-
-                    foreach (var chunk in file.Item.Chunks)
-                    {
-                        var at = offset;
-                        offset += chunk.Size;
-                        writes.Add(DownloadChunkToAsync(handle, at, file.ProductId, chunk, secureLinks, slots, bytesProgress, token));
-                    }
+                    var writes = file.Parts
+                        .Select(part => FetchPartToAsync(handle, source, file.ProductId, part, slots, bytesProgress, token))
+                        .ToList();
 
                     await Task.WhenAll(writes);
                 }
@@ -463,36 +393,44 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             });
 
         // Symlinks are dereferenced: the target is relative to the install root.
-        foreach (var link in links)
+        foreach (var link in plan.Links)
         {
-            if (link.Target is null) continue;
-            var source = Path.Combine(staging, SafeRelative(link.Target));
+            var linkSource = Path.Combine(staging, SafeRelative(link.Target));
             var destination = Path.Combine(staging, SafeRelative(link.Path));
-            if (!File.Exists(source)) continue;
+            if (!File.Exists(linkSource)) continue;
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            File.Copy(source, destination, overwrite: true);
+            File.Copy(linkSource, destination, overwrite: true);
         }
     }
 
-    private async Task DownloadChunkToAsync(
-        SafeFileHandle handle, long offset, string productId, Chunk chunk,
-        SecureLinkCache secureLinks, SemaphoreSlim slots, IProgress<long> bytes, CancellationToken ct)
+    /// <summary>Depot paths use `\`. This also prevents escaping the staging directory.</summary>
+    private static string SafeRelative(string path)
+    {
+        var normalized = path.Replace('\\', '/').Trim('/');
+        if (normalized.Split('/').Any(segment => segment is ".." or "."))
+            throw new InvalidOperationException($"Suspicious path in depot: {path}");
+        return normalized;
+    }
+
+    private static async Task FetchPartToAsync(
+        SafeFileHandle handle, DepotSource source, string productId, PlannedPart part,
+        SemaphoreSlim slots, IProgress<long> bytes, CancellationToken ct)
     {
         await slots.WaitAsync(ct);
         try
         {
             for (var attempt = 0; ; attempt++)
             {
-                var endpoint = await secureLinks.GetAsync(productId, ct);
+                var endpoint = await source.LinkAsync(productId, ct);
                 try
                 {
-                    var data = await content.DownloadChunkAsync(endpoint, chunk, bytes, ct);
-                    await RandomAccess.WriteAsync(handle, data, offset, ct);
+                    var data = await source.FetchAsync(endpoint, part, bytes, ct);
+                    await RandomAccess.WriteAsync(handle, data, part.DestinationOffset, ct);
                     return;
                 }
                 catch (SecureLinkExpiredException) when (attempt < 3)
                 {
-                    await secureLinks.InvalidateAsync(productId, endpoint, ct);
+                    await source.InvalidateAsync(productId, endpoint, ct);
                 }
                 catch (ChunkChecksumException) when (attempt < 3)
                 {
@@ -505,4 +443,5 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
             slots.Release();
         }
     }
+
 }

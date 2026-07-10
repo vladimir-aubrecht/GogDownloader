@@ -94,8 +94,8 @@ public static class DownloadCommands
     private static async Task<int> DownloadEachAsync(
         List<LibraryEntry> games, DownloadOptions options, Dictionary<string, string> flags, CancellationToken ct)
     {
-        var (api, content, _) = CommandLine.CreateContent(flags);
-        var downloader = new GameDownloader(api, content);
+        var (api, content, cdn, _) = CommandLine.CreateContent(flags);
+        var downloader = new GameDownloader(api, content, cdn);
 
         var completed = new List<string>();
         var skipped = new List<string>();

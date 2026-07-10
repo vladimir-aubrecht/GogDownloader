@@ -204,6 +204,30 @@ installer is never downloaded in full.** (Source: a comment in `gogdl/dl/manager
 
 That satisfies the requirement of never storing installers.
 
+### Reading a MojoSetup installer
+
+1. `api.gog.com/products/{id}?expand=downloads` → `downloads.installers[]`, filter `os == "linux"`.
+   Pick the installer whose `language` matches; otherwise `en`, which is multilanguage.
+2. `GET installer.files[0].downlink` (authenticated) returns `{"downlink": "<real signed URL>"}`.
+3. The real URL answers HTTP Range. Every offset below is relative to the **start of the ZIP**,
+   which is the first `PK\x03\x04` inside the first 2 MiB of the shell script. Find it once.
+4. The total size comes from the `Content-Range` header of any ranged request.
+5. Read the last 100 bytes, find `PK\x05\x06` (end of central directory). When its central
+   directory offset is `0xFFFFFFFF`, find `PK\x06\x07` (zip64 locator) in the same 100 bytes and
+   read the zip64 end of central directory it points at.
+6. Read the central directory in one range. Each record may carry a zip64 extra field (`0x0001`)
+   supplying the real sizes and local-header offset.
+
+A record's **data offset** is not in the record. gogdl derives it as the *next* record's local
+header offset minus this record's compressed size, and for the last record as the central
+directory offset minus its compressed size. That avoids a range request per file.
+
+Only entries under `data/noarch/` are game content; everything else is installer scaffolding.
+Directory entries end with `/`. A symlink is an entry whose external attributes say so
+(`S_ISLNK` of `ext_attrs >> 16`), and its *content* is the link target.
+
+Entries are stored (method 0) or deflated (method 8), and carry a CRC-32 to verify against.
+
 Curiosity: `linux.py` requests `os/windows/builds` even for a Linux game. I did not investigate
 why — probably to determine the version or whether the title exists. Do not copy this blindly.
 

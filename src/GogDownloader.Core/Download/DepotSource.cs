@@ -42,50 +42,40 @@ public sealed class NoDepotForLanguageException(string language)
     : Exception($"No depot for language '{language}'.");
 
 /// <summary>
-/// What differs between the two depot generations, and nothing else. The downloader itself does
-/// not know which one it is driving.
+/// Where a game's bytes come from. Depots of either generation, or a Linux installer read over
+/// HTTP Range — the downloader does not know which it is driving.
 /// </summary>
-public abstract class DepotSource(ContentClient content)
+public abstract class ContentSource
 {
-    protected ContentClient Content { get; } = content;
-
-    private readonly Dictionary<string, SecureLinkEndpoint> _links = [];
-    private readonly SemaphoreSlim _gate = new(1, 1);
-
     public abstract Task<DepotPlan> PlanAsync(CancellationToken ct);
 
-    protected abstract Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct);
+    protected abstract Task<byte[]> FetchOnceAsync(
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct);
 
-    public abstract Task<byte[]> FetchAsync(
-        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, CancellationToken ct);
+    /// <summary>Called when a signed URL expired, so the next attempt asks for a fresh one.</summary>
+    protected virtual Task RefreshAsync(PlannedFile file, CancellationToken ct) => Task.CompletedTask;
 
-    public async Task<SecureLinkEndpoint> LinkAsync(string productId, CancellationToken ct)
+    /// <summary>
+    /// A 401 means the signed URL expired, and a checksum failure means a corrupted transfer.
+    /// Neither is a reason to abandon a download that may be hours in.
+    /// </summary>
+    public async Task<byte[]> FetchAsync(
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct)
     {
-        await _gate.WaitAsync(ct);
-        try
+        for (var attempt = 0; ; attempt++)
         {
-            if (_links.TryGetValue(productId, out var cached)) return cached;
-            return _links[productId] = await RequestLinkAsync(productId, ct);
-        }
-        finally
-        {
-            _gate.Release();
-        }
-    }
-
-    /// <summary>A 401 means the signed URL expired, not that the download failed.</summary>
-    public async Task InvalidateAsync(string productId, SecureLinkEndpoint stale, CancellationToken ct)
-    {
-        await _gate.WaitAsync(ct);
-        try
-        {
-            // Another worker may have refreshed it already; do not drop a fresh link.
-            if (_links.TryGetValue(productId, out var current) && ReferenceEquals(current, stale))
-                _links.Remove(productId);
-        }
-        finally
-        {
-            _gate.Release();
+            try
+            {
+                return await FetchOnceAsync(file, part, bytes, ct);
+            }
+            catch (SecureLinkExpiredException) when (attempt < 3)
+            {
+                await RefreshAsync(file, ct);
+            }
+            catch (ChunkChecksumException) when (attempt < 3)
+            {
+                // corrupted transfer, try again
+            }
         }
     }
 
@@ -103,6 +93,51 @@ public abstract class DepotSource(ContentClient content)
     {
         var relative = SafeRelative(path);
         return support ? $"gog-support/{productId}/{relative}" : relative;
+    }
+}
+
+/// <summary>A depot of either generation: signed links, cached per product, refreshed on 401.</summary>
+public abstract class DepotSource(ContentClient content) : ContentSource
+{
+    protected ContentClient Content { get; } = content;
+
+    private readonly Dictionary<string, SecureLinkEndpoint> _links = [];
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
+    protected abstract Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct);
+
+    protected abstract Task<byte[]> FetchPartAsync(
+        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, CancellationToken ct);
+
+    protected override async Task<byte[]> FetchOnceAsync(
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct) =>
+        await FetchPartAsync(await LinkAsync(file.ProductId, ct), part, bytes, ct);
+
+    protected override async Task RefreshAsync(PlannedFile file, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            _links.Remove(file.ProductId);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<SecureLinkEndpoint> LinkAsync(string productId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_links.TryGetValue(productId, out var cached)) return cached;
+            return _links[productId] = await RequestLinkAsync(productId, ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 }
 
@@ -172,10 +207,10 @@ public sealed class DepotSourceV2(ContentClient content, GogApiClient api, strin
         return new DepotPlan(files.Values.ToList(), directories.ToList(), links, dlcIds, repository.Dependencies);
     }
 
-    protected override Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct) =>
-        Content.GetSecureLinkAsync(productId, ct).ContinueWith(t => t.Result[0], ct);
+    protected override async Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct) =>
+        (await Content.GetSecureLinkAsync(productId, ct))[0];
 
-    public override Task<byte[]> FetchAsync(
+    protected override Task<byte[]> FetchPartAsync(
         SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, CancellationToken ct) =>
         Content.DownloadChunkAsync(
             endpoint,
@@ -261,7 +296,7 @@ public sealed class DepotSourceV1(
     protected override async Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct) =>
         (await Content.GetSecureLinkAsync(productId, ct, generation: 1, path: $"/{platform}/{_timestamp}/"))[0];
 
-    public override Task<byte[]> FetchAsync(
+    protected override Task<byte[]> FetchPartAsync(
         SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, CancellationToken ct) =>
         Content.DownloadRangeAsync(endpoint, part.SourceOffset, part.Size, part.Md5, bytes, ct);
 }

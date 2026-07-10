@@ -7,7 +7,7 @@ public static class LibraryCommands
 {
     public static async Task<int> SyncAsync(Dictionary<string, string> flags, CancellationToken ct)
     {
-        var (api, content, options) = CommandLine.CreateContent(flags);
+        var (api, content, _, options) = CommandLine.CreateContent(flags);
 
         if (options.MaxBytesPerSecond > 0)
             Console.Error.WriteLine("Note: --limit-rate has no effect here, it applies to game downloads.");
@@ -77,7 +77,8 @@ public static class LibraryCommands
                     Short(p) + (game.Platforms[p].HasLegacyDepot ? ":gen1" : ""))));
 
             var installers = game.Platforms
-                .Where(kv => (platform is null || kv.Key == platform) && !kv.Value.HasDepot && kv.Value.HasInstaller)
+                .Where(kv => (platform is null || kv.Key == platform)
+                             && !kv.Value.HasDepot && kv.Value.HasInstaller && !kv.Value.CanBackUp)
                 .Select(kv => Short(kv.Key))
                 .ToList();
 
@@ -138,7 +139,7 @@ public static class LibraryCommands
                 .OfType<PlatformAvailability>()
                 .ToList();
 
-            var depot = present.Count(p => p.HasDownloadableDepot);
+            var depot = present.Count(p => p.CanBackUp);
             var legacy = present.Count(p => p.HasLegacyDepot);
             var installerOnly = present.Count(p => !p.HasDepot && p.HasInstaller);
             var size = present.Sum(p => p.BestKnownSize);

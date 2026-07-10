@@ -62,44 +62,68 @@ public sealed record DownloadProgress(string Phase, long Bytes, long TotalBytes,
 /// Path A: assembles the game from Galaxy depots in a staging directory, zips it and
 /// atomically moves the zip into place. The manifest is written last.
 /// </summary>
-public sealed class GameDownloader(GogApiClient api, ContentClient content)
+public sealed class GameDownloader(GogApiClient api, ContentClient content, HttpClient? cdn = null)
 {
+    private readonly HttpClient cdn = cdn ?? new HttpClient();
+
+    /// <summary>
+    /// Linux has no builds, so a backup is identified by the installer version and size. A new
+    /// installer changes one or the other, which is what makes a rerun fetch it again.
+    /// </summary>
+    private static string InstallerBuildId(Library.PlatformAvailability availability)
+    {
+        var installer = availability.Installers.First();
+        return $"installer-{installer.Version ?? "0"}-{installer.TotalSize}";
+    }
+
     public async Task<DownloadResult> RunAsync(
         LibraryEntry game,
         DownloadOptions options,
         IProgress<DownloadProgress>? progress = null,
         CancellationToken ct = default)
     {
-        if (game.Platforms.GetValueOrDefault(options.Platform) is not { Depot: { } build })
+        if (game.Platforms.GetValueOrDefault(options.Platform) is not { } availability)
             return new DownloadResult(DownloadOutcome.NoDepot,
-                Detail: "No Galaxy depot for this platform (path B/C, not implemented yet).");
+                Detail: $"The library has nothing for {options.Platform.ApiName()}.");
+
+        // Linux has no Galaxy depots at all, so its build identity is the installer version.
+        var build = availability.Depot;
+        if (build is null && !(options.Platform == GamePlatform.Linux && availability.HasInstaller))
+            return new DownloadResult(DownloadOutcome.NoDepot,
+                Detail: "No Galaxy depot and no installer for this platform (path C, not implemented yet).");
+
+        var buildId = build?.BuildId ?? InstallerBuildId(availability);
+        var versionName = build?.VersionName ?? availability.Installers.FirstOrDefault()?.Version;
 
         var gameDirectory = Path.Combine(options.OutputRoot, game.DirectoryName);
-        var archiveName = GameVaultName.For(game, options.Platform, build.VersionName);
+        var archiveName = GameVaultName.For(game, options.Platform, versionName);
 
         var existing = await BackupManifest.LoadAsync(gameDirectory, ct);
         if (!options.Force
             && existing?.Platforms.GetValueOrDefault(options.Platform) is { } done
-            && done.BuildId == build.BuildId)
+            && done.BuildId == buildId)
         {
             return new DownloadResult(DownloadOutcome.AlreadyDone,
                 Path.Combine(gameDirectory, done.ArchiveName),
-                $"Build {build.BuildId} is already backed up.");
+                $"Build {buildId} is already backed up.");
         }
 
         progress?.Report(new DownloadProgress("manifest", 0, 0, 0, 0));
 
-        // Everything the two depot generations disagree about lives behind this.
-        DepotSource source = build.Generation == 1
-            ? new DepotSourceV1(content, api, build.Manifest!, options.Platform.ContentSystemName(), options.Language)
-            : new DepotSourceV2(content, api, build.Manifest!, options.Language);
+        // Everything the content sources disagree about lives behind this.
+        ContentSource source = build switch
+        {
+            null => new InstallerSource(api, cdn, game.Id, options.Language),
+            { Generation: 1 } => new DepotSourceV1(content, api, build.Manifest!, options.Platform.ContentSystemName(), options.Language),
+            _ => new DepotSourceV2(content, api, build.Manifest!, options.Language),
+        };
 
         DepotPlan plan;
         try
         {
             plan = await source.PlanAsync(ct);
         }
-        catch (NoDepotForLanguageException e)
+        catch (Exception e) when (e is NoDepotForLanguageException or NoLinuxInstallerException)
         {
             return new DownloadResult(DownloadOutcome.NoDepotForLanguage, Detail: e.Message);
         }
@@ -115,7 +139,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
         // Staging survives an interrupted run so the next one can resume, but only when it
         // belongs to this exact build and language; otherwise its files are stale.
-        var state = new StagingState(build.BuildId, options.Language, options.Platform.ContentSystemName());
+        var state = new StagingState(buildId, options.Language, options.Platform.ContentSystemName());
         var resumable = !options.Clean && StagingState.Load(staging) == state;
 
         // Bytes already on disk do not need to be found again, or a resume would be refused on
@@ -177,8 +201,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
             manifest.Platforms[options.Platform] = new PlatformBackup
             {
-                BuildId = build.BuildId,
-                VersionName = build.VersionName,
+                BuildId = buildId,
+                VersionName = versionName,
                 Language = options.Language,
                 ArchiveName = archiveName,
                 ArchiveSize = new FileInfo(archivePath).Length,
@@ -331,7 +355,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
 
     private async Task MaterializeAsync(
         string staging,
-        DepotSource source,
+        ContentSource source,
         DepotPlan plan,
         bool resuming,
         DownloadOptions options,
@@ -383,7 +407,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
                            FileOptions.Asynchronous, preallocationSize: file.Size))
                 {
                     var writes = file.Parts
-                        .Select(part => FetchPartToAsync(handle, source, file.ProductId, part, slots, bytesProgress, token))
+                        .Select(part => FetchPartToAsync(handle, source, file, part, slots, bytesProgress, token))
                         .ToList();
 
                     await Task.WhenAll(writes);
@@ -413,30 +437,14 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content)
     }
 
     private static async Task FetchPartToAsync(
-        SafeFileHandle handle, DepotSource source, string productId, PlannedPart part,
+        SafeFileHandle handle, ContentSource source, PlannedFile file, PlannedPart part,
         SemaphoreSlim slots, IProgress<long> bytes, CancellationToken ct)
     {
         await slots.WaitAsync(ct);
         try
         {
-            for (var attempt = 0; ; attempt++)
-            {
-                var endpoint = await source.LinkAsync(productId, ct);
-                try
-                {
-                    var data = await source.FetchAsync(endpoint, part, bytes, ct);
-                    await RandomAccess.WriteAsync(handle, data, part.DestinationOffset, ct);
-                    return;
-                }
-                catch (SecureLinkExpiredException) when (attempt < 3)
-                {
-                    await source.InvalidateAsync(productId, endpoint, ct);
-                }
-                catch (ChunkChecksumException) when (attempt < 3)
-                {
-                    // corrupted transfer, try again
-                }
-            }
+            var data = await source.FetchAsync(file, part, bytes, ct);
+            await RandomAccess.WriteAsync(handle, data, part.DestinationOffset, ct);
         }
         finally
         {

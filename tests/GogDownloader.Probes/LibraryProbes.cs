@@ -24,7 +24,14 @@ public static class LibraryProbes
         Probe.Check("a depot wins over an installer", withDepot.BestKnownSize == 5_000_000_000);
         Probe.Check("a generation 1 depot is downloadable too",
             new PlatformAvailability { Depot = new BuildRef("b", 1, null, "u") } is
-                { HasDownloadableDepot: true, HasLegacyDepot: true });
+                { CanBackUp: true, HasLegacyDepot: true });
+        // Linux has no depots at all; its installer is the only source there is.
+        Probe.Check("a Linux installer can be backed up",
+            new PlatformAvailability { IsLinux = true, Installers = [new InstallerRef("en", null, 5)] }.CanBackUp);
+        Probe.Check("a Windows installer without a depot cannot",
+            !new PlatformAvailability { Installers = [new InstallerRef("en", null, 5)] }.CanBackUp);
+        Probe.Check("a Linux entry with no installer cannot",
+            !new PlatformAvailability { IsLinux = true }.CanBackUp);
         Probe.Check("without a depot the installer is used",
             new PlatformAvailability { Installers = [new InstallerRef("en", null, 777)] }.BestKnownSize == 777);
         Probe.Check("with neither the size is zero", new PlatformAvailability().BestKnownSize == 0);

@@ -35,11 +35,11 @@ public static class DiffCommands
             var backup = (await BackupManifest.LoadAsync(directory, ct))?.Platforms.GetValueOrDefault(platform);
             var size = GameFilter.Size(game, platform);
 
-            if (!availability.HasDownloadableDepot)
-                rows.Add(new Row(State.Unsupported, game, "no depot", size));
+            if (!availability.CanBackUp)
+                rows.Add(new Row(State.Unsupported, game, "no depot, no installer", size));
             else if (backup is null)
                 rows.Add(new Row(State.Missing, game, "not backed up", size));
-            else if (backup.BuildId != availability.Depot!.BuildId)
+            else if (availability.Depot is not null && backup.BuildId != availability.Depot.BuildId)
                 rows.Add(new Row(State.Outdated, game,
                     $"have {Describe(backup.VersionName, backup.BuildId)}, " +
                     $"GOG has {Describe(availability.Depot.VersionName, availability.Depot.BuildId)}", size));

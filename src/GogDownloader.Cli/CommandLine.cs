@@ -52,13 +52,13 @@ public static class CommandLine
               library sync [--connections N]   fetch the library from GOG and save a snapshot
               library list [text]              list games and their slugs, filtered by text
                 --platform windows|mac|linux   only games available for this platform
-                --depot                        only games with a Galaxy depot (downloadable now)
+                --depot                        only games that can be backed up now
                 --dlc                          only games with owned DLC
                 --slugs                        print bare slugs, one per line, for scripting
               library stats                    library breakdown by depot availability
 
-              download <slug|id>               download a game from Galaxy depots into a zip
-              download --all [text]            download every matching game with a depot
+              download <slug|id>               back up a game into a zip
+              download --all [text]            back up every matching game
                 --dlc                          of those, only games with owned DLC
                 --dry-run                      list what would be downloaded, then stop
                 --platform windows|mac|linux   default windows
@@ -181,16 +181,16 @@ public static class CommandLine
     public static TokenProvider Tokens(GogHttpOptions options) =>
         new(new TokenStore(), new GogAuthClient(GogHttpFactory.Create(options)));
 
-    public static (GogApiClient Api, ContentClient Content, GogHttpOptions Options) CreateContent(
+    public static (GogApiClient Api, ContentClient Content, HttpClient Cdn, GogHttpOptions Options) CreateContent(
         Dictionary<string, string> flags)
     {
         var options = OptionsFrom(flags);
         var authed = GogHttpFactory.Create(options, Tokens(options));
 
-        // Chunks go through a signed URL — a Bearer header has no place on the CDN.
+        // Chunks and installer ranges go through a signed URL — a Bearer header has no place there.
         var cdn = GogHttpFactory.Create(options);
 
-        return (new GogApiClient(authed), new ContentClient(authed, cdn, new RateLimiter(options.MaxBytesPerSecond)), options);
+        return (new GogApiClient(authed), new ContentClient(authed, cdn, new RateLimiter(options.MaxBytesPerSecond)), cdn, options);
     }
 
     /// <summary>Human-readable size. Unknown sizes print as a dash, not as "0 B".</summary>

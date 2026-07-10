@@ -42,7 +42,8 @@
         },
         "Linux": {
           "Depot": null,
-          "Installers": [{ "Language": "en", "Version": null, "TotalSize": 190000000 }]
+          "IsLinux": true,
+          "Installers": [{ "Language": "en", "Version": "1.6", "TotalSize": 190000000 }]
         }
       }
     },

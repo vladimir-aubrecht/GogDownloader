@@ -29,7 +29,14 @@ public sealed record PlatformAvailability
 
     public bool HasDepot => Depot is not null;
 
-    public bool HasDownloadableDepot => Depot is not null;
+    /// <summary>
+    /// Whether a backup can be made. Linux has no depots at all, so its games are read out of a
+    /// MojoSetup installer instead — see <see cref="Download.InstallerSource"/>.
+    /// </summary>
+    public bool CanBackUp => Depot is not null || (IsLinux && HasInstaller);
+
+    /// <summary>Set by the sync so availability can answer without knowing its own key.</summary>
+    public bool IsLinux { get; init; }
 
     /// <summary>
     /// The old content system. Still fetched, but its manifest has no compressed size, so
@@ -221,7 +228,11 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
             if (platforms.TryGetValue(platform, out var existing))
                 platforms[platform] = existing with { Installers = list };
             else
-                platforms[platform] = new PlatformAvailability { Installers = list };
+                platforms[platform] = new PlatformAvailability
+                {
+                    Installers = list,
+                    IsLinux = platform == GamePlatform.Linux,
+                };
         }
 
         return new LibraryEntry

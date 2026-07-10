@@ -68,8 +68,22 @@ public sealed record BuildsResponse
     [JsonPropertyName("items")] public List<Build> Items { get; init; } = [];
 }
 
+/// <summary>`downlink` is an API endpoint that hands out the real, signed installer URL.</summary>
+public sealed record Downlink
+{
+    [JsonPropertyName("downlink")] public string Url { get; init; } = "";
+}
+
 public sealed class GogApiClient(HttpClient http)
 {
+    public async Task<string> ResolveDownlinkAsync(string downlink, CancellationToken ct = default)
+    {
+        var resolved = await http.GetFromJsonAsync<Downlink>(downlink, ct);
+        if (resolved is null || resolved.Url.Length == 0)
+            throw new InvalidOperationException($"GOG returned no download URL for {downlink}.");
+        return resolved.Url;
+    }
+
     public async Task<IReadOnlyList<long>> GetOwnedGameIdsAsync(CancellationToken ct = default)
     {
         var result = await http.GetFromJsonAsync<OwnedGames>(

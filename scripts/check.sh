@@ -50,7 +50,11 @@ expect "download needs a game"        "Missing game"               gogdl downloa
 # A flag's value must never be mistaken for the game name.
 expect "download ignores flag values" "Missing game"               gogdl download --platform windows
 expect "download rejects unknown game" "is not in the library"     gogdl download nonexistent
-expect "download refuses no depot"    "No Galaxy depot"            gogdl download ultima_1_2_3 --platform linux
+expect "download refuses no depot"    "The library has nothing"    gogdl download ultima_1_2_3 --platform linux
+
+# Linux has no depots at all; its games come out of the installer.
+expect "linux games are backupable"   "1 game for linux"           gogdl download --all --dry-run --platform linux
+expect "list stops calling linux installer-only" "lin " gogdl library list faster_than_light --platform linux
 
 # Batch mode must select exactly what `library list` shows.
 expect "download --all includes gen1"    "3 games for windows"       gogdl download --all --dry-run --platform windows

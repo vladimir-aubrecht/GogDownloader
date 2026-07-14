@@ -53,6 +53,26 @@ The access token is short-lived (roughly an hour), the refresh token is long-liv
 | Game details + offline installers | `GET {GOG_EMBED}/account/gameDetails/{id}.json` |
 | Product data | `GET {GOG_API}/products/{id}` (`?expand=…`) |
 
+## Launch metadata
+
+Every Galaxy depot ships a `goggame-{id}.info` file (JSON) that says how to start the game.
+On Windows it sits at the install root; on macOS under `Contents/Resources/`. It is a normal
+depot file, so it is already inside a downloaded backup — no extra request.
+
+It carries `playTasks[]`. The launcher is the one with `isPrimary: true` (gogdl takes the first
+such). A play task has:
+
+| Field | Meaning |
+|---|---|
+| `path` | executable, relative to the install root (or to `game/` if not found there) |
+| `arguments` | optional command-line arguments |
+| `workingDir` | optional directory to run from, relative to the root |
+| `category` | `game`, `launcher`, `tool`… |
+| `isPrimary` | the one to launch by default |
+
+Linux installers instead ship a ready `start.sh` at `data/noarch/start.sh`, which lands at the
+archive root once the `data/noarch/` prefix is stripped.
+
 ## Content system (Galaxy depots) — Path A
 
 Builds for a platform. `build_platform` is one of `windows`, `osx`, `linux`:

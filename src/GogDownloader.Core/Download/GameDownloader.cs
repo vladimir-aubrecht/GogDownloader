@@ -35,6 +35,12 @@ public sealed record DownloadOptions
     public bool Reuse { get; init; } = true;
 
     /// <summary>
+    /// Write a launcher into the archive root from the game's own launch metadata, so every game
+    /// starts the same way. Nothing is guessed; a game without metadata gets no launcher.
+    /// </summary>
+    public bool WriteLauncher { get; init; } = true;
+
+    /// <summary>
     /// Read the finished archive back and compare it against staging. Costs one extra pass over
     /// the data; the ZIP writer is hand-rolled, so this is on by default.
     /// </summary>
@@ -213,6 +219,10 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
                 await MaterializeAsync(staging, source!, plan!, resumable, cache, options, progress, ct);
             }
+
+            // A single entry point in the archive root, from the depot's own launch metadata.
+            if (options.WriteLauncher)
+                await StartScript.WriteAsync(staging, options.Platform, ct);
 
             var stagingZip = staging + ".zip";
             if (File.Exists(stagingZip)) File.Delete(stagingZip);

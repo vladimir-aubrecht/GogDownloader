@@ -121,6 +121,38 @@ public static class DownloadProbes
 
         await ArchiveCacheAsync(root);
 
+        Probe.Group("Transient network errors are retried");
+        var part = new PlannedPart(0, 0, 3, null, 3);
+        var file = new PlannedFile("game/x.bin", "1", 3, null, [part]);
+
+        // A connection dropped mid-body ("response ended prematurely") is an IOException that
+        // surfaces after the retry handler has returned, so the part-level retry must catch it.
+        var flaky = new FlakySource(failures: 2, () => new IOException("response ended prematurely"));
+        var data = await flaky.FetchAsync(file, part, null, default);
+        Probe.Check("a part survives transient drops", data.Length == 3);
+        Probe.Check("it retried until it succeeded", flaky.Calls == 3, flaky.Calls.ToString());
+
+        var reset = new FlakySource(failures: 1, () => new HttpRequestException("connection reset"));
+        Probe.Check("a connection reset is retried too", (await reset.FetchAsync(file, part, null, default)).Length == 3);
+
+        // A real bug must not be mistaken for a network blip and retried forever.
+        var bug = new FlakySource(failures: 99, () => new InvalidOperationException("bug"));
+        var propagated = false;
+        try { await bug.FetchAsync(file, part, null, default); }
+        catch (InvalidOperationException) { propagated = true; }
+        Probe.Check("a non-network error propagates on the first try", propagated && bug.Calls == 1);
+
+        // Ctrl+C must stop the retries, not spin on them.
+        using (var cts = new CancellationTokenSource())
+        {
+            await cts.CancelAsync();
+            var stopped = false;
+            var cancelled = new FlakySource(failures: 99, () => new IOException("drop"));
+            try { await cancelled.FetchAsync(file, part, null, cts.Token); }
+            catch (Exception e) when (e is IOException or OperationCanceledException) { stopped = true; }
+            Probe.Check("a cancelled fetch stops instead of retrying", stopped && cancelled.Calls <= 1);
+        }
+
         Probe.Group("Free space");
         Probe.Check("an impossible request is caught up front", GameDownloader.FreeSpaceShortfall(root, long.MaxValue / 2) is > 0);
         Probe.Check("a reasonable request passes", GameDownloader.FreeSpaceShortfall(root, 1024) is null);
@@ -368,6 +400,23 @@ public static class DownloadProbes
         Probe.Group("Directory size");
         Probe.Check("counts nested files", GameDownloader.DirectorySize(staging) > 90L * 1024 * 1024);
         Probe.Check("a missing directory is zero", GameDownloader.DirectorySize(Path.Combine(root, "gone")) == 0);
+    }
+
+    /// <summary>A content source whose fetch fails a set number of times before it succeeds.</summary>
+    private sealed class FlakySource(int failures, Func<Exception> error) : ContentSource
+    {
+        public int Calls { get; private set; }
+
+        public override Task<DepotPlan> PlanAsync(CancellationToken ct) => throw new NotSupportedException();
+
+        protected override Task<byte[]> FetchOnceAsync(
+            PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Calls++;
+            if (Calls <= failures) throw error();
+            return Task.FromResult(new byte[] { 1, 2, 3 });
+        }
     }
 
     private static bool Throws(Action action)

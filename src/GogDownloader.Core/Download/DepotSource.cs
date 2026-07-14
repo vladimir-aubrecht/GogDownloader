@@ -55,9 +55,12 @@ public abstract class ContentSource
     /// <summary>Called when a signed URL expired, so the next attempt asks for a fresh one.</summary>
     protected virtual Task RefreshAsync(PlannedFile file, CancellationToken ct) => Task.CompletedTask;
 
+    private const int MaxAttempts = 6;
+
     /// <summary>
-    /// A 401 means the signed URL expired, and a checksum failure means a corrupted transfer.
-    /// Neither is a reason to abandon a download that may be hours in.
+    /// Fetches one part, retrying the failures that a long download will inevitably hit and
+    /// that a single try must not abandon a whole game over: an expired signed URL, a corrupted
+    /// transfer, and — the common one — a connection dropped mid-body.
     /// </summary>
     public async Task<byte[]> FetchAsync(
         PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct)
@@ -68,16 +71,36 @@ public abstract class ContentSource
             {
                 return await FetchOnceAsync(file, part, bytes, ct);
             }
-            catch (SecureLinkExpiredException) when (attempt < 3)
+            catch (SecureLinkExpiredException) when (attempt < MaxAttempts)
             {
                 await RefreshAsync(file, ct);
             }
-            catch (ChunkChecksumException) when (attempt < 3)
+            catch (ChunkChecksumException) when (attempt < MaxAttempts)
             {
                 // corrupted transfer, try again
             }
+            catch (Exception e) when (attempt < MaxAttempts && IsTransientNetwork(e, ct))
+            {
+                // The body is streamed after the retry handler has already returned the
+                // headers, so a connection that drops mid-transfer ("response ended
+                // prematurely"), a reset, or a per-request timeout surfaces here, not there.
+                await Task.Delay(Backoff(attempt), ct);
+            }
         }
     }
+
+    /// <summary>A dropped connection or a timeout — not a bug, and not the user's Ctrl+C.</summary>
+    private static bool IsTransientNetwork(Exception e, CancellationToken ct) =>
+        !ct.IsCancellationRequested && e switch
+        {
+            HttpRequestException => true,
+            IOException => true,                       // includes HttpIOException / ResponseEnded
+            TaskCanceledException => true,             // a per-request timeout, since ct is not set
+            _ => false,
+        };
+
+    private static TimeSpan Backoff(int attempt) =>
+        TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 20)) + TimeSpan.FromMilliseconds(Random.Shared.Next(250));
 
     /// <summary>Depot paths use `\`. This also prevents escaping the staging directory.</summary>
     protected static string SafeRelative(string path)

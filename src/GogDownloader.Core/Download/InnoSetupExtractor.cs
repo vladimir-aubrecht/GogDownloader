@@ -76,19 +76,32 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
                 continue;
             }
 
-            using var response = await cdn.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-            response.EnsureSuccessStatusCode();
-
-            await using (var source = await response.Content.ReadAsStreamAsync(ct))
-            await using (var destination = File.Create(path))
+            // A connection that drops mid-file must not abandon the game; restart the file.
+            var before = downloaded;
+            for (var attempt = 0; ; attempt++)
             {
-                var buffer = new byte[1 << 20];
-                int read;
-                while ((read = await source.ReadAsync(buffer, ct)) > 0)
+                downloaded = before;
+                try
                 {
-                    await destination.WriteAsync(buffer.AsMemory(0, read), ct);
-                    downloaded += read;
-                    progress?.Report(new DownloadProgress("download", downloaded, total, parts.Count, installer.Files.Count));
+                    using var response = await cdn.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                    response.EnsureSuccessStatusCode();
+
+                    await using var source = await response.Content.ReadAsStreamAsync(ct);
+                    await using var destination = File.Create(path);
+                    var buffer = new byte[1 << 20];
+                    int read;
+                    while ((read = await source.ReadAsync(buffer, ct)) > 0)
+                    {
+                        await destination.WriteAsync(buffer.AsMemory(0, read), ct);
+                        downloaded += read;
+                        progress?.Report(new DownloadProgress("download", downloaded, total, parts.Count, installer.Files.Count));
+                    }
+                    break;
+                }
+                catch (Exception e) when (attempt < 5 && !ct.IsCancellationRequested
+                                          && e is IOException or HttpRequestException or TaskCanceledException)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 20)), ct);
                 }
             }
         }

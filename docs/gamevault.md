@@ -74,6 +74,22 @@ game. We omit the flag entirely.
 
 `in_development.active` from the same endpoint is reliable and becomes `(EA)`.
 
+## Cleaning the title so IGDB matches
+
+GameVault derives the title from the filename and searches IGDB with it, so noise GOG adds but
+IGDB does not carry breaks the match. `GameVaultName.Title` removes two kinds:
+
+- **Trademark marks** (`™ ® © ℠`) — IGDB never has them; GOG always does.
+- **"Game of the Year" / "GOTY" edition suffixes** — GOG's own slug drops them
+  (`Deus Ex™ GOTY Edition` → slug `deus_ex`), and IGDB indexes the base game.
+
+Enhanced / Definitive / Anniversary and similar editions are **kept**: they are frequently
+distinct IGDB entries (GOG keeps them in the slug too), so stripping them would match the wrong
+game. There is no clean canonical title in GOG's metadata to lean on instead — the slug drops
+some editions, keeps others, reorders articles and appends `_the_game`, so it is only fit for
+directory names, not display titles. When a match still fails, GameVault's manual remap is the
+intended fallback.
+
 ## There is no in-archive metadata file
 
 GameVault has **no** convention for a metadata file inside the game folder or archive — no

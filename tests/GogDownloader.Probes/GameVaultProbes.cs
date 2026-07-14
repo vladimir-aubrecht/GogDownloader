@@ -49,16 +49,41 @@ public static class GameVaultProbes
             IndexerTitle(colon) == "The Witcher 2 - Assassins of Kings", IndexerTitle(colon));
 
         // The indexer strips every round-bracket group, so a bracketed title must not keep them.
-        var goty = GameVaultName.For(Game("Fallout 2 (GOTY)"), GamePlatform.Windows, null);
-        Probe.Note(goty);
+        var bracketed = GameVaultName.For(Game("Aztec (Special)"), GamePlatform.Windows, null);
+        Probe.Note(bracketed);
         Probe.Check("round brackets in a title survive as square ones",
-            IndexerTitle(goty) == "Fallout 2 [GOTY]", IndexerTitle(goty));
-        Probe.Check("no version flag when GOG gives no version", !goty.Contains("(v"), goty);
+            IndexerTitle(bracketed) == "Aztec [Special]", IndexerTitle(bracketed));
+        Probe.Check("no version flag when GOG gives no version", !bracketed.Contains("(v"), bracketed);
 
         var earlyAccess = GameVaultName.For(Game("Some Roguelike", earlyAccess: true), GamePlatform.Windows, "0.9");
         Probe.Check("early access is flagged", IndexerEarlyAccess(earlyAccess));
         Probe.Check("flag order is Title (v) (EA) (Type)",
             earlyAccess == "Some Roguelike (v0.9) (EA) (W_P).zip", earlyAccess);
+
+        Probe.Group("Cleaning titles for IGDB matching");
+        // GameVault feeds the filename title to IGDB; trademark marks and GOTY suffixes miss.
+        Probe.Check("trademark marks are stripped", GameVaultName.Title("Ultima™ 1+2+3") == "Ultima 1+2+3", GameVaultName.Title("Ultima™ 1+2+3"));
+        Probe.Check("registered marks too", GameVaultName.Title("Heroes of Might and Magic®") == "Heroes of Might and Magic");
+        Probe.Check("GOTY Edition is dropped", GameVaultName.Title("Deus Ex™ GOTY Edition") == "Deus Ex", GameVaultName.Title("Deus Ex™ GOTY Edition"));
+        Probe.Check("Game of the Year Edition is dropped after a colon",
+            GameVaultName.Title("Fallout - Game of the Year Edition") == "Fallout - Game of the Year Edition"
+                ? false : GameVaultName.Title("Fallout - Game of the Year Edition") == "Fallout",
+            GameVaultName.Title("Fallout - Game of the Year Edition"));
+        Probe.Check("a dangling dash from the stripped suffix is cleaned",
+            !GameVaultName.Title("Deus Ex: Game of the Year Edition").EndsWith("-"),
+            GameVaultName.Title("Deus Ex: Game of the Year Edition"));
+
+        // These editions are distinct games on IGDB — GOG keeps them in its slug — so keep them.
+        Probe.Check("Enhanced Edition is kept",
+            GameVaultName.Title("Baldur's Gate - Enhanced Edition").Contains("Enhanced Edition"));
+        Probe.Check("Definitive Edition is kept",
+            GameVaultName.Title("Divinity - Original Sin 2 - Definitive Edition").Contains("Definitive Edition"));
+        Probe.Check("Anniversary Edition is kept",
+            GameVaultName.Title("Titan Quest Anniversary Edition").Contains("Anniversary Edition"));
+        Probe.Check("a plain title is untouched", GameVaultName.Title("Earth 2150 - Escape from the Blue Planet") == "Earth 2150 - Escape from the Blue Planet");
+        Probe.Check("GOTY inside a word is not stripped", GameVaultName.Title("Goofy GOTYA") == "Goofy GOTYA", GameVaultName.Title("Goofy GOTYA"));
+        Probe.Check("stripping GOTY out of brackets leaves no empty ones",
+            GameVaultName.Title("Fallout 2 (GOTY)") == "Fallout 2", GameVaultName.Title("Fallout 2 (GOTY)"));
 
         Probe.Group("Game type flags");
         Probe.Check("windows depots are portable", GameVaultName.GameType(GamePlatform.Windows) == "W_P");

@@ -4,8 +4,17 @@ using GogDownloader.Core.Api;
 namespace GogDownloader.Core.Download;
 
 public sealed class InnoExtractMissingException()
-    : Exception("innoextract is not on PATH. Install it (apt install innoextract, brew install innoextract) " +
-                "or skip these titles.");
+    : Exception($"innoextract is not on PATH. {InstallHint} Or skip these titles.")
+{
+    /// <summary>The hint has to match the machine that will read it, not the one that built it.</summary>
+    private static string InstallHint =>
+        OperatingSystem.IsWindows()
+            ? "Install it with 'winget install --id dscharrer.innoextract' " +
+              "(or 'scoop install innoextract', or 'choco install innoextract')."
+            : OperatingSystem.IsMacOS()
+                ? "Install it with 'brew install innoextract'."
+                : "Install it with 'apt install innoextract' (or your distro's package manager).";
+}
 
 public sealed class InnoExtractFailedException(string message) : Exception(message);
 

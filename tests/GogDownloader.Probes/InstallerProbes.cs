@@ -67,6 +67,14 @@ public static class InstallerProbes
 
         Probe.Group("Path C: Inno Setup installers");
         Probe.Check("innoextract is detected on PATH", InnoSetupExtractor.IsAvailable);
+
+        // The install hint has to name a tool that exists on the machine reading it.
+        var hint = new InnoExtractMissingException().Message;
+        var expected = OperatingSystem.IsWindows() ? "winget"
+            : OperatingSystem.IsMacOS() ? "brew" : "apt";
+        Probe.Check($"the missing-innoextract hint suits this OS ({expected})", hint.Contains(expected), hint);
+        Probe.Check("the hint does not send Windows users to apt or brew",
+            OperatingSystem.IsWindows() ? !hint.Contains("apt install") && !hint.Contains("brew") : true, hint);
         Probe.Check("the real filename is kept, or slices are not recognised as one installer",
             InnoSetupExtractor.FileNameFrom("https://cdn/x/setup_quake_1.0.exe?token=1", "id") == "setup_quake_1.0.exe");
         Probe.Check("a .bin slice keeps its name",

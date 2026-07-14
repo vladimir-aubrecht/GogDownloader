@@ -1,0 +1,27 @@
+# A sidecar that keeps GameVault's launch executables in step with your backups.
+#
+# GogDownloader records the launcher GOG declares into each backup's .gogdl.json; this service
+# reads those and calls the GameVault API. The dependency on GameVault lives here, in your
+# compose file, not in the backup tool.
+#
+# Mount the same volume GameVault indexes and the directory GogDownloader wrote to (often the
+# same one), then set the three GAMEVAULT_* values.
+
+services:
+  gamevault-launch-sync:
+    image: alpine:3
+    restart: unless-stopped
+    environment:
+      GAMEVAULT_URL: http://gamevault-backend:8080
+      GAMEVAULT_USER: ${GAMEVAULT_USER}
+      GAMEVAULT_PASSWORD: ${GAMEVAULT_PASSWORD}
+      BACKUP_DIR: /files
+      SYNC_INTERVAL: "3600"   # once an hour; unset to run a single pass
+    volumes:
+      - ./gamevault-sync.sh:/gamevault-sync.sh:ro
+      - gamevault-files:/files:ro
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache curl jq >/dev/null && exec /gamevault-sync.sh"]
+
+# volumes:
+#   gamevault-files:
+#     external: true

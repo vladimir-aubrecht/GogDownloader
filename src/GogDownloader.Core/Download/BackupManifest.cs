@@ -25,6 +25,15 @@ public sealed record PlatformBackup
     /// <summary>Redistributables the game asked for and we deliberately skipped.</summary>
     public List<string> SkippedDependencies { get; init; } = [];
 
+    /// <summary>
+    /// The executable to launch, from the depot's own metadata, as a path inside the archive.
+    /// Null when the game shipped no launch metadata. Fed to GameVault by `gamevault sync`.
+    /// </summary>
+    public string? LaunchExecutable { get; init; }
+
+    /// <summary>Default launch arguments, if the metadata gave any.</summary>
+    public string? LaunchParameters { get; init; }
+
     /// <summary>Path inside the zip to hash and size. The basis for an incremental patch.</summary>
     public Dictionary<string, BackedUpFile> Files { get; init; } = [];
 }

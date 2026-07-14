@@ -51,10 +51,28 @@ public static class StartScript
         var task = await FindPrimaryTaskAsync(staging, ct);
         if (task is null) return null;
 
-        var path = staging;
-        var script = System.IO.Path.Combine(path, WindowsName);
+        var script = System.IO.Path.Combine(staging, WindowsName);
         await File.WriteAllTextAsync(script, BuildWindowsScript(task), new UTF8Encoding(false), ct);
         return WindowsName;
+    }
+
+    /// <summary>
+    /// What GameVault should launch: an executable path inside the archive, and its arguments.
+    /// Windows and macOS read it from goggame metadata; Linux ships a start.sh at the root.
+    /// </summary>
+    public static async Task<(string? Executable, string? Parameters)> ResolveLaunchAsync(
+        string staging, GamePlatform platform, CancellationToken ct)
+    {
+        if (platform == GamePlatform.Linux)
+            return (File.Exists(System.IO.Path.Combine(staging, "start.sh")) ? "start.sh" : null, null);
+
+        var task = await FindPrimaryTaskAsync(staging, ct);
+        if (task is null) return (null, null);
+
+        // Forward slashes: the same path works whether GameVault runs the client on Windows or
+        // launches it through Proton on Linux.
+        var executable = task.Path.Replace('\\', '/').TrimStart('/');
+        return (executable, string.IsNullOrWhiteSpace(task.Arguments) ? null : task.Arguments.Trim());
     }
 
     private static async Task<PlayTask?> FindPrimaryTaskAsync(string staging, CancellationToken ct)

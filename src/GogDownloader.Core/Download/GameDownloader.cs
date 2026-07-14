@@ -224,6 +224,10 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             if (options.WriteLauncher)
                 await StartScript.WriteAsync(staging, options.Platform, ct);
 
+            // Recorded for `gamevault sync`, which turns it into a launch_executable API call.
+            var (launchExecutable, launchParameters) =
+                await StartScript.ResolveLaunchAsync(staging, options.Platform, ct);
+
             var stagingZip = staging + ".zip";
             if (File.Exists(stagingZip)) File.Delete(stagingZip);
 
@@ -267,6 +271,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 InstalledSize = installedSize,
                 Dlcs = plan?.DlcIds ?? [],
                 SkippedDependencies = plan?.Dependencies ?? [],
+                LaunchExecutable = launchExecutable,
+                LaunchParameters = launchParameters,
 
                 // Inno Setup yields no per-file hashes, so a later patch cannot reuse this zip.
                 Files = plan?.Files

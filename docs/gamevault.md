@@ -103,6 +103,28 @@ Consequences for the launcher we write:
 So the game's own executable is what GameVault surfaces; the user chooses among them (or sets
 `launch_executable`). There is nothing in the archive we can write to preset that choice.
 
+## Setting launch_executable without coupling the tool
+
+The tool stays free of GameVault. It records the launcher GOG declares — the primary play task
+from `goggame-{id}.info` — into each backup's `.gogdl.json` (`Platforms.{os}.LaunchExecutable`
+and `LaunchParameters`; Linux gets `start.sh`). That is neutral metadata, useful to anyone.
+
+`scripts/gamevault-sync.sh` is the optional glue: it reads those manifests and, matching by the
+archive filename GameVault indexed, sets each game's `launch_executable` via
+`PUT /api/games/:id` (basic auth, EDITOR role). It changes only what differs, so it is safe to
+run on a timer — see `scripts/gamevault-sync.compose.yml` for a sidecar. The GameVault
+dependency lives entirely in that script, on the operator's side.
+
+## API used by the sync script
+
+| Purpose | Endpoint |
+|---|---|
+| List games (paginated) | `GET /api/games?limit=100&page=N`, role GUEST |
+| Set launch executable | `PUT /api/games/:id` body `{"user_metadata":{"launch_executable":"…","launch_parameters":"…"}}`, role EDITOR |
+
+Auth is HTTP basic. `launch_executable` is a path inside the game (example `ShooterGame.exe`),
+`launch_parameters` a string (example `-fullscreen -dx11`).
+
 ## Supported archive extensions
 
 Whatever 7zip 23.01 reads: `.7z .xz .bz2 .gz .tar .zip .wim .ar .arj .cab .chm .cpio .cramfs

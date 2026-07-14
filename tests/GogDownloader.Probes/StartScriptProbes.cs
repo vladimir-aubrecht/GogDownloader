@@ -77,7 +77,28 @@ public static class StartScriptProbes
         Probe.Check("a game with no metadata gets no launcher",
             await StartScript.WriteAsync(bare, GamePlatform.Windows, default) is null);
 
+        Probe.Group("Launch info recorded for GameVault");
+        var (exe, parms) = await StartScript.ResolveLaunchAsync(staging, GamePlatform.Windows, default);
+        Probe.Check("the executable is captured with forward slashes", exe == "bin/witcher.exe", exe);
+        Probe.Check("no arguments means null, not empty", parms is null);
+
+        var argStaging = Probe.ScratchDirectory();
+        await File.WriteAllTextAsync(Path.Combine(argStaging, "goggame-1.info"), """
+            {"playTasks":[{"path":"g.exe","arguments":"-dx12","isPrimary":true,"type":"FileTask"}]}
+            """);
+        var (_, capturedArgs) = await StartScript.ResolveLaunchAsync(argStaging, GamePlatform.Windows, default);
+        Probe.Check("arguments are captured", capturedArgs == "-dx12", capturedArgs);
+
+        var linux = Probe.ScratchDirectory();
+        await File.WriteAllTextAsync(Path.Combine(linux, "start.sh"), "#!/bin/sh");
+        var (linuxExe, _) = await StartScript.ResolveLaunchAsync(linux, GamePlatform.Linux, default);
+        Probe.Check("Linux launch executable is its start.sh", linuxExe == "start.sh", linuxExe);
+        Probe.Check("Linux without start.sh has none",
+            (await StartScript.ResolveLaunchAsync(bare, GamePlatform.Linux, default)).Executable is null);
+
         Directory.Delete(staging, recursive: true);
         Directory.Delete(bare, recursive: true);
+        Directory.Delete(argStaging, recursive: true);
+        Directory.Delete(linux, recursive: true);
     }
 }

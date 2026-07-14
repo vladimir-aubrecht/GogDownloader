@@ -74,6 +74,35 @@ game. We omit the flag entirely.
 
 `in_development.active` from the same endpoint is reliable and becomes `(EA)`.
 
+## There is no in-archive metadata file
+
+GameVault has **no** convention for a metadata file inside the game folder or archive — no
+`.gamevault.json`, no manifest it reads to learn the launch executable. Verified against
+`metadata.service.ts` and `files.service.ts`.
+
+Metadata lives in GameVault's own database, from two sources: online providers (IGDB, RAWG,
+keyed by the parsed title) and `user_metadata` set by hand through the client or API. The launch
+target is `launch_executable` / `launch_parameters`, a user-metadata field — the user points it
+at an executable in the client; nothing in the archive sets it.
+
+GameVault *does* look inside the archive, but only to guess the game **type**. It scans for
+`*.exe *.msi *.sh *.appimage` (`detectGameType` in `files.service.ts`; `EXECUTABLE_FORMATS` is
+`.exe .sh .appimage`). A `.exe` with no setup-like name → `W_P`; a setup-like name → `W_S`; an
+`.sh`/`.appimage` → `L_P`.
+
+Consequences for the launcher we write:
+
+- **`.bat` is not on that list.** GameVault ignores `start.bat` entirely — it neither detects it
+  as an executable nor picks it as the launch target. It is a convenience for a human who
+  extracts the zip, nothing more.
+- **`start.sh` (Linux) is on the list**, so the installer's own `start.sh` is what GameVault
+  sees, which is correct.
+- Because a depot/Inno extraction contains the game's real `.exe` and no `setup*.exe`, GameVault
+  classifies it as `W_P`, which is what `GameVaultName` already tags it.
+
+So the game's own executable is what GameVault surfaces; the user chooses among them (or sets
+`launch_executable`). There is nothing in the archive we can write to preset that choice.
+
 ## Supported archive extensions
 
 Whatever 7zip 23.01 reads: `.7z .xz .bz2 .gz .tar .zip .wim .ar .arj .cab .chm .cpio .cramfs

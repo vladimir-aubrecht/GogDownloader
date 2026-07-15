@@ -116,13 +116,24 @@ public static class GogHttpFactory
             MaxConnectionsPerServer = options.MaxConnections,
             AutomaticDecompression = DecompressionMethods.All,
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+
+            // A game of thousands of tiny files makes one request per file. Over HTTP/1.1 each is
+            // a request-response on a pooled connection the CDN keeps closing, which crawls and
+            // truncates; HTTP/2 multiplexes them all over one connection. Fastly supports it, and
+            // this is the difference between minutes and an hour for such games.
+            EnableMultipleHttp2Connections = true,
         };
 
         handler = new RetryHandler(options.MaxRetries) { InnerHandler = handler };
         if (tokens is not null)
             handler = new AuthHandler(tokens) { InnerHandler = handler };
 
-        var client = new HttpClient(handler) { Timeout = options.Timeout };
+        var client = new HttpClient(handler)
+        {
+            Timeout = options.Timeout,
+            DefaultRequestVersion = HttpVersion.Version20,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrHigher,
+        };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("GogDownloader/0.1");
         return client;
     }

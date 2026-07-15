@@ -62,8 +62,10 @@ public abstract class ContentSource
 
     public abstract Task<DepotPlan> PlanAsync(CancellationToken ct);
 
+    /// <summary>One attempt at one part. The attempt number lets a source vary how it fetches —
+    /// a depot rotates CDN endpoints with it, and any retry (attempt &gt; 0) bypasses caches.</summary>
     protected abstract Task<byte[]> FetchOnceAsync(
-        PlannedFile file, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct);
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, int attempt, CancellationToken ct);
 
     /// <summary>Called when a signed URL expired, so the next attempt asks for a fresh one.</summary>
     protected virtual Task RefreshAsync(PlannedFile file, CancellationToken ct) => Task.CompletedTask;
@@ -91,7 +93,7 @@ public abstract class ContentSource
                 // First try may be served from the CDN cache; every retry bypasses it, in case
                 // the edge is holding a truncated object — the deterministic short read that no
                 // amount of same-URL retrying fixes.
-                return await FetchOnceAsync(file, part, counting, freshFromOrigin: attempt > 0, ct);
+                return await FetchOnceAsync(file, part, counting, attempt, ct);
             }
             catch (SecureLinkExpiredException) when (attempt < MaxAttempts)
             {
@@ -162,17 +164,28 @@ public abstract class DepotSource(ContentClient content) : ContentSource
 {
     protected ContentClient Content { get; } = content;
 
-    private readonly Dictionary<string, SecureLinkEndpoint> _links = [];
+    private readonly Dictionary<string, IReadOnlyList<SecureLinkEndpoint>> _links = [];
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    protected abstract Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct);
+    protected abstract Task<IReadOnlyList<SecureLinkEndpoint>> RequestLinksAsync(string productId, CancellationToken ct);
 
     protected abstract Task<byte[]> FetchPartAsync(
         SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct);
 
     protected override async Task<byte[]> FetchOnceAsync(
-        PlannedFile file, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
-        await FetchPartAsync(await LinkAsync(file.ProductId, ct), part, bytes, freshFromOrigin, ct);
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, int attempt, CancellationToken ct)
+    {
+        // GOG signs several CDN endpoints, best first. The first attempt uses the best one; each
+        // retry moves to the next, because a broken object on one CDN — the deterministic
+        // truncation — may be intact on another. With every endpoint tried, the rotation wraps.
+        var endpoints = await LinksAsync(file.ProductId, ct);
+        var endpoint = endpoints[attempt % endpoints.Count];
+
+        if (attempt > 0 && endpoints.Count > 1)
+            RetryObserver?.Invoke($"{file.RelativePath}: trying CDN endpoint {attempt % endpoints.Count + 1}/{endpoints.Count}");
+
+        return await FetchPartAsync(endpoint, part, bytes, freshFromOrigin: attempt > 0, ct);
+    }
 
     protected override async Task RefreshAsync(PlannedFile file, CancellationToken ct)
     {
@@ -187,13 +200,13 @@ public abstract class DepotSource(ContentClient content) : ContentSource
         }
     }
 
-    private async Task<SecureLinkEndpoint> LinkAsync(string productId, CancellationToken ct)
+    private async Task<IReadOnlyList<SecureLinkEndpoint>> LinksAsync(string productId, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
         try
         {
             if (_links.TryGetValue(productId, out var cached)) return cached;
-            return _links[productId] = await RequestLinkAsync(productId, ct);
+            return _links[productId] = await RequestLinksAsync(productId, ct);
         }
         finally
         {
@@ -268,8 +281,8 @@ public sealed class DepotSourceV2(ContentClient content, GogApiClient api, strin
         return new DepotPlan(files.Values.ToList(), directories.ToList(), links, dlcIds, repository.Dependencies);
     }
 
-    protected override async Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct) =>
-        (await Content.GetSecureLinkAsync(productId, ct))[0];
+    protected override Task<IReadOnlyList<SecureLinkEndpoint>> RequestLinksAsync(string productId, CancellationToken ct) =>
+        Content.GetSecureLinkAsync(productId, ct);
 
     protected override Task<byte[]> FetchPartAsync(
         SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
@@ -354,8 +367,8 @@ public sealed class DepotSourceV1(
         return new DepotPlan(files.Values.ToList(), directories.ToList(), [], dlcIds, dependencies);
     }
 
-    protected override async Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct) =>
-        (await Content.GetSecureLinkAsync(productId, ct, generation: 1, path: $"/{platform}/{_timestamp}/"))[0];
+    protected override Task<IReadOnlyList<SecureLinkEndpoint>> RequestLinksAsync(string productId, CancellationToken ct) =>
+        Content.GetSecureLinkAsync(productId, ct, generation: 1, path: $"/{platform}/{_timestamp}/");
 
     protected override Task<byte[]> FetchPartAsync(
         SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>

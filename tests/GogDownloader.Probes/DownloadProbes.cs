@@ -160,6 +160,18 @@ public static class DownloadProbes
         catch (InvalidOperationException) { propagated = true; }
         Probe.Check("a non-network error propagates on the first try", propagated && bug.Calls == 1);
 
+        // GOG signs several CDN endpoints; an object broken on one may be intact on another, so
+        // a retry must move to the next endpoint rather than hammer the broken one.
+        var mirrored = new MirroredDepot(brokenEndpoints: 1);
+        var fromMirror = await mirrored.FetchAsync(file, part, null, default);
+        Probe.Check("a retry fails over to the next CDN endpoint",
+            fromMirror.Length == 3 && mirrored.ServedBy == 1, $"served by {mirrored.ServedBy}");
+        var allEndpoints = new MirroredDepot(brokenEndpoints: 99);
+        Probe.Check("every endpoint is tried before giving up",
+            await Throws(() => allEndpoints.FetchAsync(file, part, null, default))
+            && allEndpoints.TriedEndpoints.SetEquals([0, 1, 2]),
+            string.Join(",", allEndpoints.TriedEndpoints));
+
         // Ctrl+C must stop the retries, not spin on them.
         using (var cts = new CancellationTokenSource())
         {
@@ -437,10 +449,10 @@ public static class DownloadProbes
         public bool LastFreshFromOrigin { get; private set; }
 
         protected override Task<byte[]> FetchOnceAsync(
-            PlannedFile file, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
+            PlannedFile file, PlannedPart part, IProgress<long>? bytes, int attempt, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            LastFreshFromOrigin = freshFromOrigin;
+            LastFreshFromOrigin = attempt > 0;
             Calls++;
             if (Calls <= failures)
             {
@@ -450,6 +462,30 @@ public static class DownloadProbes
             }
             // The successful attempt reports the part's full download size, once.
             bytes?.Report(part.DownloadSize);
+            return Task.FromResult(new byte[] { 1, 2, 3 });
+        }
+    }
+
+    /// <summary>A depot with three CDN endpoints, the first N of which serve nothing but errors.</summary>
+    private sealed class MirroredDepot(int brokenEndpoints) : DepotSource(
+        new ContentClient(new HttpClient(), new HttpClient(), new RateLimiter(0)))
+    {
+        public int ServedBy { get; private set; } = -1;
+        public HashSet<int> TriedEndpoints { get; } = [];
+
+        public override Task<DepotPlan> PlanAsync(CancellationToken ct) => throw new NotSupportedException();
+
+        protected override Task<IReadOnlyList<SecureLinkEndpoint>> RequestLinksAsync(string productId, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<SecureLinkEndpoint>>(
+                [new SecureLinkEndpoint { Priority = 0 }, new SecureLinkEndpoint { Priority = 1 }, new SecureLinkEndpoint { Priority = 2 }]);
+
+        protected override Task<byte[]> FetchPartAsync(
+            SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
+        {
+            TriedEndpoints.Add(endpoint.Priority);
+            if (endpoint.Priority < brokenEndpoints)
+                throw new IOException("response ended prematurely");
+            ServedBy = endpoint.Priority;
             return Task.FromResult(new byte[] { 1, 2, 3 });
         }
     }

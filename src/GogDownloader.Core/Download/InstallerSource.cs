@@ -117,7 +117,7 @@ public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameI
     }
 
     protected override Task<byte[]> FetchOnceAsync(
-        PlannedFile file, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, int attempt, CancellationToken ct) =>
         _reader is null || !_entries.TryGetValue(file.RelativePath, out var entry)
             ? throw new InvalidOperationException("The installer was not opened; call PlanAsync first.")
             : _reader.ReadEntryAsync(entry, bytes, ct);

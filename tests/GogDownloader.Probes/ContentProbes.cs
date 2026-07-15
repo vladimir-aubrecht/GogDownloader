@@ -33,6 +33,34 @@ public static class ContentProbes
         public override void Write(byte[] b, int o, int c) => throw new NotSupportedException();
     }
 
+    /// <summary>Sends a Content-Length it does not honour, then closes — a truncated response.</summary>
+    private sealed class TruncatingServer : IDisposable
+    {
+        private readonly System.Net.HttpListener _listener = new();
+        public string Url { get; }
+
+        public TruncatingServer(int promised, int sent)
+        {
+            var port = Random.Shared.Next(20000, 60000);
+            Url = $"http://127.0.0.1:{port}/chunk";
+            _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            _listener.Start();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var ctx = await _listener.GetContextAsync();
+                    ctx.Response.ContentLength64 = promised;      // promise more than we send
+                    await ctx.Response.OutputStream.WriteAsync(new byte[sent]);
+                    ctx.Response.Abort();                          // close early
+                }
+                catch { }
+            });
+        }
+
+        public void Dispose() { _listener.Stop(); _listener.Close(); }
+    }
+
     public static async Task RunAsync()
     {
         Probe.Group("galaxy_path");
@@ -196,6 +224,26 @@ public static class ContentProbes
             catch (OperationCanceledException) { wasUserCancel = true; }
             catch (IOException) { }
             Probe.Check("the user's Ctrl+C is not mistaken for a stall", wasUserCancel);
+        }
+
+        Probe.Group("A truncated chunk reports the HTTP details");
+        // A CDN that promises a Content-Length then delivers less must surface what happened,
+        // not a bare "response ended prematurely" — that hid the cause for days.
+        using (var truncating = new TruncatingServer(promised: 5000, sent: 1177))
+        {
+            using var http = new HttpClient();
+            var content = new ContentClient(http, http, new RateLimiter(0));
+            var linkJson = "{\"urls\":[{\"priority\":0,\"url_format\":\"" + truncating.Url + "\",\"parameters\":{}}]}";
+            var truncEndpoint = JsonSerializer.Deserialize<SecureLinkResponse>(linkJson, Json)!.Urls[0];
+            var chunk = new Chunk { CompressedMd5 = "abcdef0123456789", Size = 5000, CompressedSize = 5000 };
+
+            var message = "";
+            try { await content.DownloadChunkAsync(truncEndpoint, chunk, null, false, default); }
+            catch (ChunkTransferException e) { message = e.Message; }
+            Probe.Note(message);
+            Probe.Check("the enriched error names the promised length", message.Contains("content-length=5000"), message);
+            Probe.Check("and the bytes that actually arrived", message.Contains("got=1177"), message);
+            Probe.Check("and the HTTP status", message.Contains("HTTP 200"), message);
         }
 
         Probe.Group("Rate limiter");

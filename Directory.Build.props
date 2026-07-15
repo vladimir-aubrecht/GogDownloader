@@ -7,6 +7,6 @@
     <InvariantGlobalization>true</InvariantGlobalization>
 
     <!-- A push is a release. Every push bumps the version. -->
-    <Version>0.24.0</Version>
+    <Version>0.25.0</Version>
   </PropertyGroup>
 </Project>

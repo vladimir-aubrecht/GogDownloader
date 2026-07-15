@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using GogDownloader.Core.Api;
+using GogDownloader.Core.Content;
 
 namespace GogDownloader.Core.Download;
 
@@ -90,7 +91,7 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
                     await using var destination = File.Create(path);
                     var buffer = new byte[1 << 20];
                     int read;
-                    while ((read = await source.ReadAsync(buffer, ct)) > 0)
+                    while ((read = await source.WithStallTimeoutAsync(buffer, ct)) > 0)
                     {
                         await destination.WriteAsync(buffer.AsMemory(0, read), ct);
                         downloaded += read;

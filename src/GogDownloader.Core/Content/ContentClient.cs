@@ -75,7 +75,7 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
             try
             {
                 int read;
-                while ((read = await stream.ReadAsync(scratch, ct)) > 0)
+                while ((read = await stream.WithStallTimeoutAsync(scratch, ct)) > 0)
                 {
                     await limiter.ConsumeAsync(read, ct);
                     buffer.Write(scratch, 0, read);
@@ -119,7 +119,7 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
             try
             {
                 int read;
-                while ((read = await stream.ReadAsync(buffer, ct)) > 0)
+                while ((read = await stream.WithStallTimeoutAsync(buffer, ct)) > 0)
                 {
                     await limiter.ConsumeAsync(read, ct);
                     compressed.Write(buffer, 0, read);

@@ -12,6 +12,27 @@ public static class ContentProbes
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
+    /// <summary>A stream whose reads never complete until cancelled, like a silent connection.</summary>
+    private sealed class StallingStream : Stream
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            return 0;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] b, int o, int c) => throw new NotSupportedException();
+        public override long Seek(long o, SeekOrigin r) => throw new NotSupportedException();
+        public override void SetLength(long v) => throw new NotSupportedException();
+        public override void Write(byte[] b, int o, int c) => throw new NotSupportedException();
+    }
+
     public static async Task RunAsync()
     {
         Probe.Group("galaxy_path");
@@ -148,6 +169,34 @@ public static class ContentProbes
             v1Endpoint.BlobUrl() == "https://cdn.invalid/windows/1445945558/main.bin?t=abc", v1Endpoint.BlobUrl());
         Probe.Check("asking twice does not accumulate the suffix",
             v1Endpoint.BlobUrl() == v1Endpoint.BlobUrl());
+
+        Probe.Group("A stalled connection times out instead of hanging");
+        // HttpClient.Timeout does not cover the body under ResponseHeadersRead, so without this a
+        // CDN that sends headers then goes silent would hang the read forever.
+        var stalling = new StallingStream();
+        var buffer = new byte[16];
+        var stallClock = System.Diagnostics.Stopwatch.StartNew();
+        var timedOut = false;
+        try { await stalling.WithStallTimeoutAsync(buffer, TimeSpan.FromMilliseconds(200), default); }
+        catch (IOException) { timedOut = true; }
+        stallClock.Stop();
+        Probe.Check("a silent stream is abandoned", timedOut);
+        Probe.Check($"it gives up near the timeout, not on HttpClient's ({stallClock.ElapsedMilliseconds} ms)",
+            stallClock.ElapsedMilliseconds is > 150 and < 2000, stallClock.ElapsedMilliseconds.ToString());
+
+        var live = new MemoryStream([1, 2, 3, 4, 5]);
+        Probe.Check("a stream with data reads normally",
+            await live.WithStallTimeoutAsync(new byte[16], TimeSpan.FromMilliseconds(200), default) == 5);
+
+        using (var userCancel = new CancellationTokenSource())
+        {
+            await userCancel.CancelAsync();
+            var wasUserCancel = false;
+            try { await new StallingStream().WithStallTimeoutAsync(buffer, TimeSpan.FromSeconds(30), userCancel.Token); }
+            catch (OperationCanceledException) { wasUserCancel = true; }
+            catch (IOException) { }
+            Probe.Check("the user's Ctrl+C is not mistaken for a stall", wasUserCancel);
+        }
 
         Probe.Group("Rate limiter");
         // The bucket starts full: 1 MiB is free, the remaining 0.5 MiB costs half a second.

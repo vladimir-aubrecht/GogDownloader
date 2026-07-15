@@ -139,6 +139,10 @@ public static class DownloadProbes
         var stalling = new FlakySource(failures: 2, () => new IOException("stall"));
         await stalling.FetchAsync(file, part, null, default);
         Probe.Check("a transient failure refreshes the secure link", stalling.Refreshes == 2, stalling.Refreshes.ToString());
+        Probe.Check("the retry bypasses the CDN cache", stalling.LastFreshFromOrigin);
+        var firstTry = new FlakySource(failures: 0, () => new IOException("x"));
+        await firstTry.FetchAsync(file, part, null, default);
+        Probe.Check("the first try is served from cache", !firstTry.LastFreshFromOrigin);
 
         // The 100.4% bug: a partial read before a failure must not be counted twice by the retry.
         var bigPart = new PlannedPart(0, 0, 1000, null, 1000);
@@ -430,10 +434,13 @@ public static class DownloadProbes
             return Task.CompletedTask;
         }
 
+        public bool LastFreshFromOrigin { get; private set; }
+
         protected override Task<byte[]> FetchOnceAsync(
-            PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct)
+            PlannedFile file, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            LastFreshFromOrigin = freshFromOrigin;
             Calls++;
             if (Calls <= failures)
             {

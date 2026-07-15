@@ -132,3 +132,6 @@ public sealed class SecureLinkExpiredException : Exception;
 
 public sealed class ChunkChecksumException(string expected, string actual)
     : Exception($"Chunk MD5 is {actual}, expected {expected}.");
+
+/// <summary>A chunk transfer that failed mid-body, carrying the HTTP details for diagnosis.</summary>
+public sealed class ChunkTransferException(string message, Exception inner) : IOException(message, inner);

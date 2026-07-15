@@ -63,7 +63,7 @@ public abstract class ContentSource
     public abstract Task<DepotPlan> PlanAsync(CancellationToken ct);
 
     protected abstract Task<byte[]> FetchOnceAsync(
-        PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct);
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct);
 
     /// <summary>Called when a signed URL expired, so the next attempt asks for a fresh one.</summary>
     protected virtual Task RefreshAsync(PlannedFile file, CancellationToken ct) => Task.CompletedTask;
@@ -88,7 +88,10 @@ public abstract class ContentSource
 
             try
             {
-                return await FetchOnceAsync(file, part, counting, ct);
+                // First try may be served from the CDN cache; every retry bypasses it, in case
+                // the edge is holding a truncated object — the deterministic short read that no
+                // amount of same-URL retrying fixes.
+                return await FetchOnceAsync(file, part, counting, freshFromOrigin: attempt > 0, ct);
             }
             catch (SecureLinkExpiredException) when (attempt < MaxAttempts)
             {
@@ -165,11 +168,11 @@ public abstract class DepotSource(ContentClient content) : ContentSource
     protected abstract Task<SecureLinkEndpoint> RequestLinkAsync(string productId, CancellationToken ct);
 
     protected abstract Task<byte[]> FetchPartAsync(
-        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, CancellationToken ct);
+        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct);
 
     protected override async Task<byte[]> FetchOnceAsync(
-        PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct) =>
-        await FetchPartAsync(await LinkAsync(file.ProductId, ct), part, bytes, ct);
+        PlannedFile file, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
+        await FetchPartAsync(await LinkAsync(file.ProductId, ct), part, bytes, freshFromOrigin, ct);
 
     protected override async Task RefreshAsync(PlannedFile file, CancellationToken ct)
     {
@@ -269,11 +272,11 @@ public sealed class DepotSourceV2(ContentClient content, GogApiClient api, strin
         (await Content.GetSecureLinkAsync(productId, ct))[0];
 
     protected override Task<byte[]> FetchPartAsync(
-        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, CancellationToken ct) =>
+        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
         Content.DownloadChunkAsync(
             endpoint,
             new Chunk { CompressedMd5 = part.Md5 ?? "", Size = part.Size, CompressedSize = part.DownloadSize },
-            bytes, ct);
+            bytes, freshFromOrigin, ct);
 }
 
 /// <summary>
@@ -355,6 +358,6 @@ public sealed class DepotSourceV1(
         (await Content.GetSecureLinkAsync(productId, ct, generation: 1, path: $"/{platform}/{_timestamp}/"))[0];
 
     protected override Task<byte[]> FetchPartAsync(
-        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, CancellationToken ct) =>
-        Content.DownloadRangeAsync(endpoint, part.SourceOffset, part.Size, part.Md5, bytes, ct);
+        SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
+        Content.DownloadRangeAsync(endpoint, part.SourceOffset, part.Size, part.Md5, bytes, freshFromOrigin, ct);
 }

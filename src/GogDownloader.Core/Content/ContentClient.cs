@@ -59,10 +59,11 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
     /// </summary>
     public async Task<byte[]> DownloadRangeAsync(
         SecureLinkEndpoint endpoint, long offset, long size, string? md5,
-        IProgress<long>? bytes, CancellationToken ct)
+        IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, endpoint.BlobUrl());
         request.Headers.Range = new RangeHeaderValue(offset, offset + size - 1);
+        if (freshFromOrigin) BypassCache(request);
 
         using var response = await cdn.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new SecureLinkExpiredException();
@@ -102,19 +103,32 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
         return data.ToArray();
     }
 
+    /// <summary>
+    /// Fastly serves a chunk from the nearest edge cache. If that cached object is truncated the
+    /// same short read comes back every time, so a retry sends no-cache to force a fresh copy.
+    /// </summary>
+    private static void BypassCache(HttpRequestMessage request)
+    {
+        request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true };
+        request.Headers.Pragma.ParseAdd("no-cache");
+    }
+
     /// <summary>Downloads a chunk, verifies the MD5 over the *compressed* bytes, and inflates it.</summary>
     public async Task<byte[]> DownloadChunkAsync(
-        SecureLinkEndpoint endpoint, Chunk chunk, IProgress<long>? bytes, CancellationToken ct)
+        SecureLinkEndpoint endpoint, Chunk chunk, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
     {
-        using var response = await cdn.GetAsync(
-            endpoint.ChunkUrl(chunk.CompressedMd5), HttpCompletionOption.ResponseHeadersRead, ct);
+        using var request = new HttpRequestMessage(HttpMethod.Get, endpoint.ChunkUrl(chunk.CompressedMd5));
+        if (freshFromOrigin) BypassCache(request);
+
+        using var response = await cdn.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
 
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new SecureLinkExpiredException();
         response.EnsureSuccessStatusCode();
 
         var compressed = new MemoryStream(capacity: (int)Math.Max(chunk.CompressedSize, 1));
-        await using (var stream = await response.Content.ReadAsStreamAsync(ct))
+        try
         {
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
             var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
             try
             {
@@ -130,6 +144,18 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
+        }
+        catch (Exception e) when (e is IOException or HttpRequestException)
+        {
+            // Enrich the failure with what the CDN actually said, so --verbose can pin down why
+            // specific chunks truncate: the status, the version, the promised length against what
+            // arrived, and whether a Content-Encoding is in play.
+            throw new ChunkTransferException(
+                $"chunk {chunk.CompressedMd5[..8]} expected {chunk.CompressedSize}B: " +
+                $"HTTP {(int)response.StatusCode} {response.Version} " +
+                $"content-length={response.Content.Headers.ContentLength?.ToString() ?? "?"} " +
+                $"encoding=[{string.Join(",", response.Content.Headers.ContentEncoding)}] " +
+                $"got={compressed.Length}B — {e.Message}", e);
         }
 
         var raw = compressed.GetBuffer().AsMemory(0, (int)compressed.Length);

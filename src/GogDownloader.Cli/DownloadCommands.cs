@@ -222,6 +222,12 @@ internal sealed class ConsoleProgress : IProgress<DownloadProgress>
     private long _lastRender;
     private bool _phaseMeasurable;
 
+    // A sliding window so the rate reflects the last second, not the average since the phase
+    // began. The average stays high through a stall and reads as if bytes are still flowing.
+    private long _windowStart;
+    private long _windowBytes;
+    private double _bytesPerSecond;
+
     public void Report(DownloadProgress p)
     {
         lock (_gate)
@@ -239,6 +245,9 @@ internal sealed class ConsoleProgress : IProgress<DownloadProgress>
                 _phaseStarted = now;
                 _lastRender = 0;
                 _phaseMeasurable = false;
+                _windowStart = now;
+                _windowBytes = p.Bytes;
+                _bytesPerSecond = 0;
             }
 
             _phaseMeasurable |= measurable;
@@ -272,15 +281,23 @@ internal sealed class ConsoleProgress : IProgress<DownloadProgress>
             var transfer = "";
             if (overNetwork)
             {
-                var elapsed = (now - _phaseStarted) / (double)Stopwatch.Frequency;
-                var speed = elapsed > 0 ? p.Bytes / elapsed / 1024 / 1024 : 0;
-                var eta = speed > 0.1 && p.Bytes > 0 && p.TotalBytes > p.Bytes
-                    ? TimeSpan.FromSeconds((p.TotalBytes - p.Bytes) / (p.Bytes / elapsed))
+                // Recompute the rate roughly once a second from the bytes moved in that window.
+                var windowSeconds = (now - _windowStart) / (double)Stopwatch.Frequency;
+                if (windowSeconds >= 1)
+                {
+                    _bytesPerSecond = (p.Bytes - _windowBytes) / windowSeconds;
+                    _windowStart = now;
+                    _windowBytes = p.Bytes;
+                }
+
+                // A rate near zero means a stalled connection, so an ETA from it would be noise.
+                var eta = _bytesPerSecond > 64 * 1024 && p.TotalBytes > p.Bytes
+                    ? TimeSpan.FromSeconds((p.TotalBytes - p.Bytes) / _bytesPerSecond)
                     : (TimeSpan?)null;
 
                 transfer = $"{CommandLine.Bytes(p.Bytes)}/{CommandLine.Bytes(p.TotalBytes)}"
-                           + (p.Bytes > 0 ? $"  {speed,6:F1} MiB/s" : "")
-                           + (eta is { } left ? $"  ETA {left:hh\\:mm\\:ss}" : "");
+                           + $"  {_bytesPerSecond / 1024 / 1024,6:F1} MiB/s"
+                           + (eta is { } left ? $"  ETA {left:hh\\:mm\\:ss}" : "  ETA --");
             }
 
             Console.Error.Write(

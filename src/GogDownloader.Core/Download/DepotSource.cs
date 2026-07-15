@@ -68,7 +68,7 @@ public abstract class ContentSource
     /// <summary>Called when a signed URL expired, so the next attempt asks for a fresh one.</summary>
     protected virtual Task RefreshAsync(PlannedFile file, CancellationToken ct) => Task.CompletedTask;
 
-    private const int MaxAttempts = 10;
+    private const int MaxAttempts = 5;
 
     /// <summary>
     /// Fetches one part, retrying the failures that a long download will inevitably hit and

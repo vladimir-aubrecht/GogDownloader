@@ -11,7 +11,7 @@ namespace GogDownloader.Core.Content;
 /// </summary>
 public static class StreamRead
 {
-    public static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(15);
+    public static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(8);
 
     public static ValueTask<int> WithStallTimeoutAsync(this Stream stream, Memory<byte> buffer, CancellationToken ct) =>
         stream.WithStallTimeoutAsync(buffer, StallTimeout, ct);

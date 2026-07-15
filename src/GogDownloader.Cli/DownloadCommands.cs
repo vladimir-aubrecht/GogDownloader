@@ -96,6 +96,10 @@ public static class DownloadCommands
     private static async Task<int> DownloadEachAsync(
         List<LibraryEntry> games, DownloadOptions options, Dictionary<string, string> flags, CancellationToken ct)
     {
+        if (flags.ContainsKey("verbose"))
+            GogDownloader.Core.Download.ContentSource.RetryObserver =
+                reason => Console.Error.WriteLine($"\n  retry {reason}");
+
         var (api, content, cdn, _) = CommandLine.CreateContent(flags);
         var downloader = new GameDownloader(api, content, cdn);
 

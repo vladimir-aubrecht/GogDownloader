@@ -135,6 +135,11 @@ public static class DownloadProbes
         var reset = new FlakySource(failures: 1, () => new HttpRequestException("connection reset"));
         Probe.Check("a connection reset is retried too", (await reset.FetchAsync(file, part, null, default)).Length == 3);
 
+        // An expired signed URL can present as a stall, so a transient failure refreshes the link.
+        var stalling = new FlakySource(failures: 2, () => new IOException("stall"));
+        await stalling.FetchAsync(file, part, null, default);
+        Probe.Check("a transient failure refreshes the secure link", stalling.Refreshes == 2, stalling.Refreshes.ToString());
+
         // The 100.4% bug: a partial read before a failure must not be counted twice by the retry.
         var bigPart = new PlannedPart(0, 0, 1000, null, 1000);
         var bigFile = new PlannedFile("game/big.bin", "1", 1000, null, [bigPart]);
@@ -415,8 +420,15 @@ public static class DownloadProbes
     private sealed class FlakySource(int failures, Func<Exception> error, long partialBytes = 0) : ContentSource
     {
         public int Calls { get; private set; }
+        public int Refreshes { get; private set; }
 
         public override Task<DepotPlan> PlanAsync(CancellationToken ct) => throw new NotSupportedException();
+
+        protected override Task RefreshAsync(PlannedFile file, CancellationToken ct)
+        {
+            Refreshes++;
+            return Task.CompletedTask;
+        }
 
         protected override Task<byte[]> FetchOnceAsync(
             PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct)

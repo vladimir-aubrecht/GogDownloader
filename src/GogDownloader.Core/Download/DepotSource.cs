@@ -53,6 +53,13 @@ public sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
 /// </summary>
 public abstract class ContentSource
 {
+    /// <summary>
+    /// Set by the CLI's --verbose to surface why a part is being retried. A download of thousands
+    /// of tiny files hides the reason, and knowing it — an expired link versus a stalled
+    /// connection — is the difference between diagnosing and guessing.
+    /// </summary>
+    public static Action<string>? RetryObserver { get; set; }
+
     public abstract Task<DepotPlan> PlanAsync(CancellationToken ct);
 
     protected abstract Task<byte[]> FetchOnceAsync(
@@ -85,11 +92,13 @@ public abstract class ContentSource
             }
             catch (SecureLinkExpiredException) when (attempt < MaxAttempts)
             {
+                RetryObserver?.Invoke($"{file.RelativePath}: signed URL expired (401/403), refreshing");
                 bytes?.Report(-attemptBytes);
                 await RefreshAsync(file, ct);
             }
-            catch (ChunkChecksumException) when (attempt < MaxAttempts)
+            catch (ChunkChecksumException e) when (attempt < MaxAttempts)
             {
+                RetryObserver?.Invoke($"{file.RelativePath}: {e.Message}");
                 bytes?.Report(-attemptBytes);
             }
             catch (Exception e) when (attempt < MaxAttempts && IsTransientNetwork(e, ct))
@@ -97,7 +106,13 @@ public abstract class ContentSource
                 // The body is streamed after the retry handler has already returned the
                 // headers, so a connection that drops mid-transfer ("response ended
                 // prematurely"), a reset, or a per-request timeout surfaces here, not there.
+                RetryObserver?.Invoke($"{file.RelativePath}: {e.Message}");
                 bytes?.Report(-attemptBytes);
+
+                // An expired signed URL can present as a stall rather than a clean 401/403, and
+                // a download long enough to hit the CDN's per-link cap stalls at the same point
+                // every run. Get a fresh link so the retry is not against the dead one.
+                await RefreshAsync(file, ct);
                 await Task.Delay(Backoff(attempt), ct);
             }
         }

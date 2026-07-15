@@ -65,7 +65,7 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
         request.Headers.Range = new RangeHeaderValue(offset, offset + size - 1);
 
         using var response = await cdn.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-        if (response.StatusCode == HttpStatusCode.Unauthorized) throw new SecureLinkExpiredException();
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new SecureLinkExpiredException();
         response.EnsureSuccessStatusCode();
 
         var buffer = new MemoryStream(capacity: (int)Math.Max(size, 1));
@@ -109,7 +109,7 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
         using var response = await cdn.GetAsync(
             endpoint.ChunkUrl(chunk.CompressedMd5), HttpCompletionOption.ResponseHeadersRead, ct);
 
-        if (response.StatusCode == HttpStatusCode.Unauthorized) throw new SecureLinkExpiredException();
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new SecureLinkExpiredException();
         response.EnsureSuccessStatusCode();
 
         var compressed = new MemoryStream(capacity: (int)Math.Max(chunk.CompressedSize, 1));

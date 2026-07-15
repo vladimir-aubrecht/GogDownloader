@@ -74,6 +74,7 @@ public static class CommandLine
                 --no-reuse                     do not reuse unchanged files from the old backup
                 --no-launcher                  do not add a start.bat to the archive root
                 --force                        re-download even a completed build
+                --verbose                      print why parts are retried (stalls, expiries)
 
               diff [text]                     compare a backup directory against the library
                 --out DIR                      default ./gog-backup
@@ -92,7 +93,7 @@ public static class CommandLine
     /// </summary>
     private static readonly HashSet<string> Switches = new(StringComparer.OrdinalIgnoreCase)
     {
-        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "no-reuse", "no-launcher", "dry-run",
+        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "no-reuse", "no-launcher", "dry-run", "verbose",
     };
 
     public static Dictionary<string, string> ParseFlags(string[] args)

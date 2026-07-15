@@ -6,8 +6,12 @@ namespace GogDownloader.Core.Http;
 
 public sealed record GogHttpOptions
 {
-    /// <summary>Concurrent connections per host. GOG rate-limits, so do not overdo it.</summary>
-    public int MaxConnections { get; init; } = 8;
+    /// <summary>
+    /// Concurrent connections per host. GOG rate-limits by request rate, and a game of thousands
+    /// of tiny files makes thousands of requests, so more than a few connections trips it and
+    /// stalls. Five is the sensible ceiling; the user can force more with --connections.
+    /// </summary>
+    public int MaxConnections { get; init; } = 5;
 
     /// <summary>Download speed cap in bytes per second. 0 means unlimited.</summary>
     public long MaxBytesPerSecond { get; init; }

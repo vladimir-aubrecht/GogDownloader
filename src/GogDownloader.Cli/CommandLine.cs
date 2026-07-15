@@ -64,7 +64,7 @@ public static class CommandLine
                 --platform windows|mac|linux   default windows
                 --language en                  default en
                 --out DIR                      default ./gog-backup
-                --connections N                concurrent connections, default 8
+                --connections N                concurrent connections, default 5
                 --limit-rate 5M                speed cap (k/M/G)
                 --staging DIR                  where to assemble and zip, default local app data
                 --compression-threads N        deflate workers, default one per core
@@ -161,7 +161,7 @@ public static class CommandLine
 
     public static GogHttpOptions OptionsFrom(Dictionary<string, string> flags) => new()
     {
-        MaxConnections = flags.TryGetValue("connections", out var c) && int.TryParse(c, out var n) ? n : 8,
+        MaxConnections = flags.TryGetValue("connections", out var c) && int.TryParse(c, out var n) && n > 0 ? n : 5,
         MaxBytesPerSecond = flags.TryGetValue("limit-rate", out var r) ? ParseRate(r) : 0,
     };
 

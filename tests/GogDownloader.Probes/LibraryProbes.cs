@@ -76,6 +76,16 @@ public static class LibraryProbes
             CommandLine.Positionals(["download", "--force", "ftl"]) is ["download", "ftl"]);
         Probe.Check("no arguments yields nothing", CommandLine.Positionals([]).Count == 0);
 
+        Probe.Group("Connection count");
+        Probe.Check("defaults to five, GOG's sensible ceiling",
+            CommandLine.OptionsFrom(new()).MaxConnections == 5, CommandLine.OptionsFrom(new()).MaxConnections.ToString());
+        Probe.Check("the user can force more",
+            CommandLine.OptionsFrom(new() { ["connections"] = "12" }).MaxConnections == 12);
+        Probe.Check("the user can force fewer for a rate-limited game",
+            CommandLine.OptionsFrom(new() { ["connections"] = "2" }).MaxConnections == 2);
+        Probe.Check("a nonsense value falls back to the default",
+            CommandLine.OptionsFrom(new() { ["connections"] = "abc" }).MaxConnections == 5);
+
         Probe.Group("Human-readable sizes");
         Probe.Check("an unknown size is a dash, not '0 B'", CommandLine.Bytes(0) == "-", CommandLine.Bytes(0));
         Probe.Check("bytes", CommandLine.Bytes(512) == "512 B", CommandLine.Bytes(512));

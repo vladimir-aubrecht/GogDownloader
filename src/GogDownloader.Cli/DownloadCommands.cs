@@ -220,21 +220,33 @@ internal sealed class ConsoleProgress : IProgress<DownloadProgress>
     private string _phase = "";
     private long _phaseStarted;
     private long _lastRender;
+    private bool _phaseMeasurable;
 
     public void Report(DownloadProgress p)
     {
         lock (_gate)
         {
             var now = Stopwatch.GetTimestamp();
+            var measurable = p.TotalBytes > 0 || p.TotalFiles > 0;
 
             if (p.Phase != _phase)
             {
-                // Keep the finished phase's last line, and time the new one from now so its
-                // speed is its own, not diluted by everything before it.
-                if (_phase.Length > 0) Console.Error.WriteLine();
+                // Keep a phase that showed real progress on its own line; a phase with nothing to
+                // measure (fetching the manifest) is a status blip that the next one overwrites,
+                // so it never lingers as a misleading "0.0 %".
+                if (_phase.Length > 0 && _phaseMeasurable) Console.Error.WriteLine();
                 _phase = p.Phase;
                 _phaseStarted = now;
                 _lastRender = 0;
+                _phaseMeasurable = false;
+            }
+
+            _phaseMeasurable |= measurable;
+
+            if (!measurable)
+            {
+                Console.Error.Write($"\r  {Label(p.Phase),-9} reading…        ");
+                return;
             }
 
             // Only these move bytes over the wire; everything else is local work, and showing a

@@ -135,6 +135,15 @@ public static class DownloadProbes
         var reset = new FlakySource(failures: 1, () => new HttpRequestException("connection reset"));
         Probe.Check("a connection reset is retried too", (await reset.FetchAsync(file, part, null, default)).Length == 3);
 
+        // The 100.4% bug: a partial read before a failure must not be counted twice by the retry.
+        var bigPart = new PlannedPart(0, 0, 1000, null, 1000);
+        var bigFile = new PlannedFile("game/big.bin", "1", 1000, null, [bigPart]);
+        long counted = 0;
+        var counter = new SyncProgress<long>(n => counted += n);
+        var partialThenOk = new FlakySource(failures: 3, () => new IOException("drop"), partialBytes: 700);
+        await partialThenOk.FetchAsync(bigFile, bigPart, counter, default);
+        Probe.Check($"retried bytes are not double-counted (got {counted}, want 1000)", counted == 1000, counted.ToString());
+
         // A real bug must not be mistaken for a network blip and retried forever.
         var bug = new FlakySource(failures: 99, () => new InvalidOperationException("bug"));
         var propagated = false;
@@ -403,7 +412,7 @@ public static class DownloadProbes
     }
 
     /// <summary>A content source whose fetch fails a set number of times before it succeeds.</summary>
-    private sealed class FlakySource(int failures, Func<Exception> error) : ContentSource
+    private sealed class FlakySource(int failures, Func<Exception> error, long partialBytes = 0) : ContentSource
     {
         public int Calls { get; private set; }
 
@@ -414,7 +423,14 @@ public static class DownloadProbes
         {
             ct.ThrowIfCancellationRequested();
             Calls++;
-            if (Calls <= failures) throw error();
+            if (Calls <= failures)
+            {
+                // A real transfer reports the bytes it read before the connection broke.
+                bytes?.Report(partialBytes);
+                throw error();
+            }
+            // The successful attempt reports the part's full download size, once.
+            bytes?.Report(part.DownloadSize);
             return Task.FromResult(new byte[] { 1, 2, 3 });
         }
     }

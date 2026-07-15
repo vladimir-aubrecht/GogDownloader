@@ -41,6 +41,12 @@ public sealed record DepotPlan(
 public sealed class NoDepotForLanguageException(string language)
     : Exception($"No depot for language '{language}'.");
 
+/// <summary>A progress that reports on the calling thread, so ordered reports stay ordered.</summary>
+public sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
+{
+    public void Report(T value) => report(value);
+}
+
 /// <summary>
 /// Where a game's bytes come from. Depots of either generation, or a Linux installer read over
 /// HTTP Range — the downloader does not know which it is driving.
@@ -55,7 +61,7 @@ public abstract class ContentSource
     /// <summary>Called when a signed URL expired, so the next attempt asks for a fresh one.</summary>
     protected virtual Task RefreshAsync(PlannedFile file, CancellationToken ct) => Task.CompletedTask;
 
-    private const int MaxAttempts = 6;
+    private const int MaxAttempts = 10;
 
     /// <summary>
     /// Fetches one part, retrying the failures that a long download will inevitably hit and
@@ -67,23 +73,31 @@ public abstract class ContentSource
     {
         for (var attempt = 0; ; attempt++)
         {
+            // A failed attempt has already reported the bytes it read before it broke; undo them
+            // so the retry does not count them twice and push the total past 100%.
+            long attemptBytes = 0;
+            var counting = bytes is null ? null
+                : new SyncProgress<long>(n => { attemptBytes += n; bytes.Report(n); });
+
             try
             {
-                return await FetchOnceAsync(file, part, bytes, ct);
+                return await FetchOnceAsync(file, part, counting, ct);
             }
             catch (SecureLinkExpiredException) when (attempt < MaxAttempts)
             {
+                bytes?.Report(-attemptBytes);
                 await RefreshAsync(file, ct);
             }
             catch (ChunkChecksumException) when (attempt < MaxAttempts)
             {
-                // corrupted transfer, try again
+                bytes?.Report(-attemptBytes);
             }
             catch (Exception e) when (attempt < MaxAttempts && IsTransientNetwork(e, ct))
             {
                 // The body is streamed after the retry handler has already returned the
                 // headers, so a connection that drops mid-transfer ("response ended
                 // prematurely"), a reset, or a per-request timeout surfaces here, not there.
+                bytes?.Report(-attemptBytes);
                 await Task.Delay(Backoff(attempt), ct);
             }
         }
@@ -99,8 +113,14 @@ public abstract class ContentSource
             _ => false,
         };
 
+    /// <summary>
+    /// Starts small: the usual cause is a reused keep-alive connection the CDN has closed, which
+    /// the next attempt fixes on a fresh connection. A game with thousands of tiny files hits
+    /// this often, and a slow first retry there stalls a worker and collapses throughput. Grows
+    /// for the rarer sustained failure.
+    /// </summary>
     private static TimeSpan Backoff(int attempt) =>
-        TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 20)) + TimeSpan.FromMilliseconds(Random.Shared.Next(250));
+        TimeSpan.FromMilliseconds(Math.Min(200 * Math.Pow(2, attempt), 10_000) + Random.Shared.Next(200));
 
     /// <summary>Depot paths use `\`. This also prevents escaping the staging directory.</summary>
     protected static string SafeRelative(string path)

@@ -480,7 +480,10 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
         long downloaded = 0;
         var filesDone = 0;
-        var bytesProgress = new Progress<long>(n =>
+
+        // Synchronous, in-order reporting: a retry undoes its failed attempt's bytes with a
+        // negative report, and an async Progress<T> could deliver that out of order.
+        var bytesProgress = new SyncProgress<long>(n =>
         {
             var total = Interlocked.Add(ref downloaded, n);
             progress?.Report(new DownloadProgress("download", total, totalBytes, filesDone, files.Count));

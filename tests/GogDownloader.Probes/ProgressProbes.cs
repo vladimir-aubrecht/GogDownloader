@@ -20,6 +20,8 @@ public static class ProgressProbes
         try
         {
             var progress = new ConsoleProgress();
+            // The manifest phase has nothing to measure; it must not linger as a false "0.0 %".
+            progress.Report(new DownloadProgress("manifest", 0, 0, 0, 0));
             // Each reported at 100% so the throttle always renders it.
             progress.Report(new DownloadProgress("download", 100, 100, 5, 5));
             progress.Report(new DownloadProgress("zip", 100, 100, 9, 9));
@@ -46,5 +48,9 @@ public static class ProgressProbes
         Probe.Check("the download line shows a transfer rate", lines.Any(l => l.Contains("download") && l.Contains("MiB/s")));
         Probe.Check("the zip line shows no transfer rate", lines.Any(l => l.Contains("zip")) && !lines.Any(l => l.Contains("zip") && l.Contains("MiB/s")));
         Probe.Check("the zip line counts in files", lines.Any(l => l.Contains("zip") && l.Contains("files")));
+
+        // The manifest blip is overwritten by download, so it never survives as its own line.
+        Probe.Check("an unmeasurable phase does not linger with a 0.0 %",
+            !lines.Any(l => l.Contains("manifest") && l.Contains("0.0")));
     }
 }

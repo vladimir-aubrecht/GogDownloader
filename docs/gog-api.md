@@ -200,7 +200,12 @@ this — the order of the steps matters:
 The chunk body is **zlib-compressed**. Its MD5 is checked against `compressedMd5`, i.e. over
 the *downloaded* bytes before inflating, not after.
 
-A `401` on a chunk means the secure link expired; it is not a download failure.
+A `401` **or `403`** on a chunk means the secure link expired; it is not a download failure.
+
+> Do **not** send `Accept-Encoding` (i.e. keep automatic decompression off). The chunk body is
+> already compressed and is inflated by hand. Asking for transport compression made the CDN gzip
+> the already-compressed chunk and return a mismatched Content-Length, so specific files
+> truncated identically every run ("response ended prematurely, N bytes expected").
 
 ### Dependencies / redistributables
 

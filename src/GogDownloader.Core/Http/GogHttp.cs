@@ -114,7 +114,14 @@ public static class GogHttpFactory
         HttpMessageHandler handler = new SocketsHttpHandler
         {
             MaxConnectionsPerServer = options.MaxConnections,
-            AutomaticDecompression = DecompressionMethods.All,
+
+            // Deliberately off. Depot chunks and manifests are already compressed and are
+            // inflated by hand; metadata is plain JSON the server sends uncompressed when not
+            // asked. Requesting transport compression made the CDN gzip the already-compressed
+            // chunks and return a Content-Length that did not match the body, so specific files
+            // truncated the same way every run ("response ended prematurely, N bytes expected").
+            AutomaticDecompression = DecompressionMethods.None,
+
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
 
             // A game of thousands of tiny files makes one request per file. Over HTTP/1.1 each is

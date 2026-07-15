@@ -209,39 +209,80 @@ public static class DownloadCommands
 
 }
 
-/// <summary>Rewrites a single line instead of flooding the terminal.</summary>
+/// <summary>
+/// A download runs through several phases — download, zip, verify — each its own progress bar
+/// from 0 to 100. Each gets its own line so a finished phase stays on screen; without that, a
+/// completed download vanishing as zipping starts at 0% reads as if it restarted.
+/// </summary>
 internal sealed class ConsoleProgress : IProgress<DownloadProgress>
 {
-    private readonly long _startedAt = Stopwatch.GetTimestamp();
+    private readonly Lock _gate = new();
+    private string _phase = "";
+    private long _phaseStarted;
     private long _lastRender;
 
     public void Report(DownloadProgress p)
     {
-        var now = Stopwatch.GetTimestamp();
-        var since = (now - Interlocked.Read(ref _lastRender)) / (double)Stopwatch.Frequency;
-        if (since < 0.2 && p.Bytes < p.TotalBytes) return;
-        Interlocked.Exchange(ref _lastRender, now);
+        lock (_gate)
+        {
+            var now = Stopwatch.GetTimestamp();
 
-        var elapsed = (now - _startedAt) / (double)Stopwatch.Frequency;
-        var speed = elapsed > 0 ? p.Bytes / elapsed / 1024 / 1024 : 0;
+            if (p.Phase != _phase)
+            {
+                // Keep the finished phase's last line, and time the new one from now so its
+                // speed is its own, not diluted by everything before it.
+                if (_phase.Length > 0) Console.Error.WriteLine();
+                _phase = p.Phase;
+                _phaseStarted = now;
+                _lastRender = 0;
+            }
 
-        // Zipping moves no bytes over the wire, so it can only report progress in files.
-        var percent = p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes
-            : p.TotalFiles > 0 ? 100.0 * p.Files / p.TotalFiles
-            : 0;
+            // Only these move bytes over the wire; everything else is local work, and showing a
+            // MiB/s for zipping reads as a download and made a user think the download restarted.
+            var overNetwork = p.Phase is "download" or "copy";
 
-        // Remaining time is only meaningful once the speed has settled a little.
-        var eta = speed > 0.1 && p.Bytes > 0 && p.TotalBytes > p.Bytes
-            ? TimeSpan.FromSeconds((p.TotalBytes - p.Bytes) / (p.Bytes / elapsed))
-            : (TimeSpan?)null;
+            // Zip and verify count in files; download and copy count in bytes.
+            var percent = overNetwork && p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes
+                : p.TotalFiles > 0 ? 100.0 * p.Files / p.TotalFiles
+                : p.TotalBytes > 0 ? 100.0 * p.Bytes / p.TotalBytes
+                : 0;
 
-        // The manifest and zip phases have no byte counter; "-/-" and "0.0 MiB/s" are noise.
-        var size = p.TotalBytes > 0 ? $"{CommandLine.Bytes(p.Bytes)}/{CommandLine.Bytes(p.TotalBytes)}" : "";
-        var rate = p.Bytes > 0 ? $"{speed,6:F1} MiB/s" : "";
-        var remaining = eta is { } left ? $"  ETA {left:hh\\:mm\\:ss}" : "";
+            var atEnd = overNetwork && p.TotalBytes > 0 ? p.Bytes >= p.TotalBytes
+                : p.TotalFiles > 0 ? p.Files >= p.TotalFiles
+                : true;
 
-        Console.Error.Write(
-            $"\r  {p.Phase,-8} {percent,5:F1} %  {size,-20}  {p.Files}/{p.TotalFiles} files  " +
-            $"{rate}{remaining}        ");
+            var since = (now - _lastRender) / (double)Stopwatch.Frequency;
+            if (since < 0.2 && !atEnd) return;
+            _lastRender = now;
+
+            var files = p.TotalFiles > 0 ? $"{p.Files}/{p.TotalFiles} files" : "";
+
+            var transfer = "";
+            if (overNetwork)
+            {
+                var elapsed = (now - _phaseStarted) / (double)Stopwatch.Frequency;
+                var speed = elapsed > 0 ? p.Bytes / elapsed / 1024 / 1024 : 0;
+                var eta = speed > 0.1 && p.Bytes > 0 && p.TotalBytes > p.Bytes
+                    ? TimeSpan.FromSeconds((p.TotalBytes - p.Bytes) / (p.Bytes / elapsed))
+                    : (TimeSpan?)null;
+
+                transfer = $"{CommandLine.Bytes(p.Bytes)}/{CommandLine.Bytes(p.TotalBytes)}"
+                           + (p.Bytes > 0 ? $"  {speed,6:F1} MiB/s" : "")
+                           + (eta is { } left ? $"  ETA {left:hh\\:mm\\:ss}" : "");
+            }
+
+            Console.Error.Write(
+                $"\r  {Label(p.Phase),-9} {percent,5:F1} %  {files,-16}  {transfer}        ");
+        }
     }
+
+    /// <summary>Phase names are internal shorthand; give the user something plainer.</summary>
+    private static string Label(string phase) => phase switch
+    {
+        "reuse" => "reusing",
+        "verify" => "checking",   // verifying files already on disk before resuming
+        "check" => "verifying",   // reading the finished archive back
+        "copy" => "copying",
+        _ => phase,               // manifest, download, zip
+    };
 }

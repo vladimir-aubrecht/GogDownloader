@@ -54,3 +54,13 @@ public sealed class DownloadInterruptedException(string stagingDirectory)
 {
     public string StagingDirectory { get; } = stagingDirectory;
 }
+
+/// <summary>
+/// Some files could not be downloaded from GOG even after retries — typically a chunk GOG serves
+/// truncated. The rest downloaded; the game is left unfinished rather than zipped incomplete.
+/// </summary>
+public sealed class DownloadIncompleteException(IReadOnlyDictionary<string, string> files)
+    : Exception($"{files.Count} file(s) could not be downloaded from GOG.")
+{
+    public IReadOnlyDictionary<string, string> Files { get; } = files;
+}

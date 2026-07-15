@@ -144,6 +144,10 @@ public static class DownloadCommands
                     Console.WriteLine(result.Detail);
                     skipped.Add(game.Title);
                     break;
+                case DownloadOutcome.Incomplete:
+                    Console.Error.WriteLine($"Incomplete: {result.Detail}");
+                    failed.Add(game.Title);
+                    break;
                 default:
                     Console.Error.WriteLine($"Skipped: {result.Detail}");
                     skipped.Add(game.Title);

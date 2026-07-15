@@ -63,7 +63,7 @@ public sealed record DownloadOptions
 
 public enum DownloadOutcome
 {
-    Completed, AlreadyDone, NoDepot, UnsupportedGeneration, NoDepotForLanguage, NotEnoughSpace,
+    Completed, AlreadyDone, NoDepot, UnsupportedGeneration, NoDepotForLanguage, NotEnoughSpace, Incomplete,
 }
 
 public sealed record DownloadResult(DownloadOutcome Outcome, string? ArchivePath = null, string? Detail = null);
@@ -293,10 +293,24 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
             return new DownloadResult(DownloadOutcome.Completed, archivePath);
         }
+        catch (DownloadIncompleteException e)
+        {
+            // Keep staging so the good files are not re-downloaded if GOG later serves the rest.
+            var detail = "GOG could not serve these files:\n" +
+                         string.Join("\n", e.Files.Take(20).Select(f => $"    {f.Key}")) +
+                         (e.Files.Count > 20 ? $"\n    ... and {e.Files.Count - 20} more" : "");
+            return new DownloadResult(DownloadOutcome.Incomplete, Detail: detail);
+        }
         catch (OperationCanceledException)
         {
             throw new DownloadInterruptedException(staging);
         }
+    }
+
+    private static void SafeDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (IOException) { /* a leftover partial is harmless; the manifest is what counts */ }
     }
 
     /// <summary>
@@ -477,6 +491,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         }
 
         var slots = new SemaphoreSlim(options.MaxConnections, options.MaxConnections);
+        var unfetchable = new Dictionary<string, string>();
 
         long downloaded = 0;
         var filesDone = 0;
@@ -497,19 +512,32 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 var fullPath = Path.Combine(staging, file.RelativePath);
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
 
-                using (var handle = File.OpenHandle(
-                           fullPath, FileMode.Create, FileAccess.Write, FileShare.None,
-                           FileOptions.Asynchronous, preallocationSize: file.Size))
+                try
                 {
+                    using var handle = File.OpenHandle(
+                        fullPath, FileMode.Create, FileAccess.Write, FileShare.None,
+                        FileOptions.Asynchronous, preallocationSize: file.Size);
+
                     var writes = file.Parts
                         .Select(part => FetchPartToAsync(handle, source, file, part, slots, bytesProgress, token))
                         .ToList();
 
                     await Task.WhenAll(writes);
                 }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    // A file GOG cannot serve — a chunk truncated even from origin, say — must not
+                    // abandon the whole game or the batch behind it. Record it, drop the partial,
+                    // and let the rest download; the game is reported incomplete at the end.
+                    SafeDelete(fullPath);
+                    lock (unfetchable) unfetchable[file.RelativePath] = e.Message;
+                }
 
                 Interlocked.Increment(ref filesDone);
             });
+
+        if (unfetchable.Count > 0)
+            throw new DownloadIncompleteException(unfetchable);
 
         // Symlinks are dereferenced: the target is relative to the install root.
         foreach (var link in plan.Links)

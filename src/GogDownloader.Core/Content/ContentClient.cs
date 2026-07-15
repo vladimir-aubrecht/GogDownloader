@@ -70,8 +70,9 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
         response.EnsureSuccessStatusCode();
 
         var buffer = new MemoryStream(capacity: (int)Math.Max(size, 1));
-        await using (var stream = await response.Content.ReadAsStreamAsync(ct))
+        try
         {
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
             var scratch = ArrayPool<byte>.Shared.Rent(64 * 1024);
             try
             {
@@ -87,6 +88,15 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
             {
                 ArrayPool<byte>.Shared.Return(scratch);
             }
+        }
+        catch (Exception e) when (e is IOException or HttpRequestException)
+        {
+            throw new ChunkTransferException(
+                $"range {offset}-{offset + size - 1} of main.bin: " +
+                $"HTTP {(int)response.StatusCode} {response.Version} " +
+                $"content-length={response.Content.Headers.ContentLength?.ToString() ?? "?"} " +
+                $"encoding=[{string.Join(",", response.Content.Headers.ContentEncoding)}] " +
+                $"got={buffer.Length}B — {e.Message}", e);
         }
 
         var data = buffer.GetBuffer().AsMemory(0, (int)buffer.Length);

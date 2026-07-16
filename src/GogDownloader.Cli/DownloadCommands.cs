@@ -104,7 +104,8 @@ public static class DownloadCommands
         var downloader = new GameDownloader(api, content, cdn);
 
         var completed = new List<string>();
-        var skipped = new List<string>();
+        var alreadyDone = new List<string>();
+        var skipped = new List<(string Title, string Reason)>();
         var failed = new List<string>();
 
         for (var i = 0; i < games.Count; i++)
@@ -122,7 +123,7 @@ public static class DownloadCommands
             {
                 Console.Error.WriteLine();
                 OnInterrupted(interrupted.StagingDirectory, flags);
-                Summarise(completed, skipped, failed, games.Count);
+                Summarise(completed, alreadyDone, skipped, failed, games.Count);
                 return 130;
             }
             catch (Exception e) when (e is not OperationCanceledException)
@@ -142,7 +143,7 @@ public static class DownloadCommands
                     break;
                 case DownloadOutcome.AlreadyDone:
                     Console.WriteLine(result.Detail);
-                    skipped.Add(game.Title);
+                    alreadyDone.Add(game.Title);
                     break;
                 case DownloadOutcome.Incomplete:
                     Console.Error.WriteLine($"Incomplete: {result.Detail}");
@@ -150,27 +151,47 @@ public static class DownloadCommands
                     break;
                 default:
                     Console.Error.WriteLine($"Skipped: {result.Detail}");
-                    skipped.Add(game.Title);
+                    skipped.Add((game.Title, result.Detail ?? result.Outcome.ToString()));
                     break;
             }
         }
 
-        if (games.Count > 1) Summarise(completed, skipped, failed, games.Count);
+        if (games.Count > 1) Summarise(completed, alreadyDone, skipped, failed, games.Count);
 
         // A single game keeps its old exit codes; a batch fails only if something failed.
         if (games.Count == 1)
-            return failed.Count > 0 ? 1 : skipped.Count > 0 && completed.Count == 0 ? 3 : 0;
+            return failed.Count > 0 ? 1
+                : (skipped.Count > 0 || alreadyDone.Count > 0) && completed.Count == 0 ? 3
+                : 0;
 
         return failed.Count > 0 ? 1 : 0;
     }
 
-    private static void Summarise(List<string> completed, List<string> skipped, List<string> failed, int total)
+    /// <summary>
+    /// Already-done games are only counted — on a resumed batch there are hundreds of them and
+    /// each already printed its own line. What was skipped for a reason, or failed, is worth
+    /// repeating at the end: after a long run those lines have scrolled far out of sight.
+    /// </summary>
+    private static void Summarise(
+        List<string> completed, List<string> alreadyDone, List<(string Title, string Reason)> skipped,
+        List<string> failed, int total)
     {
         Console.Error.WriteLine();
-        Console.Error.WriteLine($"{completed.Count} downloaded, {skipped.Count} skipped, {failed.Count} failed, of {total}.");
+        Console.Error.WriteLine(
+            $"{completed.Count} downloaded, {alreadyDone.Count} already done, " +
+            $"{skipped.Count} skipped, {failed.Count} failed, of {total}.");
 
+        foreach (var (title, reason) in skipped)
+            Console.Error.WriteLine($"  skipped: {title} — {FirstLine(reason)}");
         foreach (var title in failed)
             Console.Error.WriteLine($"  failed: {title}");
+    }
+
+    /// <summary>A skip reason can be a multi-line explanation; the summary wants its gist.</summary>
+    private static string FirstLine(string text)
+    {
+        var newline = text.IndexOfAny(['\r', '\n']);
+        return newline < 0 ? text : text[..newline];
     }
 
     /// <summary>

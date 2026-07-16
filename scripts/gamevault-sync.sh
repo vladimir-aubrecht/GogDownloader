@@ -48,20 +48,33 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 3; }
 API="${GAMEVAULT_URL%/}/api"
 AUTH="$GAMEVAULT_USER:$GAMEVAULT_PASSWORD"
 
+# Basic auth only covers the login endpoint, which issues a JWT; every other route wants
+# "Authorization: Bearer". The access token expires after minutes (AUTH_ACCESS_TOKEN_EXPIRES_IN,
+# default 5m), so each pass logs in afresh rather than caching one.
+login() {
+    if ! pair=$(curl -fsSL -u "$AUTH" "$API/auth/basic/login"); then
+        echo "login at $API/auth/basic/login failed (curl's error above says which kind):" \
+             "401 means GAMEVAULT_USER/GAMEVAULT_PASSWORD are wrong or the user is not activated;" \
+             "5xx or a connection failure means GAMEVAULT_URL — when GameVault runs in the same" \
+             "compose file, point it at the service directly (http://<service>:8080)," \
+             "not at a public URL that hops through a reverse proxy" >&2
+        return 1
+    fi
+    token=$(printf '%s' "$pair" | jq -r '.access_token // empty')
+    [ -n "$token" ] || { echo "the login response carried no access_token" >&2; return 1; }
+    printf '%s' "$token"
+}
+
 # GameVault's game list, one row per game: "id<TAB>filename<TAB>current_launch_executable".
 # Following pagination to the end so a library larger than one page still matches.
 list_games() {
     page=1
     while :; do
-        # A failed request must abort the pass. Without this, an unreachable or misconfigured
-        # GameVault leaves $body empty, the pagination check trips on a non-number ("sh: out of
-        # range"), and the loop hammers the same 401 forever.
-        if ! body=$(curl -fsSL -u "$AUTH" "$API/games?limit=100&page=$page"); then
-            echo "cannot list games from $API (curl's error above says which kind):" \
-                 "401 means GAMEVAULT_USER/GAMEVAULT_PASSWORD are wrong or the user is not activated;" \
-                 "5xx or a connection failure means GAMEVAULT_URL — when GameVault runs in the same" \
-                 "compose file, point it at the service directly (http://<service>:8080)," \
-                 "not at a public URL that hops through a reverse proxy" >&2
+        # A failed request must abort the pass. Without this, an unreachable GameVault leaves
+        # $body empty, the pagination check trips on a non-number ("sh: out of range"), and the
+        # loop hammers the same URL forever.
+        if ! body=$(curl -fsSL -H "Authorization: Bearer $TOKEN" "$API/games?limit=100&page=$page"); then
+            echo "cannot list games from $API even though the login worked — see curl's error above" >&2
             return 1
         fi
         count=$(printf '%s' "$body" | jq '.data | length')
@@ -79,6 +92,8 @@ list_games() {
 # One line of tally per action, so the summary survives the pipe subshells that would otherwise
 # swallow counter variables.
 sync_once() {
+    TOKEN=$(login) || return 1
+
     tally=$(mktemp)
 
     # filename -> "id<TAB>current_executable". An unreachable GameVault fails the pass
@@ -114,7 +129,7 @@ sync_once() {
             payload=$(jq -n --arg e "$executable" --arg p "$parameters" \
                 '{user_metadata: {launch_executable: $e, launch_parameters: (if $p == "" then null else $p end)}}')
 
-            if curl -fsSL -u "$AUTH" -X PUT -H 'Content-Type: application/json' \
+            if curl -fsSL -H "Authorization: Bearer $TOKEN" -X PUT -H 'Content-Type: application/json' \
                     -d "$payload" "$API/games/$id" >/dev/null; then
                 echo "updated   $archive -> $executable"
                 echo updated >>"$tally"

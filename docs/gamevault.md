@@ -127,7 +127,7 @@ and `LaunchParameters`; Linux gets `start.sh`). That is neutral metadata, useful
 
 `scripts/gamevault-sync.sh` is the optional glue: it reads those manifests and, matching by the
 archive filename GameVault indexed, sets each game's `launch_executable` via
-`PUT /api/games/:id` (basic auth, EDITOR role). It changes only what differs, so it is safe to
+`PUT /api/games/:id` (bearer token, EDITOR role). It changes only what differs, so it is safe to
 run on a timer — see `scripts/gamevault-sync.compose.yml` for a sidecar. The GameVault
 dependency lives entirely in that script, on the operator's side.
 
@@ -135,11 +135,17 @@ dependency lives entirely in that script, on the operator's side.
 
 | Purpose | Endpoint |
 |---|---|
+| Log in, get a JWT | `GET /api/auth/basic/login`, HTTP basic → `{"access_token": …, "refresh_token": …}` |
 | List games (paginated) | `GET /api/games?limit=100&page=N`, role GUEST |
 | Set launch executable | `PUT /api/games/:id` body `{"user_metadata":{"launch_executable":"…","launch_parameters":"…"}}`, role EDITOR |
 
-Auth is HTTP basic. `launch_executable` is a path inside the game (example `ShooterGame.exe`),
-`launch_parameters` a string (example `-fullscreen -dx11`).
+Basic auth covers *only* the login endpoint (`BasicAuthController`, `@SkipGuards` on
+`GET /auth/basic/login`); every other route is behind an `APP_GUARD` that wants
+`Authorization: Bearer <access_token>`. Sending `-u user:pass` to `/api/games` returns 401 no
+matter how right the credentials are — a mistake this file itself used to make. The access token
+expires quickly (`AUTH_ACCESS_TOKEN_EXPIRES_IN`, default `5m`), so a periodic job should log in
+per pass, not cache the token. `launch_executable` is a path inside the game (example
+`ShooterGame.exe`), `launch_parameters` a string (example `-fullscreen -dx11`).
 
 ## Supported archive extensions
 

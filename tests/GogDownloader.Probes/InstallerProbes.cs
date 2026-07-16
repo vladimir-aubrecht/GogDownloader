@@ -75,12 +75,16 @@ public static class InstallerProbes
         Probe.Check($"the missing-innoextract hint suits this OS ({expected})", hint.Contains(expected), hint);
         Probe.Check("the hint does not send Windows users to apt or brew",
             OperatingSystem.IsWindows() ? !hint.Contains("apt install") && !hint.Contains("brew") : true, hint);
-        Probe.Check("the real filename is kept, or slices are not recognised as one installer",
-            InnoSetupExtractor.FileNameFrom("https://cdn/x/setup_quake_1.0.exe?token=1", "id") == "setup_quake_1.0.exe");
-        Probe.Check("a .bin slice keeps its name",
-            InnoSetupExtractor.FileNameFrom("https://cdn/setup_game-1.bin", "id") == "setup_game-1.bin");
+        // GOG's real filenames push Windows paths past MAX_PATH, which innoextract cannot open,
+        // so the parts are renamed — but consistently, or the slices stop being one installer.
+        Probe.Check("the setup exe gets the shortest name",
+            InnoSetupExtractor.PartNameFrom("https://cdn/x/setup_bg3_v4.1.1_%2864bit%29_%2889470%29.exe?token=1", "id") == "s.exe");
+        Probe.Check("a .bin slice keeps its number beside the renamed exe",
+            InnoSetupExtractor.PartNameFrom("https://cdn/setup_game-2.bin", "id") == "s-2.bin");
+        Probe.Check("an unrecognised part keeps its real, URL-decoded name",
+            InnoSetupExtractor.PartNameFrom("https://cdn/read%20me.txt", "id") == "read me.txt");
         Probe.Check("a nameless URL falls back to the file id",
-            InnoSetupExtractor.FileNameFrom("https://cdn/", "77") == "setup_77.exe");
+            InnoSetupExtractor.PartNameFrom("https://cdn/", "77") == "setup_77.exe");
 
         // Feeding it something that is not an Inno Setup installer must fail loudly, and clean up.
         var scratch = Probe.ScratchDirectory();
@@ -88,14 +92,15 @@ public static class InstallerProbes
         await File.WriteAllTextAsync(notAnInstaller, "MZ this is not Inno Setup");
 
         var target = Path.Combine(scratch, "staging");
+        var extractScratch = Path.Combine(scratch, "1.x");
         Directory.CreateDirectory(target);
 
         var failed = false;
-        try { await InnoSetupExtractor.ExtractAsync(notAnInstaller, target, default); }
+        try { await InnoSetupExtractor.ExtractAsync(notAnInstaller, target, extractScratch, default); }
         catch (InnoExtractFailedException) { failed = true; }
 
         Probe.Check("a file that is not an installer is rejected", failed);
-        Probe.Check("a failed extraction leaves no scratch directory", !Directory.Exists(target + ".extract"));
+        Probe.Check("a failed extraction leaves no scratch directory", !Directory.Exists(extractScratch));
         Directory.Delete(scratch, recursive: true);
 
         Probe.Group("Symlink targets are resolved from the install root");

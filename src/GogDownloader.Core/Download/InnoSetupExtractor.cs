@@ -51,6 +51,7 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
         Installer installer,
         string staging,
         string installerDirectory,
+        string scratch,
         IProgress<DownloadProgress>? progress,
         CancellationToken ct)
     {
@@ -65,7 +66,7 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
         foreach (var file in installer.Files)
         {
             var url = await api.ResolveDownlinkAsync(file.Downlink, ct);
-            var name = FileNameFrom(url, file.Id);
+            var name = PartNameFrom(url, file.Id);
             var path = Path.Combine(installerDirectory, name);
             parts.Add(path);
 
@@ -111,7 +112,7 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
                     ?? throw new InnoExtractFailedException("The installer has no .exe to extract.");
 
         progress?.Report(new DownloadProgress("extract", 0, 0, 0, 1));
-        await ExtractAsync(setup, staging, ct);
+        await ExtractAsync(setup, staging, scratch, ct);
 
         // The zip is made of whatever is in staging, so the installer must not be in it.
         Directory.Delete(installerDirectory, recursive: true);
@@ -120,10 +121,13 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
     /// <summary>
     /// `-g` pulls in the GOG `.bin` slices, `-m` leaves out Inno's temporary files, `-s` keeps it
     /// quiet. Everything lands under `app`, which is then lifted to the root of the archive.
+    ///
+    /// The scratch directory is the caller's to name, and it must be *short*: innoextract is not
+    /// long-path aware, so every path it creates under scratch counts against Windows MAX_PATH,
+    /// and old bundles nest directories deep enough to blow through it.
     /// </summary>
-    internal static async Task ExtractAsync(string setup, string staging, CancellationToken ct)
+    internal static async Task ExtractAsync(string setup, string staging, string scratch, CancellationToken ct)
     {
-        var scratch = staging + ".extract";
         if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
         Directory.CreateDirectory(scratch);
 
@@ -161,17 +165,27 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
         Directory.Delete(scratch, recursive: true);
     }
 
-    /// <summary>GOG's signed URLs keep the real filename in the path; the parts must keep it too,
-    /// or innoextract will not recognise them as slices of one installer.</summary>
-    internal static string FileNameFrom(string url, string fallback)
+    /// <summary>
+    /// innoextract finds a multi-part installer's slices by the setup's base name — `name-N.bin`
+    /// beside `name.exe` — so the parts may be renamed as long as they are renamed together. And
+    /// they must be: GOG's real filenames (130+ characters, URL-escapes included) push the full
+    /// path past Windows MAX_PATH, which innoextract cannot open. The parts therefore get the
+    /// shortest names that keep the slice convention.
+    /// </summary>
+    internal static string PartNameFrom(string url, string fallback)
     {
         var path = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.AbsolutePath : url;
-        var name = Path.GetFileName(path);
+        var name = Uri.UnescapeDataString(Path.GetFileName(path));
 
-        if (name.Length == 0 || name.Contains('/') || name.Contains('\\'))
-            return $"setup_{fallback}.exe";
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return "s.exe";
 
-        return name;
+        var slice = System.Text.RegularExpressions.Regex.Match(name, @"-(\d+)\.bin$");
+        if (slice.Success) return $"s-{slice.Groups[1].Value}.bin";
+
+        // Unknown pattern: keep the real name rather than guess at what innoextract expects.
+        return name.Length == 0 || name.Contains('/') || name.Contains('\\')
+            ? $"setup_{fallback}.exe"
+            : name;
     }
 
     private static string? Which(string executable)

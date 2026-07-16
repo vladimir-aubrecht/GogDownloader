@@ -53,7 +53,14 @@ AUTH="$GAMEVAULT_USER:$GAMEVAULT_PASSWORD"
 list_games() {
     page=1
     while :; do
-        body=$(curl -fsSL -u "$AUTH" "$API/games?limit=100&page=$page")
+        # A failed request must abort the pass. Without this, an unreachable or misconfigured
+        # GameVault leaves $body empty, the pagination check trips on a non-number ("sh: out of
+        # range"), and the loop hammers the same 401 forever.
+        if ! body=$(curl -fsSL -u "$AUTH" "$API/games?limit=100&page=$page"); then
+            echo "cannot list games from $API — check GAMEVAULT_URL, and that" \
+                 "GAMEVAULT_USER/GAMEVAULT_PASSWORD belong to an activated user (401 = bad credentials)" >&2
+            return 1
+        fi
         count=$(printf '%s' "$body" | jq '.data | length')
         printf '%s' "$body" | jq -r '
             .data[] | [
@@ -71,8 +78,9 @@ list_games() {
 sync_once() {
     tally=$(mktemp)
 
-    # filename -> "id<TAB>current_executable"
-    games=$(list_games)
+    # filename -> "id<TAB>current_executable". An unreachable GameVault fails the pass
+    # cleanly here instead of mislabelling every archive as "not in GameVault yet".
+    games=$(list_games) || { rm -f "$tally"; return 1; }
 
     # Each backup's .gogdl.json can describe several platforms, each its own archive.
     find "$BACKUP_DIR" -maxdepth 2 -name '.gogdl.json' -type f 2>/dev/null | while read -r manifest; do

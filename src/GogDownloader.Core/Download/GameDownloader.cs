@@ -165,6 +165,46 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             {
                 return new DownloadResult(DownloadOutcome.NoDepotForLanguage, Detail: e.Message);
             }
+            catch (HttpRequestException e) when (build is not null
+                && e.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Forbidden)
+            {
+                // The snapshot's depot link went stale: GOG republished the build and the old
+                // manifest URL now 403s or 404s. Ask for the current build and carry on instead
+                // of failing a game whose depot is perfectly alive.
+                var fresh = await api.GetLatestBuildAsync(game.Id, options.Platform, ct)
+                    ?? throw new InvalidOperationException(
+                        $"The snapshot's depot link is stale ({e.Message}) and GOG lists no " +
+                        $"{options.Platform.ApiName()} build anymore. Refresh with: library sync");
+
+                ContentSource.RetryObserver?.Invoke(
+                    $"{game.Slug}: snapshot depot link is stale, switching to current build {fresh.BuildId}");
+
+                if (!options.Force
+                    && existing?.Platforms.GetValueOrDefault(options.Platform) is { } current
+                    && current.BuildId == fresh.BuildId)
+                {
+                    return new DownloadResult(DownloadOutcome.AlreadyDone,
+                        Path.Combine(gameDirectory, current.ArchiveName),
+                        $"Build {fresh.BuildId} is already backed up.");
+                }
+
+                buildId = fresh.BuildId;
+                versionName = fresh.VersionName ?? versionName;
+                archiveName = GameVaultName.For(game, options.Platform, versionName);
+
+                source = fresh.Generation == 1
+                    ? new DepotSourceV1(content, api, fresh.Manifest!, options.Platform.ContentSystemName(), options.Language)
+                    : new DepotSourceV2(content, api, fresh.Manifest!, options.Language);
+
+                try
+                {
+                    plan = await source.PlanAsync(ct);
+                }
+                catch (Exception inner) when (inner is NoDepotForLanguageException)
+                {
+                    return new DownloadResult(DownloadOutcome.NoDepotForLanguage, Detail: inner.Message);
+                }
+            }
         }
 
         var totalCompressed = plan?.DownloadBytes ?? setup!.TotalSize;
@@ -207,8 +247,11 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         try
         {
             if (innoSetup)
+                // The extract scratch is named by game id alone: innoextract is not long-path
+                // aware, and a slug-length prefix under a deep game tree crosses Windows MAX_PATH.
                 await new InnoSetupExtractor(api, cdn)
-                    .FillAsync(setup!, staging, staging + ".installer", progress, ct);
+                    .FillAsync(setup!, staging, staging + ".installer",
+                        Path.Combine(options.StagingDirectory, $"{game.Id}.x"), progress, ct);
             else
             {
                 // The previous backup of this platform is a cache: a new build changes a few
@@ -290,6 +333,9 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
             if (Directory.Exists(staging + ".installer"))
                 Directory.Delete(staging + ".installer", recursive: true);
+
+            var scratch = Path.Combine(options.StagingDirectory, $"{game.Id}.x");
+            if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
 
             return new DownloadResult(DownloadOutcome.Completed, archivePath);
         }

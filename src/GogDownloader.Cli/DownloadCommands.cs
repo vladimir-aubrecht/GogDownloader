@@ -75,7 +75,10 @@ public static class DownloadCommands
         };
 
         var total = games.Sum(g => GameFilter.Size(g, platform));
+        // The version leads the header: three bug hunts in a row turned out to be a stale build
+        // on the user's machine, which one glance here would have settled.
         Console.Error.WriteLine(
+            $"gogdl {CommandLine.Version} · " +
             $"{games.Count} {(games.Count == 1 ? "game" : "games")} for {platform.ApiName()}, " +
             $"{CommandLine.Bytes(total)} to download → {downloadOptions.OutputRoot}");
         Console.Error.WriteLine(

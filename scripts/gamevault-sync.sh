@@ -57,8 +57,11 @@ list_games() {
         # GameVault leaves $body empty, the pagination check trips on a non-number ("sh: out of
         # range"), and the loop hammers the same 401 forever.
         if ! body=$(curl -fsSL -u "$AUTH" "$API/games?limit=100&page=$page"); then
-            echo "cannot list games from $API — check GAMEVAULT_URL, and that" \
-                 "GAMEVAULT_USER/GAMEVAULT_PASSWORD belong to an activated user (401 = bad credentials)" >&2
+            echo "cannot list games from $API (curl's error above says which kind):" \
+                 "401 means GAMEVAULT_USER/GAMEVAULT_PASSWORD are wrong or the user is not activated;" \
+                 "5xx or a connection failure means GAMEVAULT_URL — when GameVault runs in the same" \
+                 "compose file, point it at the service directly (http://<service>:8080)," \
+                 "not at a public URL that hops through a reverse proxy" >&2
             return 1
         fi
         count=$(printf '%s' "$body" | jq '.data | length')

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace GogDownloader.Core.Api;
@@ -45,8 +46,44 @@ public sealed record Product
     [JsonPropertyName("downloads")] public Downloads? Downloads { get; init; }
     [JsonPropertyName("in_development")] public InDevelopment? InDevelopment { get; init; }
 
+    /// <summary>`game` or `pack`. A pack is a container product, see <see cref="IsPack"/>.</summary>
+    [JsonPropertyName("game_type")] public string? GameType { get; init; }
+
+    /// <summary>
+    /// GOG bundles a compilation as its own product that Galaxy never installs: it has no build
+    /// on the content system, and the games it contains are granted as separate products.
+    /// </summary>
+    public bool IsPack => string.Equals(GameType, "pack", StringComparison.OrdinalIgnoreCase);
+
     // `release_date` is deliberately not read: it is not the game's release year.
     // See GameVaultName for the evidence.
+}
+
+/// <summary>
+/// The v2 game endpoint, read for one thing only: which games a pack contains. `_links` holds
+/// them as URLs, so the ids have to be picked out of the last path segment.
+/// </summary>
+public sealed record GameLinks
+{
+    [JsonPropertyName("_links")] public Dictionary<string, JsonElement> Links { get; init; } = [];
+
+    public IReadOnlyList<long> IncludedGameIds()
+    {
+        if (!Links.TryGetValue("includesGames", out var included)
+            || included.ValueKind != JsonValueKind.Array)
+            return [];
+
+        var ids = new List<long>();
+        foreach (var link in included.EnumerateArray())
+        {
+            if (!link.TryGetProperty("href", out var href) || href.GetString() is not { } url) continue;
+
+            var last = url.Split('?')[0].TrimEnd('/').Split('/')[^1];
+            if (long.TryParse(last, out var id)) ids.Add(id);
+        }
+
+        return ids;
+    }
 }
 
 public sealed record Build
@@ -99,6 +136,19 @@ public sealed class GogApiClient(HttpClient http)
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<Product>(cancellationToken: ct);
+    }
+
+    /// <summary>
+    /// The games a pack contains. Only the v2 endpoint knows them, so this costs one extra
+    /// request — asked for packs alone, of which a library holds a handful.
+    /// </summary>
+    public async Task<IReadOnlyList<long>> GetIncludedGameIdsAsync(long id, CancellationToken ct = default)
+    {
+        using var response = await http.GetAsync($"{GogConstants.Api}/v2/games/{id}?locale=en", ct);
+        if (!response.IsSuccessStatusCode) return [];
+
+        var links = await response.Content.ReadFromJsonAsync<GameLinks>(cancellationToken: ct);
+        return links?.IncludedGameIds() ?? [];
     }
 
     /// <summary>

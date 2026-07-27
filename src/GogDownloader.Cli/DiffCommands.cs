@@ -10,7 +10,7 @@ namespace GogDownloader.Cli;
 /// </summary>
 public static class DiffCommands
 {
-    private enum State { Missing, Outdated, Current, Unsupported }
+    private enum State { Missing, Outdated, Current, Unsupported, Pack }
 
     private sealed record Row(State State, LibraryEntry Game, string Detail, long Size);
 
@@ -30,6 +30,15 @@ public static class DiffCommands
         foreach (var game in games)
         {
             if (game.Platforms.GetValueOrDefault(platform) is not { } availability) continue;
+
+            // A pack of games the library has on its own is not missing, it is duplicated:
+            // `download` skips it, so reporting it as missing would never stop.
+            if (snapshot.PackDuplicates(game) is { Count: > 0 } contents)
+            {
+                rows.Add(new Row(State.Pack, game,
+                    $"pack of {string.Join(", ", contents.Select(c => c.Title))}", 0));
+                continue;
+            }
 
             var directory = Path.Combine(outputRoot, game.DirectoryName);
             var backup = (await BackupManifest.LoadAsync(directory, ct))?.Platforms.GetValueOrDefault(platform);
@@ -63,6 +72,7 @@ public static class DiffCommands
         Section("Missing", rows, State.Missing, flags);
         Section("Outdated", rows, State.Outdated, flags);
         Section("Cannot back up yet", rows, State.Unsupported, flags);
+        Section("Packs, skipped as duplicates", rows, State.Pack, flags);
         if (flags.ContainsKey("all")) Section("Up to date", rows, State.Current, flags);
 
         if (orphans.Count > 0)
@@ -75,7 +85,8 @@ public static class DiffCommands
         var missing = rows.Where(r => r.State is State.Missing or State.Outdated).ToList();
         Console.WriteLine(
             $"{Count(rows, State.Current)} up to date, {Count(rows, State.Missing)} missing, " +
-            $"{Count(rows, State.Outdated)} outdated, {Count(rows, State.Unsupported)} unsupported.");
+            $"{Count(rows, State.Outdated)} outdated, {Count(rows, State.Unsupported)} unsupported, " +
+            $"{Count(rows, State.Pack)} duplicate pack{(Count(rows, State.Pack) == 1 ? "" : "s")}.");
 
         if (missing.Count > 0)
         {

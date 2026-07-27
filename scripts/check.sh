@@ -34,7 +34,7 @@ expect() {
     fi
 }
 
-expect "list finds every game"        "4 games"                    gogdl library list
+expect "list finds every game"        "5 games"                    gogdl library list
 expect "list searches by title"       "the_witcher_3_wild_hunt"    gogdl library list witcher
 expect "list shows owned DLC"         "Blood and Wine"             gogdl library list witcher
 expect "list shows sizes"             "30 GiB"                     gogdl library list witcher
@@ -47,6 +47,9 @@ expect "stats counts inno titles"     "needing innoextract: 1"     gogdl library
 expect "stats counts unsupported"     "cannot be backed up at all: 0"  gogdl library stats
 expect "stats counts gen1 depots"     "gen1:    1"                 gogdl library stats
 expect "stats pluralises correctly"   "1 title "                   gogdl library stats
+# A pack of games the library owns separately is never downloaded, so it must not be counted.
+expect "stats names duplicate packs"  "Packs skipped as duplicates (their games are owned separately): 1"  gogdl library stats
+expect "stats leaves packs out of the totals" "Windows     4 titles" gogdl library stats
 expect "download needs a game"        "Missing game"               gogdl download
 # A flag's value must never be mistaken for the game name.
 expect "download ignores flag values" "Missing game"               gogdl download --platform windows
@@ -69,6 +72,12 @@ expect "download --all honours the search"     "1 game for windows"   gogdl down
 expect "download --all honours --dlc"          "1 game for windows"   gogdl download --all --dlc --dry-run --platform windows
 expect "download --all reports no matches"     "Nothing matches"      gogdl download --all zzzznope --dry-run
 expect "download --all rejects bad platform"   "Unknown platform"     gogdl download --all --dry-run --platform amiga
+
+# A pack is a container GOG never installs; its games are separate products, already backed up.
+expect "download skips a duplicate pack"  "a pack of games the library has on its own"  gogdl download prehistorik_12
+expect "a pack names what covers it"      "FTL: Faster Than Light, Ultima 1+2+3"        gogdl download prehistorik_12
+expect "a lone pack leaves nothing to do" "Nothing left to download"                    gogdl download prehistorik_12
+expect "a batch drops the pack too"       "Skipping Prehistorik 1+2"                    gogdl download --all --dry-run --platform windows
 
 
 echo
@@ -104,6 +113,9 @@ expect "diff counts the gen1 game as missing" "2 missing, 1 outdated"       diff
 expect "diff --slugs feeds a download"  "faster_than_light"                diffcmd --slugs --platform windows
 # macOS installers are neither a depot nor Inno Setup, so diff must say why.
 expect "diff explains the macOS gap"   "not extractable"                  diffcmd --platform mac
+# A duplicate pack is not missing, or diff would ask for it forever.
+expect "diff parks packs of their own"  "Packs, skipped as duplicates"    diffcmd --platform windows
+expect "diff counts duplicate packs"    "1 duplicate pack"                diffcmd --platform windows
 
 echo
 echo "All checks passed."

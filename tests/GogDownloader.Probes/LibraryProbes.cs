@@ -1,4 +1,5 @@
 using GogDownloader.Cli;
+using GogDownloader.Core.Api;
 using GogDownloader.Core.Content;
 using GogDownloader.Core.Download;
 using GogDownloader.Core.Library;
@@ -56,9 +57,54 @@ public static class LibraryProbes
         // so they must not be trusted any more than a missing field.
         Probe.Check("schema 5 knows early access but not trustworthy sizes",
             new LibrarySnapshot { SchemaVersion = 5 } is { KnowsEarlyAccess: true, KnowsDepotSizes: false });
-        Probe.Check("schema 6 knows everything",
-            new LibrarySnapshot { SchemaVersion = 6 } is { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true });
-        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 6);
+        Probe.Check("schema 6 knows sizes but not packs",
+            new LibrarySnapshot { SchemaVersion = 6 } is
+                { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true, KnowsPacks: false });
+        Probe.Check("schema 7 knows everything",
+            new LibrarySnapshot { SchemaVersion = 7 } is
+                { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true, KnowsPacks: true });
+        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 7);
+
+        // Prehistorik 1+2 and Quake are packs: no build on the content system, an installer their
+        // own downlink refuses (403/404), and both of their games sitting in the library already.
+        Probe.Group("Packs duplicate games the library owns separately");
+        var quake = Game(1435828198, "Quake");
+        var quakeEnhanced = Game(1739637082, "Quake Enhanced");
+        var quakePack = Game(1440166133, "Quake") with
+        {
+            IsPack = true,
+            IncludedGames = [1435828198, 1739637082],
+        };
+        var full = new LibrarySnapshot { Games = [quake, quakeEnhanced, quakePack] };
+        Probe.Check("a pack whose games are all here is a duplicate",
+            full.PackDuplicates(quakePack).Select(g => g.Id).ToList() is [1435828198, 1739637082]);
+        Probe.Check("the games themselves are not duplicates",
+            full.PackDuplicates(quake).Count == 0);
+
+        // The pack is then the only copy of those games there is, so it has to be downloaded.
+        var partial = new LibrarySnapshot { Games = [quake, quakePack] };
+        Probe.Check("a pack missing one of its games is not a duplicate",
+            partial.PackDuplicates(quakePack).Count == 0);
+        Probe.Check("a pack GOG lists no contents for is not a duplicate",
+            new LibrarySnapshot { Games = [quake, quakePack with { IncludedGames = [] }] }
+                .PackDuplicates(quakePack with { IncludedGames = [] }).Count == 0);
+        Probe.Check("an ordinary game that names contents is still not a pack",
+            new LibrarySnapshot { Games = [quake, quakePack with { IsPack = false }] }
+                .PackDuplicates(quakePack with { IsPack = false }).Count == 0);
+
+        Probe.Group("Pack ids come out of the v2 links");
+        var links = System.Text.Json.JsonSerializer.Deserialize<GameLinks>(
+            """
+            {"_links":{"includesGames":[
+                {"href":"https://api.gog.com/v2/games/1435828198?locale=en-US"},
+                {"href":"https://api.gog.com/v2/games/1739637082?locale=en-US"}],
+              "self":{"href":"https://api.gog.com/v2/games/1440166133?locale=en-US"}}}
+            """)!;
+        Probe.Check("the id is the last path segment, not the query",
+            links.IncludedGameIds().ToList() is [1435828198, 1739637082]);
+        Probe.Check("a game with no includesGames yields nothing",
+            System.Text.Json.JsonSerializer.Deserialize<GameLinks>("""{"_links":{"self":{"href":"x"}}}""")!
+                .IncludedGameIds().Count == 0);
 
         Probe.Group("Argument parsing");
         // A switch that swallows the next word turns `download --all witcher` into a request
@@ -96,4 +142,11 @@ public static class LibraryProbes
         Probe.Check("TiB is the largest unit",
             CommandLine.Bytes(5L * 1024 * 1024 * 1024 * 1024).EndsWith("TiB"));
     }
+
+    private static LibraryEntry Game(long id, string title) => new()
+    {
+        Id = id,
+        Title = title,
+        Slug = title.ToLowerInvariant().Replace(' ', '_'),
+    };
 }

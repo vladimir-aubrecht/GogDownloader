@@ -57,6 +57,36 @@ public static class DownloadCommands
                 "Note: this snapshot predates the early-access flag, so an (EA) game will be " +
                 "named without it. Refresh it with: gogdl library sync");
 
+        if (!snapshot.KnowsPacks)
+            Console.Error.WriteLine(
+                "Note: this snapshot predates pack detection, so a compilation of games the " +
+                "library already has will be downloaded twice. Refresh it with: gogdl library sync");
+
+        // A pack is a container GOG never installs: it grants the games it contains as products
+        // of their own, and those are what a backup holds. Downloading it as well would archive
+        // the same games twice, and some packs refuse their own installer outright (403/404).
+        var packs = games
+            .Select(game => (Pack: game, Contents: snapshot.PackDuplicates(game)))
+            .Where(p => p.Contents.Count > 0)
+            .ToList();
+
+        if (packs.Count > 0)
+        {
+            var duplicated = packs.Select(p => p.Pack.Id).ToHashSet();
+            games = games.Where(g => !duplicated.Contains(g.Id)).ToList();
+
+            foreach (var (pack, contents) in packs)
+                Console.Error.WriteLine(
+                    $"Skipping {pack.Title}: a pack of games the library has on its own " +
+                    $"({string.Join(", ", contents.Select(c => c.Title))}).");
+
+            if (games.Count == 0)
+            {
+                Console.Error.WriteLine("Nothing left to download.");
+                return 0;
+            }
+        }
+
         var downloadOptions = new DownloadOptions
         {
             OutputRoot = Path.GetFullPath(flags.GetValueOrDefault("out", "gog-backup")),

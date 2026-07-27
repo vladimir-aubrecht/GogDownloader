@@ -131,9 +131,15 @@ public static class LibraryCommands
         Console.WriteLine($"Snapshot from {snapshot.SyncedAt.ToLocalTime():yyyy-MM-dd HH:mm}, {snapshot.Games.Count} games.");
         Console.WriteLine();
 
+        // Packs of games the library has on their own are never downloaded, so counting them
+        // here would promise bytes no backup will ever fetch.
+        var duplicatePacks = snapshot.Games.Where(g => snapshot.PackDuplicates(g).Count > 0).ToList();
+        var duplicated = duplicatePacks.Select(g => g.Id).ToHashSet();
+
         foreach (var platform in Enum.GetValues<GamePlatform>())
         {
             var present = snapshot.Games
+                .Where(g => !duplicated.Contains(g.Id))
                 .Select(g => g.Platforms.GetValueOrDefault(platform))
                 .OfType<PlatformAvailability>()
                 .ToList();
@@ -155,13 +161,18 @@ public static class LibraryCommands
 
         // Windows without a depot is extracted with innoextract, so say how many need it.
         var needsInnoExtract = snapshot.Games
-            .Count(g => g.Platforms.Values.Any(p => p.NeedsInnoExtract));
+            .Count(g => !duplicated.Contains(g.Id) && g.Platforms.Values.Any(p => p.NeedsInnoExtract));
 
         Console.WriteLine($"Titles needing innoextract: {needsInnoExtract}");
 
+        Console.WriteLine($"Packs skipped as duplicates (their games are owned separately): {duplicatePacks.Count}");
+        foreach (var pack in duplicatePacks)
+            Console.WriteLine($"  {pack.Title}");
+
         // What is left over: macOS installers, which are neither a depot nor Inno Setup.
         var unsupported = snapshot.Games
-            .Where(g => g.Platforms.Count > 0 && g.Platforms.Values.All(p => !p.CanBackUp))
+            .Where(g => !duplicated.Contains(g.Id)
+                        && g.Platforms.Count > 0 && g.Platforms.Values.All(p => !p.CanBackUp))
             .ToList();
 
         Console.WriteLine($"Titles that cannot be backed up at all: {unsupported.Count}");

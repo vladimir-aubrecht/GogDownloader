@@ -79,6 +79,16 @@ public sealed record LibraryEntry
     /// </summary>
     public List<DlcRef> Dlcs { get; init; } = [];
 
+    /// <summary>
+    /// GOG's `game_type: "pack"`: a compilation sold as its own product. Galaxy never installs
+    /// one — it has no build on the content system — and the games it contains are granted as
+    /// separate products in the same library.
+    /// </summary>
+    public bool IsPack { get; init; }
+
+    /// <summary>Product ids this pack contains. Empty for an ordinary game.</summary>
+    public List<long> IncludedGames { get; init; } = [];
+
     /// <summary>Directory on disk. Never derived from the title — see CLAUDE.md.</summary>
     public string DirectoryName => $"{Slug}__{Id}";
 }
@@ -86,7 +96,7 @@ public sealed record LibraryEntry
 public sealed record LibrarySnapshot
 {
     /// <summary>Bumped when a sync starts recording something older snapshots lack.</summary>
-    public const int CurrentSchema = 6;
+    public const int CurrentSchema = 7;
 
     /// <summary>Absent in snapshots written before schema versioning, hence 0.</summary>
     public int SchemaVersion { get; init; }
@@ -103,11 +113,43 @@ public sealed record LibrarySnapshot
     /// <summary>Schema 4 added the early-access flag, which names the archive for GameVault.</summary>
     public bool KnowsEarlyAccess => SchemaVersion >= 4;
 
+    /// <summary>
+    /// Schema 7 added the pack flag and the ids a pack contains. Without it every pack looks
+    /// like an ordinary game, and a batch tries to download compilations of games it already has.
+    /// </summary>
+    public bool KnowsPacks => SchemaVersion >= 7;
+
     public DateTimeOffset SyncedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<LibraryEntry> Games { get; init; } = [];
 
     /// <summary>Games that failed to load — one bad game must not fail the whole sync.</summary>
     public Dictionary<long, string> Failures { get; init; } = [];
+
+    private Dictionary<long, LibraryEntry>? _byId;
+
+    /// <summary>
+    /// The games a pack duplicates, or empty when it duplicates nothing. Owning a pack grants
+    /// its games as products of their own, and those are what Galaxy installs — so a pack whose
+    /// games are all in this library is content already backed up under their own names. Some
+    /// packs will not even serve their own installer: Prehistorik 1+2 answers 403 and Quake 404,
+    /// while both of their games download fine.
+    /// </summary>
+    public IReadOnlyList<LibraryEntry> PackDuplicates(LibraryEntry game)
+    {
+        if (!game.IsPack || game.IncludedGames.Count == 0) return [];
+
+        _byId ??= Games.ToDictionary(g => g.Id);
+
+        var contents = new List<LibraryEntry>(game.IncludedGames.Count);
+        foreach (var id in game.IncludedGames)
+        {
+            // A pack whose games are not in the library is the only copy of them there is.
+            if (!_byId.TryGetValue(id, out var included)) return [];
+            contents.Add(included);
+        }
+
+        return contents;
+    }
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -242,6 +284,12 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
                 };
         }
 
+        // Which games a pack contains is worth one extra request; a library holds a handful of
+        // packs, and without the list a batch downloads compilations of games it already has.
+        var included = product.IsPack
+            ? (await api.GetIncludedGameIdsAsync(id, ct)).ToList()
+            : [];
+
         return new LibraryEntry
         {
             Id = product.Id,
@@ -250,6 +298,8 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
             Platforms = platforms,
             EarlyAccess = product.InDevelopment?.Active ?? false,
             Dlcs = dlcs,
+            IsPack = product.IsPack,
+            IncludedGames = included,
         };
     }
 

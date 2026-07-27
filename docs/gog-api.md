@@ -52,6 +52,23 @@ The access token is short-lived (roughly an hour), the refresh token is long-liv
 | List of owned `gameId`s | `GET {GOG_EMBED}/user/data/games` |
 | Game details + offline installers | `GET {GOG_EMBED}/account/gameDetails/{id}.json` |
 | Product data | `GET {GOG_API}/products/{id}` (`?expand=…`) |
+| Games a pack contains | `GET {GOG_API}/v2/games/{id}?locale=en` → `_links.includesGames[].href` |
+
+### Packs are containers, not games
+
+`GET {GOG_API}/products/{id}` returns `game_type: "pack"` (and `is_installable: false`) for a
+compilation sold as its own product. Verified 2026-07-27 on Prehistorik 1+2 (`1430913339`),
+Quake (`1440166133`) and Heroes of Might and Magic 5: Bundle (`1207659022`):
+
+- A pack **never has a build**: `/os/windows/builds?generation=2` and `generation=1` both answer
+  `total_count: 0`. Galaxy installs the games it contains, which the account owns as separate
+  products — `1430912792` + `1430913246` for Prehistorik, `1435828198` + `1739637082` for Quake.
+- A pack still lists offline installers in `downloads.installers`, but its own
+  `downlink/installer/…` may refuse them: Prehistorik 1+2 answers **403**, Quake **404**, while
+  HoMM5: Bundle serves its four parts fine. So the installers cannot be relied on either.
+- Only the **v2** endpoint knows the contents. `_links.includesGames[]` holds URLs, so the ids
+  have to be taken from the last path segment (`…/v2/games/1435828198?locale=en-US`). v1
+  `expand=expanded_dlcs` does not list them, and the catalog only surfaces the pack itself.
 
 ## Launch metadata
 

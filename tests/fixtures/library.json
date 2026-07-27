@@ -1,5 +1,5 @@
 {
-  "SchemaVersion": 6,
+  "SchemaVersion": 7,
   "SyncedAt": "2026-07-09T17:52:00+00:00",
   "Failures": {},
   "Games": [
@@ -77,6 +77,21 @@
           "Installers": [],
           "DownloadSize": 2097152,
           "InstalledSize": 2097152
+        }
+      }
+    },
+    {
+      "Id": 1430913339,
+      "Title": "Prehistorik 1+2",
+      "Slug": "prehistorik_12",
+      "EarlyAccess": false,
+      "Dlcs": [],
+      "IsPack": true,
+      "IncludedGames": [1207666073, 1207662883],
+      "Platforms": {
+        "Windows": {
+          "Depot": null,
+          "Installers": [{ "Language": "en", "Version": null, "TotalSize": 40894464 }]
         }
       }
     }

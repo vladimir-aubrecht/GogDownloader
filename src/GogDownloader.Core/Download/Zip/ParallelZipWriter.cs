@@ -42,6 +42,15 @@ public static class ParallelZipWriter
 
     private sealed record Entry(string FullPath, string Name, bool IsDirectory, long Size, DateTime Modified)
     {
+        /// <summary>
+        /// Written with no compression at all. A directory has no data, and an empty file must
+        /// not claim to be deflated: `DeflateStream` that is never written to emits nothing, and
+        /// a zero-byte deflate stream is not a stream — it lacks the final block. `ZipFile` and
+        /// `ZipArchiveEntry.Open` read such an entry as empty without complaint, but Info-ZIP,
+        /// 7-Zip and Windows Explorer reject it ("invalid compressed data to inflate").
+        /// </summary>
+        public bool IsStored => IsDirectory || Size == 0;
+
         /// <summary>Exactly one of these is set for a file entry.</summary>
         public string? PartPath { get; set; }
 
@@ -80,7 +89,8 @@ public static class ParallelZipWriter
 
         Task<Entry> Start(Entry entry) => Task.Run(async () =>
         {
-            if (entry.IsDirectory) return entry;
+            // An empty file has nothing to compress, and is stored — see Entry.IsStored.
+            if (entry.IsStored) return entry;
 
             await cores.WaitAsync(ct);
             try
@@ -228,7 +238,7 @@ public static class ParallelZipWriter
         writer.Write(LocalHeaderSignature);
         writer.Write((ushort)(zip64 ? 45 : 20));
         writer.Write(Utf8NameFlag);
-        writer.Write(entry.IsDirectory ? Stored : Deflated);
+        writer.Write(entry.IsStored ? Stored : Deflated);
         writer.Write(DosTime(entry.Modified));
         writer.Write(DosDate(entry.Modified));
         writer.Write(entry.Crc);
@@ -268,7 +278,7 @@ public static class ParallelZipWriter
             writer.Write((ushort)45);                       // version made by
             writer.Write((ushort)(zip64 ? 45 : 20));        // version needed
             writer.Write(Utf8NameFlag);
-            writer.Write(entry.IsDirectory ? Stored : Deflated);
+            writer.Write(entry.IsStored ? Stored : Deflated);
             writer.Write(DosTime(entry.Modified));
             writer.Write(DosDate(entry.Modified));
             writer.Write(entry.Crc);

@@ -118,4 +118,18 @@ expect "diff parks packs of their own"  "Packs, skipped as duplicates"    diffcm
 expect "diff counts duplicate packs"    "1 duplicate pack"                diffcmd --platform windows
 
 echo
+echo "== verify against the fixture backup directory =="
+verifycmd() { dotnet run --project src/GogDownloader.Cli -- verify --out "$BACKUP" "$@"; }
+
+# Both manifests name an archive nobody ever wrote. Saying "sound" about a file that is not
+# there would be the one answer worse than an error.
+expect "verify notices an archive is gone"  "the archive is gone"          verifycmd
+expect "verify counts what it checked"      "0 sound, 0 broken, 2 missing" verifycmd
+expect "verify says how to rewrite them"    "--force --platform windows"   verifycmd
+expect "verify --slugs feeds a download"    "faster_than_light"            verifycmd --slugs
+expect "verify searches by title"           "1 archive"                    verifycmd witcher
+expect "verify needs a backup directory"    "No such backup directory"     \
+    dotnet run --project src/GogDownloader.Cli -- verify --out "$BACKUP/nope"
+
+echo
 echo "All checks passed."

@@ -36,6 +36,8 @@ public static class CommandLine
                 => await DownloadCommands.RunAsync(args, flags, ct),
             _ when command.StartsWith("diff", StringComparison.Ordinal)
                 => await DiffCommands.RunAsync(args, flags, ct),
+            _ when command.StartsWith("verify", StringComparison.Ordinal)
+                => await VerifyCommands.RunAsync(args, flags, ct),
             _ => Usage(),
         };
     }
@@ -82,6 +84,11 @@ public static class CommandLine
                 --all                          also list what is up to date
                 --slugs                        print slugs of missing and outdated games
 
+              verify [text]                   check the archives in a backup directory
+                --out DIR                      default ./gog-backup
+                --deep                         inflate every entry and recompute its CRC
+                --slugs                        print slugs of the archives to rewrite
+
             Any command: --snapshot FILE       use this library snapshot (or $GOGDL_SNAPSHOT)
             """);
         return 1;
@@ -93,7 +100,7 @@ public static class CommandLine
     /// </summary>
     private static readonly HashSet<string> Switches = new(StringComparer.OrdinalIgnoreCase)
     {
-        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "no-reuse", "no-launcher", "dry-run", "verbose",
+        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "no-reuse", "no-launcher", "dry-run", "verbose", "deep",
     };
 
     public static Dictionary<string, string> ParseFlags(string[] args)

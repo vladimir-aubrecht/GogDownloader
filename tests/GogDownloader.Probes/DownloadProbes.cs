@@ -1,6 +1,8 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using GogDownloader.Core;
 using GogDownloader.Core.Api;
 using GogDownloader.Core.Content;
@@ -259,6 +261,77 @@ public static class DownloadProbes
             ArchiveCache.Open(corrupt, files) is null);
     }
 
+    /// <summary>Whether .NET reads an entry without raising — it does not check much.</summary>
+    private static async Task<bool> Inflates(string zipPath, string entryName)
+    {
+        try
+        {
+            using var zip = ZipFile.OpenRead(zipPath);
+            await using var stream = zip.GetEntry(entryName)!.Open();
+            await stream.CopyToAsync(Stream.Null);
+            return true;
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Rewrites one entry's compression method to deflate in both headers, reproducing the
+    /// archives this tool wrote for empty files before 0.39.0.
+    /// </summary>
+    private static void MarkAsDeflated(string zipPath, string entryName)
+    {
+        var bytes = File.ReadAllBytes(zipPath);
+        var name = Encoding.UTF8.GetBytes(entryName);
+
+        for (var i = 0; i + 46 <= bytes.Length; i++)
+        {
+            var signature = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i));
+
+            // The method sits at +8 in a local header and at +10 in a central one; the name
+            // follows the fixed part, whose length differs between the two.
+            var (methodAt, nameAt) = signature switch
+            {
+                0x04034b50 => (i + 8, i + 30),
+                0x02014b50 => (i + 10, i + 46),
+                _ => (-1, -1),
+            };
+
+            if (methodAt < 0 || nameAt + name.Length > bytes.Length) continue;
+            if (!bytes.AsSpan(nameAt, name.Length).SequenceEqual(name)) continue;
+
+            BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(methodAt), 8);
+        }
+
+        File.WriteAllBytes(zipPath, bytes);
+    }
+
+    /// <summary>
+    /// Compression method and compressed size per entry, read out of the local headers.
+    /// `ZipArchiveEntry` does not expose the method, and the method is exactly what was wrong.
+    /// </summary>
+    private static Dictionary<string, (ushort Method, uint CompressedSize)> LocalHeaders(string zipPath)
+    {
+        var bytes = File.ReadAllBytes(zipPath);
+        var headers = new Dictionary<string, (ushort, uint)>(StringComparer.Ordinal);
+
+        for (var i = 0; i + 30 <= bytes.Length; i++)
+        {
+            if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i)) != 0x04034b50) continue;
+
+            var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(i + 26));
+            if (i + 30 + nameLength > bytes.Length) continue;
+
+            headers[Encoding.UTF8.GetString(bytes, i + 30, nameLength)] = (
+                BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(i + 8)),
+                BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i + 18)));
+        }
+
+        return headers;
+    }
+
     private static async Task ZipAndPublishAsync(string root)
     {
         var staging = Path.Combine(root, "staging");
@@ -266,6 +339,10 @@ public static class DownloadProbes
         Directory.CreateDirectory(Path.Combine(staging, "empty"));
         Directory.CreateDirectory(Path.Combine(staging, "gog-support", "99"));
         File.WriteAllText(Path.Combine(staging, "gog-support", "99", "readme.txt"), "hi");
+
+        // Depots ship empty files (Duke Nukem 3D's CDROM.INI), and one of those is what made a
+        // finished archive unreadable to everything except .NET.
+        File.WriteAllText(Path.Combine(staging, "game", "CDROM.INI"), "");
 
         // Poorly compressible, like a game's packed assets: compressing it takes long enough
         // that a cancellation observed only between files would be observed far too late.
@@ -308,6 +385,29 @@ public static class DownloadProbes
             Probe.Check("an empty directory survives as a trailing-slash entry", names.Contains("empty/"));
             Probe.Check("non-empty directories get no entry of their own", !names.Contains("game/"));
             Probe.Check("the large file is intact", zip.GetEntry("game/data.pak")!.Length == 96L * 1024 * 1024);
+            Probe.Check("an empty file is an entry of its own", names.Contains("game/CDROM.INI"));
+        }
+
+        // A DeflateStream that is never written to emits nothing, so an empty file used to be
+        // recorded as deflated with a zero-byte payload — which is not a deflate stream at all.
+        // .NET read it back as empty and the verifier saw a matching CRC, while Info-ZIP said
+        // "invalid compressed data to inflate" and Windows Explorer refused the archive.
+        Probe.Group("Empty entries are stored, never deflated");
+        var headers = LocalHeaders(zipPath);
+        Probe.Check("an empty file is stored",
+            headers["game/CDROM.INI"].Method == 0, headers["game/CDROM.INI"].Method.ToString());
+        Probe.Check("an empty directory is stored", headers["empty/"].Method == 0);
+        Probe.Check("a real file is still deflated", headers["game/data.pak"].Method == 8);
+
+        using (var zip = ZipFile.OpenRead(zipPath))
+        {
+            var deflatedAndEmpty = zip.Entries
+                .Where(e => headers.TryGetValue(e.FullName, out var h) && h is { Method: 8, CompressedSize: 0 })
+                .Select(e => e.FullName)
+                .ToList();
+
+            Probe.Check("no entry claims deflate over an empty payload",
+                deflatedAndEmpty.Count == 0, string.Join(", ", deflatedAndEmpty));
         }
         Probe.Check("zipping reports progress", reported.Count >= 3);
 
@@ -374,6 +474,38 @@ public static class DownloadProbes
         try { await ArchiveVerifier.VerifyAsync(zipPath, missing); }
         catch (ArchiveCorruptException) { mismatched = true; }
         Probe.Check("an archive that does not match staging is rejected", mismatched);
+
+        // `verify` checks archives whose staging is long gone, so it reads the headers the
+        // framework hides and, on demand, inflates everything.
+        Probe.Group("Checking an archive on its own");
+        Probe.Check("a sound archive has nothing to report", ArchiveCheck.Headers(zipPath).Count == 0);
+        Probe.Check("a zip64 archive reads too",
+            ZipInspector.ReadCentralDirectory(zip64Path).Any(e => e.Name == "game/data.pak" && e.Size == 96L * 1024 * 1024));
+        Probe.Check("the central directory holds every entry",
+            ZipInspector.ReadCentralDirectory(manyZip).Count == 200);
+
+        // The archives written before 0.39.0: the empty entry says deflate and carries nothing.
+        // Flipping the method back is the only way to reproduce them now.
+        var legacy = Path.Combine(root, "legacy-empty-deflate.zip");
+        File.Copy(zipPath, legacy, overwrite: true);
+        MarkAsDeflated(legacy, "game/CDROM.INI");
+
+        var found = ArchiveCheck.Headers(legacy);
+        Probe.Check("an empty deflated entry is caught",
+            found is [{ Entry: "game/CDROM.INI" }], string.Join(", ", found.Select(f => f.Entry)));
+        Probe.Check("and .NET still reads it without complaint, which is why the check exists",
+            await Inflates(legacy, "game/CDROM.INI"));
+
+        var deep = await ArchiveCheck.DeepAsync(corrupt);
+        Probe.Check("a deep check catches a flipped byte", deep.Count > 0,
+            string.Join(", ", deep.Select(d => d.Entry)));
+        Probe.Check("a deep check passes a sound archive", (await ArchiveCheck.DeepAsync(zipPath)).Count == 0);
+
+        var notAZip = Path.Combine(root, "not-a-zip.bin");
+        await File.WriteAllTextAsync(notAZip, "PK, but no");
+        var rejected = false;
+        try { ArchiveCheck.Headers(notAZip); } catch (ZipFormatException) { rejected = true; }
+        Probe.Check("a file that is not a ZIP is reported, not thrown at the user", rejected);
 
         Probe.Group("Compression ratio is unchanged by parallelism");
         var oneThread = Path.Combine(root, "one.zip");

@@ -53,7 +53,7 @@ anything.
 | `download <slug\|id>` | Back up one game into a zip |
 | `download --all [text]` | Back up every matching game (filters: `--platform`, `--dlc`, `--dry-run`) |
 | `diff [text]` | Compare a backup directory against the library: what is missing or outdated |
-| `verify [text]` | Check the archives already in a backup directory (`--deep` inflates every entry) |
+| `verify [text]` | Check the archives already in a backup directory (`--fix` repairs, `--deep` inflates every entry) |
 
 Useful download flags: `--platform windows\|mac\|linux`, `--language en`, `--out DIR`,
 `--staging DIR`, `--connections N`, `--limit-rate 5M`, `--compression-threads N`, `--force`,

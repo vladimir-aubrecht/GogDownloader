@@ -87,6 +87,7 @@ public static class CommandLine
               verify [text]                   check the archives in a backup directory
                 --out DIR                      default ./gog-backup
                 --deep                         inflate every entry and recompute its CRC
+                --fix                          repair in place what does not need downloading
                 --slugs                        print slugs of the archives to rewrite
 
             Any command: --snapshot FILE       use this library snapshot (or $GOGDL_SNAPSHOT)
@@ -100,7 +101,7 @@ public static class CommandLine
     /// </summary>
     private static readonly HashSet<string> Switches = new(StringComparer.OrdinalIgnoreCase)
     {
-        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "no-reuse", "no-launcher", "dry-run", "verbose", "deep",
+        "version", "all", "depot", "dlc", "slugs", "force", "clean", "keep", "no-verify", "no-reuse", "no-launcher", "dry-run", "verbose", "deep", "fix",
     };
 
     public static Dictionary<string, string> ParseFlags(string[] args)

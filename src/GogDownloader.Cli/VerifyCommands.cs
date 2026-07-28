@@ -26,6 +26,7 @@ public static class VerifyCommands
         var search = GameFilter.SearchText(args, skip: 1);
         var deep = flags.ContainsKey("deep");
         var slugsOnly = flags.ContainsKey("slugs");
+        var fix = flags.ContainsKey("fix");
 
         var archives = await FindArchivesAsync(outputRoot, search, ct);
         if (archives.Count == 0)
@@ -44,6 +45,8 @@ public static class VerifyCommands
 
         var broken = new List<Archive>();
         var missing = new List<Archive>();
+        var repaired = new List<Archive>();
+        var repairable = false;
         var checkedCount = 0;
 
         foreach (var archive in archives)
@@ -74,7 +77,33 @@ public static class VerifyCommands
 
             if (problems.Count == 0) continue;
 
+            // Header damage is four bytes per entry and no payload moves, so an archive whose
+            // every problem is of that kind is mended here rather than downloaded again.
+            if (fix && problems.All(p => p.Repairable))
+            {
+                try
+                {
+                    var entries = ArchiveRepair.Repair(archive.Path);
+                    repaired.Add(archive);
+
+                    if (!slugsOnly)
+                    {
+                        Clear();
+                        Console.WriteLine($"{archive.Title} — repaired {entries.Count} " +
+                                          $"{(entries.Count == 1 ? "entry" : "entries")}: {string.Join(", ", entries.Take(5))}" +
+                                          (entries.Count > 5 ? ", ..." : ""));
+                    }
+
+                    continue;
+                }
+                catch (Exception e) when (e is ArchiveRepairException or ZipFormatException or IOException)
+                {
+                    problems = [.. problems, new ArchiveProblem("", $"repair refused: {e.Message}")];
+                }
+            }
+
             broken.Add(archive);
+            repairable |= problems.All(p => p.Repairable);
             if (!slugsOnly) Report(archive, problems);
         }
 
@@ -85,17 +114,24 @@ public static class VerifyCommands
             return broken.Count + missing.Count > 0 ? 1 : 0;
         }
 
-        Console.Error.Write($"\r{new string(' ', 78)}\r");
+        Clear();
         Console.WriteLine();
         Console.WriteLine(
-            $"{archives.Count - broken.Count - missing.Count} sound, {broken.Count} broken, {missing.Count} missing.");
+            $"{archives.Count - broken.Count - missing.Count - repaired.Count} sound, " +
+            (fix ? $"{repaired.Count} repaired, " : "") +
+            $"{broken.Count} broken, {missing.Count} missing.");
 
         if (broken.Count + missing.Count == 0) return 0;
 
-        // Re-downloading is cheap: the old archive is still a cache, so every file that is
-        // intact comes off the disk rather than the network.
+        // The four-byte repair costs nothing, so an archive that only needs it should not be
+        // downloaded again for want of knowing.
+        if (repairable)
+            Console.WriteLine("Some of this is header damage. Mend it in place with: --fix");
+
+        // What is left is damage to the payload, which only a fresh copy can undo. Re-downloading
+        // is still cheap: the old archive is the reuse cache, so intact files come off the disk.
         Console.WriteLine();
-        Console.WriteLine("Rewrite them with:");
+        Console.WriteLine("Download these again:");
         foreach (var archive in broken.Concat(missing).DistinctBy(a => (a.Slug, a.Platform)))
             Console.WriteLine(
                 $"  gogdl download {archive.Slug} --force --platform {archive.Platform.ApiName()} --out \"{outputRoot}\"");
@@ -103,9 +139,12 @@ public static class VerifyCommands
         return 1;
     }
 
+    /// <summary>Wipes the progress line so a report does not land on top of it.</summary>
+    private static void Clear() => Console.Error.Write($"\r{new string(' ', 78)}\r");
+
     private static void Report(Archive archive, List<ArchiveProblem> problems)
     {
-        Console.Error.Write($"\r{new string(' ', 78)}\r");
+        Clear();
         Console.WriteLine($"{archive.Title} — {Path.GetFileName(archive.Path)}");
 
         foreach (var problem in problems.Take(10))

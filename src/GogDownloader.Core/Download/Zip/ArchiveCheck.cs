@@ -3,7 +3,11 @@ using System.IO.Compression;
 
 namespace GogDownloader.Core.Download.Zip;
 
-public sealed record ArchiveProblem(string Entry, string Problem);
+/// <summary>
+/// One thing wrong with an archive. <see cref="Repairable"/> marks the damage that lives in
+/// the headers alone, which <see cref="ArchiveRepair"/> can undo without the network.
+/// </summary>
+public sealed record ArchiveProblem(string Entry, string Problem, bool Repairable = false);
 
 /// <summary>
 /// Checks a finished archive on its own, without the staging directory it was made from —
@@ -27,7 +31,8 @@ public static class ArchiveCheck
         {
             if (entry.IsEmptyDeflate)
                 problems.Add(new ArchiveProblem(entry.Name,
-                    "deflated with an empty payload — no unzip can read it"));
+                    "deflated with an empty payload — no unzip can read it",
+                    Repairable: entry is { Size: 0, CompressedSize: 0, Crc: 0 }));
 
             // A directory entry with content, or a file whose sizes contradict each other, is
             // not something this writer can produce; report it rather than trust it.

@@ -3,8 +3,18 @@ using System.Text;
 
 namespace GogDownloader.Core.Download.Zip;
 
-/// <summary>What the central directory records about one entry.</summary>
-public sealed record ZipEntryHeader(string Name, ushort Method, long CompressedSize, long Size, uint Crc)
+/// <summary>
+/// What the central directory records about one entry, and where both of its headers sit —
+/// a repair has to patch the same field in each.
+/// </summary>
+public sealed record ZipEntryHeader(
+    string Name,
+    ushort Method,
+    long CompressedSize,
+    long Size,
+    uint Crc,
+    long CentralHeaderOffset,
+    long LocalHeaderOffset)
 {
     public bool IsDirectory => Name.EndsWith('/');
 
@@ -60,6 +70,7 @@ public static class ZipInspector
             var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(directory.AsSpan(at + 28));
             var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(directory.AsSpan(at + 30));
             var commentLength = BinaryPrimitives.ReadUInt16LittleEndian(directory.AsSpan(at + 32));
+            long localOffset = BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(at + 42));
 
             if (at + 46 + nameLength + extraLength + commentLength > directory.Length)
                 throw new ZipFormatException("A central directory entry runs past the directory.");
@@ -67,9 +78,10 @@ public static class ZipInspector
             var name = Encoding.UTF8.GetString(directory, at + 46, nameLength);
             var extra = directory.AsSpan(at + 46 + nameLength, extraLength);
 
-            // A size of 0xFFFFFFFF is a promise that the real one is in the Zip64 extra field,
-            // in the order size, compressed size — only for the fields that overflowed.
-            if (uncompressed == uint.MaxValue || compressed == uint.MaxValue)
+            // A value of 0xFFFFFFFF is a promise that the real one is in the Zip64 extra field,
+            // in the order size, compressed size, local header offset — but only the fields
+            // that overflowed are there at all, so they have to be consumed in that order.
+            if (uncompressed == uint.MaxValue || compressed == uint.MaxValue || localOffset == uint.MaxValue)
             {
                 var zip64 = FindExtra(extra, 0x0001);
                 var read = 0;
@@ -81,10 +93,16 @@ public static class ZipInspector
                 }
 
                 if (compressed == uint.MaxValue && zip64.Length >= read + 8)
+                {
                     compressed = BinaryPrimitives.ReadInt64LittleEndian(zip64[read..]);
+                    read += 8;
+                }
+
+                if (localOffset == uint.MaxValue && zip64.Length >= read + 8)
+                    localOffset = BinaryPrimitives.ReadInt64LittleEndian(zip64[read..]);
             }
 
-            entries.Add(new ZipEntryHeader(name, method, compressed, uncompressed, crc));
+            entries.Add(new ZipEntryHeader(name, method, compressed, uncompressed, crc, offset + at, localOffset));
             at += 46 + nameLength + extraLength + commentLength;
         }
 

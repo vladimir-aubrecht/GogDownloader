@@ -125,11 +125,13 @@ verifycmd() { dotnet run --project src/GogDownloader.Cli -- verify --out "$BACKU
 # there would be the one answer worse than an error.
 expect "verify notices an archive is gone"  "the archive is gone"          verifycmd
 expect "verify counts what it checked"      "0 sound, 0 broken, 2 missing" verifycmd
-expect "verify says how to rewrite them"    "--force --platform windows"   verifycmd
+expect "verify says how to download again" "--force --platform windows"   verifycmd
 expect "verify --slugs feeds a download"    "faster_than_light"            verifycmd --slugs
 expect "verify searches by title"           "1 archive"                    verifycmd witcher
 expect "verify needs a backup directory"    "No such backup directory"     \
     dotnet run --project src/GogDownloader.Cli -- verify --out "$BACKUP/nope"
+# --fix mends headers; an archive that is not there is not header damage.
+expect "--fix cannot conjure a missing archive" "0 repaired, 0 broken, 2 missing"  verifycmd --fix
 
 echo
 echo "All checks passed."

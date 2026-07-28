@@ -261,6 +261,19 @@ public static class DownloadProbes
             ArchiveCache.Open(corrupt, files) is null);
     }
 
+    /// <summary>Where an entry's local header starts, by name.</summary>
+    private static int IndexOfLocalHeader(byte[] bytes, string entryName)
+    {
+        var name = Encoding.UTF8.GetBytes(entryName);
+
+        for (var i = 0; i + 30 + name.Length <= bytes.Length; i++)
+            if (BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i)) == 0x04034b50
+                && bytes.AsSpan(i + 30, name.Length).SequenceEqual(name))
+                return i;
+
+        throw new InvalidOperationException($"No local header for {entryName}.");
+    }
+
     /// <summary>Whether .NET reads an entry without raising — it does not check much.</summary>
     private static async Task<bool> Inflates(string zipPath, string entryName)
     {
@@ -495,6 +508,37 @@ public static class DownloadProbes
             found is [{ Entry: "game/CDROM.INI" }], string.Join(", ", found.Select(f => f.Entry)));
         Probe.Check("and .NET still reads it without complaint, which is why the check exists",
             await Inflates(legacy, "game/CDROM.INI"));
+
+        Probe.Check("and it is marked as repairable", found is [{ Repairable: true }]);
+
+        // Four bytes per entry, no payload moves: a repaired archive has to come out byte for
+        // byte the same as one the fixed writer would have produced.
+        var beforeRepair = await File.ReadAllBytesAsync(legacy);
+        var mended = ArchiveRepair.Repair(legacy);
+        Probe.Check("repairing names the entry it mended", mended is ["game/CDROM.INI"]);
+        Probe.Check("a repaired archive is clean", ArchiveCheck.Headers(legacy).Count == 0);
+        var afterRepair = await File.ReadAllBytesAsync(legacy);
+        var written = await File.ReadAllBytesAsync(zipPath);
+        Probe.Check("a repaired archive equals a correctly written one", afterRepair.SequenceEqual(written));
+        Probe.Check("only the method changed",
+            beforeRepair.Length == new FileInfo(legacy).Length);
+        Probe.Check("a sound archive has nothing to repair", ArchiveRepair.Repair(zipPath).Count == 0);
+        Probe.Check("the repaired entries still read", await Inflates(legacy, "game/CDROM.INI"));
+        Probe.Check("and so does everything else", (await ArchiveCheck.DeepAsync(legacy)).Count == 0);
+
+        // The central directory is what the repair trusts; if the local header disagrees, this
+        // is not the defect it looks like and the four bytes must not be written.
+        var mismatch = Path.Combine(root, "mismatched-headers.zip");
+        File.Copy(zipPath, mismatch, overwrite: true);
+        MarkAsDeflated(mismatch, "game/CDROM.INI");
+        var raw2 = await File.ReadAllBytesAsync(mismatch);
+        var localAt = IndexOfLocalHeader(raw2, "game/CDROM.INI");
+        BinaryPrimitives.WriteUInt32LittleEndian(raw2.AsSpan(localAt + 18), 7);  // a payload that is not there
+        await File.WriteAllBytesAsync(mismatch, raw2);
+
+        var refused = false;
+        try { ArchiveRepair.Repair(mismatch); } catch (ArchiveRepairException) { refused = true; }
+        Probe.Check("a repair that does not add up is refused", refused);
 
         var deep = await ArchiveCheck.DeepAsync(corrupt);
         Probe.Check("a deep check catches a flipped byte", deep.Count > 0,

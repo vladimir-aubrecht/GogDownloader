@@ -192,3 +192,8 @@ next run resumes it. Free space is checked before downloading, not discovered an
 - `tests/GogDownloader.Probes` — a dependency-free probe suite; `scripts/check.sh` runs it.
 - `docs/gog-api.md`, `docs/gamevault.md` — verified references for the two undocumented APIs.
 - `scripts/` — `check.sh`, `release.sh`, `vendor-ref.sh`, and the GameVault sync script above.
+
+## License
+
+[MIT](LICENSE). `innoextract`, which path C shells out to, is GPLv2 and stays a separate
+program — installing it is up to you, and it is not part of this project.

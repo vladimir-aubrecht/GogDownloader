@@ -6,7 +6,11 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <InvariantGlobalization>true</InvariantGlobalization>
 
+    <Authors>Vladimir Aubrecht</Authors>
+    <Copyright>Copyright (c) 2026 Vladimir Aubrecht</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
     <!-- A push is a release. Every push bumps the version. -->
-    <Version>0.40.0</Version>
+    <Version>0.41.0</Version>
   </PropertyGroup>
 </Project>

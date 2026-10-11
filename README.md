@@ -42,6 +42,18 @@ dotnet run --project src/GogDownloader.Cli -- download --all --platform windows 
 Add `--dry-run` to `download --all` to see the selection and total size without downloading
 anything.
 
+Owned DLC is included in the base game's Galaxy backup. When a library also lists that DLC
+as a separate product, selecting it (by slug, search, or `--all`) selects the base game instead
+and explains the substitution. The base game is downloaded only once. This requires a known
+base game with a depot for the selected platform; installer-only backups do not merge DLC.
+
+After upgrading from a version that produced tiny standalone DLC archives, run `library sync`
+to refresh the per-platform DLC information, then use `diff` or download the base game again.
+A backup missing owned DLC is rebuilt even if its build number is unchanged, reusing verified
+files from the previous ZIP. A missing or size-mismatched ZIP is also downloaded again.
+Old standalone DLC archives are left untouched; check the completed base backup before removing
+them. `verify --deep` checks ZIP integrity, not whether a standalone DLC contains the full game.
+
 ## Commands
 
 | Command | What it does |
@@ -184,6 +196,11 @@ Work happens in a staging directory; only an atomic move puts the zip into place
 `.gogdl.json` manifest is written last — until it exists, the game counts as not downloaded, so a
 crash never leaves a corrupt "done" state. Ctrl+C asks what to do with a partial download and the
 next run resumes it. Free space is checked before downloading, not discovered an hour in.
+
+Staging needs space for both the unpacked game and the ZIP being built. `--out` on a large NAS
+does not provide space for the default local staging directory; use `--staging DIR` to choose
+another disk. On Linux, the check uses that directory's filesystem, and transfers to a different
+mount use an interruptible copy followed by an atomic rename at the destination.
 
 ## Repository layout
 

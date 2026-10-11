@@ -9,6 +9,29 @@ namespace GogDownloader.Cli;
 /// </summary>
 public static class GameFilter
 {
+    /// <summary>
+    /// A DLC installer is not a portable game. Select its base game, whose depot includes
+    /// owned DLC, even when a search or an explicit slug selected only the expansion.
+    /// </summary>
+    public static List<LibraryEntry> ResolveDownloads(
+        LibrarySnapshot snapshot, IEnumerable<LibraryEntry> games, GamePlatform platform,
+        Action<LibraryEntry, IReadOnlyList<LibraryEntry>>? redirected = null)
+    {
+        var result = new Dictionary<long, LibraryEntry>();
+        foreach (var game in games)
+        {
+            var parents = snapshot.DlcParents(game, platform);
+            if (parents.Count == 0)
+                result.TryAdd(game.Id, game);
+            else
+            {
+                redirected?.Invoke(game, parents);
+                foreach (var parent in parents) result.TryAdd(parent.Id, parent);
+            }
+        }
+        return result.Values.ToList();
+    }
+
     public static bool TryPlatform(Dictionary<string, string> flags, out GamePlatform? platform)
     {
         platform = null;

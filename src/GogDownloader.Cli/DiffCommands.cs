@@ -25,6 +25,9 @@ public static class DiffCommands
         var search = GameFilter.SearchText(args, skip: 1);
 
         var games = GameFilter.Apply(snapshot, search, platform, depotOnly: false, dlcOnly: false);
+        games = GameFilter.ResolveDownloads(snapshot, games, platform, (dlc, parents) =>
+            Console.Error.WriteLine(
+                $"{dlc.Title} is DLC; checking {string.Join(", ", parents.Select(p => p.Title))}."));
         var rows = new List<Row>();
 
         foreach (var game in games)
@@ -48,10 +51,14 @@ public static class DiffCommands
                 rows.Add(new Row(State.Unsupported, game, availability.HasInstaller ? "macOS installer, not extractable" : "no depot, no installer", size));
             else if (backup is null)
                 rows.Add(new Row(State.Missing, game, "not backed up", size));
+            else if (!backup.HasArchive(directory))
+                rows.Add(new Row(State.Missing, game, "archive missing or its size changed", size));
             else if (availability.Depot is not null && backup.BuildId != availability.Depot.BuildId)
                 rows.Add(new Row(State.Outdated, game,
                     $"have {Describe(backup.VersionName, backup.BuildId)}, " +
                     $"GOG has {Describe(availability.Depot.VersionName, availability.Depot.BuildId)}", size));
+            else if (!backup.ContainsDlcs(game.DlcsFor(platform).Select(d => d.ProductId)))
+                rows.Add(new Row(State.Outdated, game, "owned DLC missing from the backup", size));
             else
                 rows.Add(new Row(State.Current, game, backup.ArchiveName, size));
         }

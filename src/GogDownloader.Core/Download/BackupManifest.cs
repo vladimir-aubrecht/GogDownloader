@@ -9,6 +9,20 @@ public sealed record BackedUpFile(string Md5, long Size);
 /// <summary>One platform of one game: one zip.</summary>
 public sealed record PlatformBackup
 {
+    public bool HasArchive(string gameDirectory)
+    {
+        var archive = new FileInfo(Path.Combine(gameDirectory, ArchiveName));
+        return archive.Exists && archive.Length == ArchiveSize;
+    }
+
+    public bool ContainsDlcs(IEnumerable<string> expected) => expected.All(Dlcs.Contains);
+
+    public bool Matches(string gameDirectory, string buildId, string language, IEnumerable<string> dlcs) =>
+        BuildId == buildId
+        && string.Equals(Language, language, StringComparison.OrdinalIgnoreCase)
+        && ContainsDlcs(dlcs)
+        && HasArchive(gameDirectory);
+
     public required string BuildId { get; init; }
     public string? VersionName { get; init; }
     public required string Language { get; init; }

@@ -165,6 +165,10 @@ public static class CommandLine
         var snapshot = await LibrarySnapshot.LoadAsync(SnapshotPath(flags), ct);
         if (snapshot is null)
             Console.Error.WriteLine("No snapshot. Run first: gogdl library sync");
+        else if (!snapshot.KnowsPlatformDlcs)
+            Console.Error.WriteLine(
+                "Note: this snapshot has no per-platform DLC information. Run gogdl library sync " +
+                "before repairing DLC backups; the old shared DLC list is used until then.");
         return snapshot;
     }
 

@@ -18,6 +18,9 @@ public sealed record PlatformAvailability
     /// <summary>Offline installers from api.gog.com.</summary>
     public List<InstallerRef> Installers { get; init; } = [];
 
+    /// <summary>Owned DLC in this platform's depot. Null in snapshots older than schema 8.</summary>
+    public List<DlcRef>? Dlcs { get; init; }
+
     /// <summary>
     /// Bytes actually transferred from the CDN: the sum of `compressedSize` over the depots
     /// that would be downloaded. Assumes the default language, see <see cref="LibrarySync"/>.
@@ -79,6 +82,12 @@ public sealed record LibraryEntry
     /// </summary>
     public List<DlcRef> Dlcs { get; init; } = [];
 
+    /// <summary>Old snapshots only have the shared list; installer paths do not merge DLC.</summary>
+    public IReadOnlyList<DlcRef> DlcsFor(GamePlatform platform) =>
+        Platforms.GetValueOrDefault(platform) is { HasDepot: true } availability
+            ? availability.Dlcs ?? Dlcs
+            : [];
+
     /// <summary>
     /// GOG's `game_type: "pack"`: a compilation sold as its own product. Galaxy never installs
     /// one — it has no build on the content system — and the games it contains are granted as
@@ -96,7 +105,7 @@ public sealed record LibraryEntry
 public sealed record LibrarySnapshot
 {
     /// <summary>Bumped when a sync starts recording something older snapshots lack.</summary>
-    public const int CurrentSchema = 7;
+    public const int CurrentSchema = 8;
 
     /// <summary>Absent in snapshots written before schema versioning, hence 0.</summary>
     public int SchemaVersion { get; init; }
@@ -119,6 +128,8 @@ public sealed record LibrarySnapshot
     /// </summary>
     public bool KnowsPacks => SchemaVersion >= 7;
 
+    public bool KnowsPlatformDlcs => SchemaVersion >= 8;
+
     public DateTimeOffset SyncedAt { get; init; } = DateTimeOffset.UtcNow;
     public List<LibraryEntry> Games { get; init; } = [];
 
@@ -126,6 +137,15 @@ public sealed record LibrarySnapshot
     public Dictionary<long, string> Failures { get; init; } = [];
 
     private Dictionary<long, LibraryEntry>? _byId;
+
+    /// <summary>
+    /// Depot-backed games that include this owned DLC. Installer-only and Linux backups do
+    /// not merge DLC, so they must never be used as substitutes for a separate download.
+    /// </summary>
+    public IReadOnlyList<LibraryEntry> DlcParents(LibraryEntry game, GamePlatform platform) =>
+        Games.Where(parent => parent.Id != game.Id
+            && parent.Platforms.GetValueOrDefault(platform)?.HasDepot == true
+            && parent.DlcsFor(platform).Any(dlc => dlc.ProductId == game.Id.ToString())).ToList();
 
     /// <summary>
     /// The games a pack duplicates, or empty when it duplicates nothing. Owning a pack grants
@@ -258,9 +278,8 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
                 ? (0L, 0L)
                 : await MeasureAsync(build, platform, owned, ct);
 
-            // The DLC list is the same for every platform, so the first manifest wins.
-            if (dlcs.Count == 0 && build.Manifest is not null)
-                dlcs = await OwnedDlcsAsync(build, owned, ct);
+            var platformDlcs = build.Manifest is null ? [] : await OwnedDlcsAsync(build, owned, ct);
+            dlcs = dlcs.Concat(platformDlcs).DistinctBy(d => d.ProductId).ToList();
 
             platforms[platform] = new PlatformAvailability
             {
@@ -268,6 +287,7 @@ public sealed class LibrarySync(GogApiClient api, ContentClient content, int max
                 Installers = installers.GetValueOrDefault(platform, []),
                 DownloadSize = sizes.Item1,
                 InstalledSize = sizes.Item2,
+                Dlcs = platformDlcs,
             };
         }
 

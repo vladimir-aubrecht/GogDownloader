@@ -174,6 +174,42 @@ The DLC list therefore never has to be fetched separately: take `products[]` fro
 manifest, drop `baseProductId`, and intersect the rest with the owned ids from
 `{GOG_EMBED}/user/data/games`.
 
+### DLC products must be backed up with their base game
+
+Verified 2026-10-11 using the public Windows repository manifests:
+
+| Base game | Base product id | Included DLC product id |
+|---|---|---|
+| Baldur's Gate 3 | `1456460669` | Digital Deluxe Edition content: `1157299235` |
+| Factorio | `1238653230` | Space Age: `1831417704` |
+| Titan Quest Anniversary Edition | `1196955511` | Atlantis: `1486258753` |
+
+The BG3 Deluxe entry is bonus content classified as DLC by GOG, not a substitute for the base
+game. The base Windows build `60063145568665078` lists 155,452,104,297 installed bytes and
+136,617,252,392 compressed bytes for English, excluding bonus products. The downloader's
+initial staging estimate for that base game alone is 292,069,356,689 bytes (about 272 GiB).
+An empty base-game backup directory is not explained by the separate Deluxe product; the
+original failure requires its download log or a confirmed free-space shortfall.
+
+Space Age's own product reports `game_type: "dlc"` and offline installers, but no Windows
+build in either depot generation. Its data is in the base Factorio repository. Treating every
+owned product as a standalone game therefore sends this expansion through Inno Setup even
+though the base game's depot already supplies it.
+
+Reported standalone Windows backups of BG3 Digital Deluxe and Titan Quest Atlantis had
+`installer-...` build ids and ZIP sizes of 435,278 and 418,808 bytes respectively. Neither
+manifest recorded DLC or a launch executable. This establishes the installer path, not the
+precise reason extraction omitted data; the original extraction output is unavailable. The
+old `InstalledSize` was three times the installer size, merely a disk-space estimate, and
+cannot be used as evidence that extraction succeeded.
+
+Resolve known DLC products to the depot-backed base game for the requested platform, including
+when a search selects only the expansion. Schema 8 records owned DLC for each platform;
+older snapshots fall back to their shared list and must be refreshed for accurate routing.
+Installer-only and Linux backups do not merge DLC and must not claim to cover it. A matching
+build id alone is insufficient for a completed backup: the archive must still exist at its
+recorded size and include the expected DLC and requested language.
+
 A depot has `manifest` (hash), `productId`, `languages[]`, `osBitness`, `size` and
 `compressedSize`. A depot belongs in the download when `productId` is the base game or an
 owned DLC, **and** `languages` contains `*` or the target language.

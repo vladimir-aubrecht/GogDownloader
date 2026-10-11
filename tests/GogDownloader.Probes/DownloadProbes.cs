@@ -57,6 +57,8 @@ public static class DownloadProbes
             Files = { ["game/x.exe"] = new BackedUpFile("abc", 20) },
         };
         await manifest.SaveAsync(gameDirectory);
+        var completedArchive = Path.Combine(gameDirectory, manifest.Platforms[GamePlatform.Windows].ArchiveName);
+        await File.WriteAllBytesAsync(completedArchive, new byte[10]);
 
         var again = await downloader.RunAsync(game, Options());
         Probe.Check("a finished build is not downloaded twice",
@@ -66,6 +68,16 @@ public static class DownloadProbes
         Probe.Check("--force downloads anyway", await Throws(() => downloader.RunAsync(game, Options() with { Force = true })));
         Probe.Check("a new buildId downloads again",
             await Throws(() => downloader.RunAsync(Game(new BuildRef("build-43", 2, "1.3", "http://x/m")), Options())));
+        Probe.Check("newly owned DLC is not skipped at the same build",
+            await Throws(() => downloader.RunAsync(game with { Dlcs = [new DlcRef("99", "Expansion")] }, Options())));
+        Probe.Check("a different language is not skipped at the same build",
+            await Throws(() => downloader.RunAsync(game, Options() with { Language = "de" })));
+        await File.WriteAllBytesAsync(completedArchive, new byte[5]);
+        Probe.Check("a truncated archive is downloaded again",
+            await Throws(() => downloader.RunAsync(game, Options())));
+        File.Delete(completedArchive);
+        Probe.Check("a manifest without its archive is downloaded again",
+            await Throws(() => downloader.RunAsync(game, Options())));
 
         Probe.Group("Backup manifest");
         var loaded = await BackupManifest.LoadAsync(gameDirectory);

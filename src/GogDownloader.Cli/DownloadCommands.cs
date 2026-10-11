@@ -87,6 +87,10 @@ public static class DownloadCommands
             }
         }
 
+        games = GameFilter.ResolveDownloads(snapshot, games, platform, (dlc, parents) =>
+            Console.Error.WriteLine(
+                $"{dlc.Title} is DLC; backing it up with {string.Join(", ", parents.Select(p => p.Title))}."));
+
         var downloadOptions = new DownloadOptions
         {
             OutputRoot = Path.GetFullPath(flags.GetValueOrDefault("out", "gog-backup")),

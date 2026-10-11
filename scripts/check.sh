@@ -92,7 +92,7 @@ cat > "$BACKUP/the_witcher_3_wild_hunt__1207658930/.gogdl.json" <<'JSON'
 { "SchemaVersion":1, "GameId":1207658930, "Slug":"the_witcher_3_wild_hunt", "Title":"The Witcher 3",
   "Platforms": { "Windows": { "BuildId":"b1", "VersionName":"1.32", "Language":"en",
     "ArchiveName":"w3.zip", "ArchiveSize":1, "InstalledSize":1,
-    "CompletedAt":"2026-07-09T10:00:00+00:00", "Dlcs":[], "SkippedDependencies":[], "Files":{} } } }
+    "CompletedAt":"2026-07-09T10:00:00+00:00", "Dlcs":["1640424747","1495134380"], "SkippedDependencies":[], "Files":{} } } }
 JSON
 
 # Outdated: the snapshot has b3.
@@ -104,6 +104,10 @@ cat > "$BACKUP/faster_than_light__1207666073/.gogdl.json" <<'JSON'
 JSON
 
 diffcmd() { dotnet run --project src/GogDownloader.Cli -- diff "$@" --out "$BACKUP" --snapshot tests/fixtures/library.json; }
+
+# A completion manifest alone is not a backup. These fixture archives have the recorded size.
+printf x > "$BACKUP/the_witcher_3_wild_hunt__1207658930/w3.zip"
+printf x > "$BACKUP/faster_than_light__1207666073/ftl.zip"
 
 expect "diff finds an outdated build"   "have 1.5 (b0), GOG has 1.6 (b3)"  diffcmd --platform windows
 expect "diff counts what is current"    "1 up to date"                     diffcmd --platform windows
@@ -119,6 +123,7 @@ expect "diff counts duplicate packs"    "1 duplicate pack"                diffcm
 
 echo
 echo "== verify against the fixture backup directory =="
+rm "$BACKUP/the_witcher_3_wild_hunt__1207658930/w3.zip" "$BACKUP/faster_than_light__1207666073/ftl.zip"
 verifycmd() { dotnet run --project src/GogDownloader.Cli -- verify --out "$BACKUP" "$@"; }
 
 # Both manifests name an archive nobody ever wrote. Saying "sound" about a file that is not

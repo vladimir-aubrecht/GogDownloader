@@ -95,6 +95,13 @@ public static class LibraryCommands
         // A single hit is usually someone inspecting one game before downloading it.
         if (games is [var only])
         {
+            foreach (var target in only.Platforms.Keys.Where(p => platform is null || p == platform))
+            {
+                var parents = snapshot.DlcParents(only, target);
+                if (parents.Count > 0)
+                    Console.WriteLine(
+                        $"  {target.ApiName()}: DLC backed up with {string.Join(", ", parents.Select(p => p.Slug))}.");
+            }
             if (GameFilter.Depots(only, platform).Select(p => only.Platforms[p]).FirstOrDefault() is { } depot)
             {
                 Console.WriteLine();
@@ -138,8 +145,8 @@ public static class LibraryCommands
 
         foreach (var platform in Enum.GetValues<GamePlatform>())
         {
-            var present = snapshot.Games
-                .Where(g => !duplicated.Contains(g.Id))
+            var present = GameFilter.ResolveDownloads(snapshot,
+                    snapshot.Games.Where(g => !duplicated.Contains(g.Id)), platform)
                 .Select(g => g.Platforms.GetValueOrDefault(platform))
                 .OfType<PlatformAvailability>()
                 .ToList();
@@ -161,7 +168,8 @@ public static class LibraryCommands
 
         // Windows without a depot is extracted with innoextract, so say how many need it.
         var needsInnoExtract = snapshot.Games
-            .Count(g => !duplicated.Contains(g.Id) && g.Platforms.Values.Any(p => p.NeedsInnoExtract));
+            .Count(g => !duplicated.Contains(g.Id) && g.Platforms.Any(p =>
+                p.Value.NeedsInnoExtract && snapshot.DlcParents(g, p.Key).Count == 0));
 
         Console.WriteLine($"Titles needing innoextract: {needsInnoExtract}");
 

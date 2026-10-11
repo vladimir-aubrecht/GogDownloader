@@ -63,7 +63,11 @@ public static class LibraryProbes
         Probe.Check("schema 7 knows everything",
             new LibrarySnapshot { SchemaVersion = 7 } is
                 { KnowsDlcs: true, KnowsDepotSizes: true, KnowsEarlyAccess: true, KnowsPacks: true });
-        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 7);
+        Probe.Check("schema 7 has no per-platform DLC information",
+            !new LibrarySnapshot { SchemaVersion = 7 }.KnowsPlatformDlcs);
+        Probe.Check("schema 8 knows per-platform DLC",
+            new LibrarySnapshot { SchemaVersion = 8 }.KnowsPlatformDlcs);
+        Probe.Check($"CurrentSchema is {LibrarySnapshot.CurrentSchema}", LibrarySnapshot.CurrentSchema == 8);
 
         // Prehistorik 1+2 and Quake are packs: no build on the content system, an installer their
         // own downlink refuses (403/404), and both of their games sitting in the library already.

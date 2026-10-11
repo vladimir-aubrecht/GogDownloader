@@ -125,7 +125,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         var existing = await BackupManifest.LoadAsync(gameDirectory, ct);
         if (!options.Force
             && existing?.Platforms.GetValueOrDefault(options.Platform) is { } done
-            && done.BuildId == buildId)
+            && done.Matches(gameDirectory, buildId, options.Language,
+                game.DlcsFor(options.Platform).Select(d => d.ProductId)))
         {
             return new DownloadResult(DownloadOutcome.AlreadyDone,
                 Path.Combine(gameDirectory, done.ArchiveName),
@@ -181,7 +182,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
                 if (!options.Force
                     && existing?.Platforms.GetValueOrDefault(options.Platform) is { } current
-                    && current.BuildId == fresh.BuildId)
+                    && current.Matches(gameDirectory, fresh.BuildId, options.Language,
+                        game.DlcsFor(options.Platform).Select(d => d.ProductId)))
                 {
                     return new DownloadResult(DownloadOutcome.AlreadyDone,
                         Path.Combine(gameDirectory, current.ArchiveName),
@@ -311,7 +313,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 Language = options.Language,
                 ArchiveName = archiveName,
                 ArchiveSize = new FileInfo(archivePath).Length,
-                InstalledSize = installedSize,
+                InstalledSize = DirectorySize(staging),
                 Dlcs = plan?.DlcIds ?? [],
                 SkippedDependencies = plan?.Dependencies ?? [],
                 LaunchExecutable = launchExecutable,
@@ -392,7 +394,9 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
     {
         try
         {
-            var free = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(path))!).AvailableFreeSpace;
+            // On Unix the full path selects the filesystem for statvfs. Taking its path root
+            // would always query /, even for staging on a large disk mounted under /mnt.
+            var free = new DriveInfo(Path.GetFullPath(path)).AvailableFreeSpace;
             return free < needed ? needed - free : null;
         }
         catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException)
@@ -418,11 +422,46 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         }
     }
 
-    /// <summary>A rename is only atomic within one volume.</summary>
-    internal static bool SameVolume(string a, string b) => string.Equals(
-        Path.GetPathRoot(Path.GetFullPath(a)),
-        Path.GetPathRoot(Path.GetFullPath(b)),
-        StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// A rename is only atomic within one mounted filesystem. On Unix every absolute path
+    /// starts with /, including a NAS and a separate staging disk. If the mount cannot be
+    /// established, use the interruptible copy-to-temp path rather than assume a local move.
+    /// </summary>
+    internal static bool SameVolume(string a, string b)
+    {
+        var first = VolumeFor(a);
+        var second = VolumeFor(b);
+        return first is not null && second is not null && string.Equals(first, second,
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+    }
+
+    private static string? VolumeFor(string path)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            // A symlink or junction in any ancestor can cross volumes without changing the
+            // lexical path. Conservatively copy through .tmp rather than guess its target.
+            for (var ancestor = fullPath; ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))
+                if (Directory.Exists(ancestor)
+                    && (File.GetAttributes(ancestor) & FileAttributes.ReparsePoint) != 0)
+                    return null;
+
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return DriveInfo.GetDrives()
+                .Select(drive => Path.TrimEndingDirectorySeparator(Path.GetFullPath(drive.Name)))
+                .Where(mount => string.Equals(fullPath, mount, comparison)
+                    || fullPath.StartsWith(Path.EndsInDirectorySeparator(mount)
+                        ? mount : mount + Path.DirectorySeparatorChar, comparison))
+                .OrderByDescending(mount => mount.Length)
+                .FirstOrDefault();
+        }
+        catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Moves the finished zip into place. A plain rename when staging shares the target's

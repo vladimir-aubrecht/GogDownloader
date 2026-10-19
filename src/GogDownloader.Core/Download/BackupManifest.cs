@@ -9,6 +9,18 @@ public sealed record BackedUpFile(string Md5, long Size);
 /// <summary>One platform of one game: one zip.</summary>
 public sealed record PlatformBackup
 {
+    public const int CurrentContentRevision = 1;
+
+    /// <summary>
+    /// Revision 1 applies DLC file overrides and binds installer caches to their source.
+    /// Older DLC/Windows installer backups may contain wrong bytes despite valid ZIP checksums.
+    /// </summary>
+    public int ContentRevision { get; init; }
+
+    public bool RequiresContentRefresh(GamePlatform platform) => ContentRevision < CurrentContentRevision
+        && (Dlcs.Count > 0 || (platform == GamePlatform.Windows
+            && BuildId.StartsWith("installer-", StringComparison.Ordinal)));
+
     public bool HasArchive(string gameDirectory)
     {
         var archive = new FileInfo(Path.Combine(gameDirectory, ArchiveName));
@@ -17,10 +29,11 @@ public sealed record PlatformBackup
 
     public bool ContainsDlcs(IEnumerable<string> expected) => expected.All(Dlcs.Contains);
 
-    public bool Matches(string gameDirectory, string buildId, string language, IEnumerable<string> dlcs) =>
+    public bool Matches(string gameDirectory, string buildId, string language, IEnumerable<string> dlcs, GamePlatform platform) =>
         BuildId == buildId
         && string.Equals(Language, language, StringComparison.OrdinalIgnoreCase)
         && ContainsDlcs(dlcs)
+        && !RequiresContentRefresh(platform)
         && HasArchive(gameDirectory);
 
     public required string BuildId { get; init; }

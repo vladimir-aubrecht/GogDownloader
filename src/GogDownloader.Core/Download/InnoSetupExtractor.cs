@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text.Json;
 using GogDownloader.Core.Api;
 using GogDownloader.Core.Content;
 
@@ -57,7 +59,29 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
     {
         if (!IsAvailable) throw new InnoExtractMissingException();
 
+        var setup = await DownloadAsync(installer, installerDirectory, progress, ct);
+        progress?.Report(new DownloadProgress("extract", 0, 0, 0, 1));
+        await ExtractAsync(setup, staging, scratch, ct);
+
+        // The zip is made of whatever is in staging, so the installer must not be in it.
+        Directory.Delete(installerDirectory, recursive: true);
+    }
+
+    /// <summary>
+    /// Keep completed parts only for this exact installer. Renamed slices from another build
+    /// often have identical sizes, so size alone cannot establish that they are reusable.
+    /// </summary>
+    internal async Task<string> DownloadAsync(
+        Installer installer, string installerDirectory, IProgress<DownloadProgress>? progress, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var identity = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(installer)));
+        var marker = Path.Combine(installerDirectory, ".identity");
+        if (Directory.Exists(installerDirectory)
+            && (!File.Exists(marker) || await File.ReadAllTextAsync(marker, ct) != identity))
+            Directory.Delete(installerDirectory, recursive: true);
         Directory.CreateDirectory(installerDirectory);
+        await File.WriteAllTextAsync(marker, identity, ct);
 
         var total = installer.Files.Sum(f => f.Size);
         long downloaded = 0;
@@ -89,15 +113,22 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
                     response.EnsureSuccessStatusCode();
 
                     await using var source = await response.Content.ReadAsStreamAsync(ct);
-                    await using var destination = File.Create(path);
-                    var buffer = new byte[1 << 20];
-                    int read;
-                    while ((read = await source.WithStallTimeoutAsync(buffer, ct)) > 0)
+                    // Only a fully received part gets its final name. A cancelled write with
+                    // the expected length must not be mistaken for a reusable completed part.
+                    await using (var destination = File.Create(path + ".tmp"))
                     {
-                        await destination.WriteAsync(buffer.AsMemory(0, read), ct);
-                        downloaded += read;
-                        progress?.Report(new DownloadProgress("download", downloaded, total, parts.Count, installer.Files.Count));
+                        var buffer = new byte[1 << 20];
+                        int read;
+                        while ((read = await source.WithStallTimeoutAsync(buffer, ct)) > 0)
+                        {
+                            await destination.WriteAsync(buffer.AsMemory(0, read), ct);
+                            downloaded += read;
+                            progress?.Report(new DownloadProgress("download", downloaded, total, parts.Count, installer.Files.Count));
+                        }
+                        if (destination.Length != file.Size)
+                            throw new IOException($"Installer part {name}: expected {file.Size} bytes, got {destination.Length}.");
                     }
+                    File.Move(path + ".tmp", path, overwrite: true);
                     break;
                 }
                 catch (Exception e) when (attempt < 5 && !ct.IsCancellationRequested
@@ -108,14 +139,8 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
             }
         }
 
-        var setup = parts.FirstOrDefault(p => p.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        return parts.FirstOrDefault(p => p.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                     ?? throw new InnoExtractFailedException("The installer has no .exe to extract.");
-
-        progress?.Report(new DownloadProgress("extract", 0, 0, 0, 1));
-        await ExtractAsync(setup, staging, scratch, ct);
-
-        // The zip is made of whatever is in staging, so the installer must not be in it.
-        Directory.Delete(installerDirectory, recursive: true);
     }
 
     /// <summary>

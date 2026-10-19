@@ -126,7 +126,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         if (!options.Force
             && existing?.Platforms.GetValueOrDefault(options.Platform) is { } done
             && done.Matches(gameDirectory, buildId, options.Language,
-                game.DlcsFor(options.Platform).Select(d => d.ProductId)))
+                game.DlcsFor(options.Platform).Select(d => d.ProductId), options.Platform))
         {
             return new DownloadResult(DownloadOutcome.AlreadyDone,
                 Path.Combine(gameDirectory, done.ArchiveName),
@@ -183,7 +183,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 if (!options.Force
                     && existing?.Platforms.GetValueOrDefault(options.Platform) is { } current
                     && current.Matches(gameDirectory, fresh.BuildId, options.Language,
-                        game.DlcsFor(options.Platform).Select(d => d.ProductId)))
+                        game.DlcsFor(options.Platform).Select(d => d.ProductId), options.Platform))
                 {
                     return new DownloadResult(DownloadOutcome.AlreadyDone,
                         Path.Combine(gameDirectory, current.ArchiveName),
@@ -308,6 +308,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
             manifest.Platforms[options.Platform] = new PlatformBackup
             {
+                ContentRevision = PlatformBackup.CurrentContentRevision,
                 BuildId = buildId,
                 VersionName = versionName,
                 Language = options.Language,
@@ -506,19 +507,51 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
     }
 
     /// <summary>
-    /// A file left by an interrupted run counts as done only when its size matches and, when the
-    /// depot gives us a hash, its content does too. Trusting size alone would keep a file
-    /// truncated exactly at a chunk boundary.
+    /// A file left by an interrupted run counts as done only when its size and hash match.
+    /// Without a whole-file hash, equal size cannot distinguish an old base file from its DLC
+    /// replacement (or a partial write), so it must be fetched again.
     /// </summary>
     private static bool AlreadyMaterialized(string fullPath, PlannedFile file)
     {
         if (!File.Exists(fullPath)) return false;
         if (new FileInfo(fullPath).Length != file.Size) return false;
-        if (file.Identity is not { } expected) return true;
+        if (file.Identity is not { } expected) return false;
 
         using var stream = File.OpenRead(fullPath);
         var actual = Convert.ToHexStringLower(MD5.HashData(stream));
         return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The entire staging tree will be zipped. Remove paths absent from the current plan,
+    /// including spellings left by an older merger that selected DLC before the base game.
+    /// Exact casing matters even when the final game will run on a case-insensitive disk.
+    /// </summary>
+    private static void RemoveUnplannedStaging(string staging, DepotPlan plan, CancellationToken ct)
+    {
+        var files = plan.Files.Select(f => f.RelativePath)
+            .Concat(plan.Links.Select(link => SafeRelative(link.Path)))
+            .ToHashSet(StringComparer.Ordinal);
+        var directories = plan.Directories.Select(SafeRelative).ToHashSet(StringComparer.Ordinal);
+        // Manifests need not list the parents of their files or explicit empty directories.
+        foreach (var path in files.Concat(directories).ToArray())
+            for (var parent = Path.GetDirectoryName(path); !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
+                directories.Add(parent.Replace('\\', '/'));
+
+        foreach (var path in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!files.Contains(Path.GetRelativePath(staging, path).Replace('\\', '/')))
+                File.Delete(path);
+        }
+        // Remove children before their parents; planned empty directories must survive.
+        foreach (var path in Directory.EnumerateDirectories(staging, "*", SearchOption.AllDirectories)
+                     .OrderByDescending(path => path.Length))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!directories.Contains(Path.GetRelativePath(staging, path).Replace('\\', '/')))
+                Directory.Delete(path);
+        }
     }
 
     private async Task MaterializeAsync(
@@ -531,6 +564,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         IProgress<DownloadProgress>? progress,
         CancellationToken ct)
     {
+        if (resuming) RemoveUnplannedStaging(staging, plan, ct);
+
         foreach (var directory in plan.Directories)
             Directory.CreateDirectory(Path.Combine(staging, directory));
 

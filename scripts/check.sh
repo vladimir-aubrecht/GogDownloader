@@ -90,7 +90,7 @@ mkdir -p "$BACKUP/the_witcher_3_wild_hunt__1207658930" "$BACKUP/faster_than_ligh
 # Up to date: build b1 matches the snapshot.
 cat > "$BACKUP/the_witcher_3_wild_hunt__1207658930/.gogdl.json" <<'JSON'
 { "SchemaVersion":1, "GameId":1207658930, "Slug":"the_witcher_3_wild_hunt", "Title":"The Witcher 3",
-  "Platforms": { "Windows": { "BuildId":"b1", "VersionName":"1.32", "Language":"en",
+  "Platforms": { "Windows": { "ContentRevision":1, "BuildId":"b1", "VersionName":"1.32", "Language":"en",
     "ArchiveName":"w3.zip", "ArchiveSize":1, "InstalledSize":1,
     "CompletedAt":"2026-07-09T10:00:00+00:00", "Dlcs":["1640424747","1495134380"], "SkippedDependencies":[], "Files":{} } } }
 JSON

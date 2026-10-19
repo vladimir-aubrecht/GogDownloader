@@ -59,6 +59,8 @@ public static class DiffCommands
                     $"GOG has {Describe(availability.Depot.VersionName, availability.Depot.BuildId)}", size));
             else if (!backup.ContainsDlcs(game.DlcsFor(platform).Select(d => d.ProductId)))
                 rows.Add(new Row(State.Outdated, game, "owned DLC missing from the backup", size));
+            else if (backup.RequiresContentRefresh(platform))
+                rows.Add(new Row(State.Outdated, game, "backup predates DLC/installer content validation", size));
             else
                 rows.Add(new Row(State.Current, game, backup.ArchiveName, size));
         }

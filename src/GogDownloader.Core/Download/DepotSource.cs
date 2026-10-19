@@ -157,6 +157,14 @@ public abstract class ContentSource
         var relative = SafeRelative(path);
         return support ? $"gog-support/{productId}/{relative}" : relative;
     }
+
+    protected static void OverlayFile(Dictionary<string, PlannedFile> files, PlannedFile file)
+    {
+        // Keep the base spelling on case-sensitive staging disks. Otherwise resuming a base
+        // download could leave both game.exe and GAME.exe to collide when the ZIP is unpacked.
+        var path = files.TryGetValue(file.RelativePath, out var previous) ? previous.RelativePath : file.RelativePath;
+        files[path] = file with { RelativePath = path };
+    }
 }
 
 /// <summary>A depot of either generation: signed links, cached per product, refreshed on 401.</summary>
@@ -235,6 +243,9 @@ public sealed class DepotSourceV2(ContentClient content, GogApiClient api, strin
 
         var depots = repository.Depots
             .Where(d => wanted.Contains(d.ProductId) && d.MatchesLanguage(language))
+            // DLC can replace the executable itself (Factorio: Space Age). Apply the base
+            // first even if GOG lists it later, then overlays in their repository order.
+            .OrderBy(d => d.ProductId == repository.BaseProductId ? 0 : 1)
             .ToList();
 
         if (depots.Count == 0) throw new NoDepotForLanguageException(language);
@@ -264,8 +275,7 @@ public sealed class DepotSourceV2(ContentClient content, GogApiClient api, strin
                             offset += chunk.Size;
                         }
 
-                        files.TryAdd(relative,
-                            new PlannedFile(relative, depot.ProductId, item.Size, item.Identity, parts));
+                        OverlayFile(files, new PlannedFile(relative, depot.ProductId, item.Size, item.Identity, parts));
                         break;
                     }
                     case "DepotDirectory":
@@ -327,6 +337,7 @@ public sealed class DepotSourceV1(
             .Where(d => !d.IsRedistributable
                         && d.GameIds.Any(wanted.Contains)
                         && d.MatchesLanguage(language))
+            .OrderBy(d => d.GameIds.Contains(product.RootGameId) ? 0 : 1)
             .ToList();
 
         if (depots.Count == 0) throw new NoDepotForLanguageException(language);
@@ -354,7 +365,7 @@ public sealed class DepotSourceV1(
                 var relative = RelativePathFor(record.Path, productId, record.Support);
                 var part = new PlannedPart(0, record.Offset, record.Size, record.Hash, record.Size);
 
-                files.TryAdd(relative, new PlannedFile(relative, productId, record.Size, record.Hash, [part]));
+                OverlayFile(files, new PlannedFile(relative, productId, record.Size, record.Hash, [part]));
             }
         }
 

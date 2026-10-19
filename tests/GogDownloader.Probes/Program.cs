@@ -8,6 +8,8 @@ ProgressProbes.Run();
 await StartScriptProbes.RunAsync();
 await DownloadProbes.RunAsync();
 await DlcProbes.RunAsync();
+await DepotOverlayProbes.RunAsync();
+await InstallerCacheProbes.RunAsync();
 await StorageProbes.RunAsync();
 
 return Probe.Report();

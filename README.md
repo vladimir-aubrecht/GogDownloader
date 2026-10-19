@@ -54,6 +54,20 @@ files from the previous ZIP. A missing or size-mismatched ZIP is also downloaded
 Old standalone DLC archives are left untouched; check the completed base backup before removing
 them. `verify --deep` checks ZIP integrity, not whether a standalone DLC contains the full game.
 
+DLC files override base-game files at the same path (including the executable in Factorio:
+Space Age). Per-platform `ContentRevision` in `.gogdl.json` records these content validation
+rules. Older backups containing DLC, and older Windows installer-based backups, are reported as outdated
+by `diff` and rebuilt once on the next download, even at the same build. Depot backups reuse
+unchanged verified files from the previous ZIP.
+
+When resuming depot or Linux installer downloads, files without a whole-file content hash are
+downloaded again. Staging is reconciled with the current file plan, removing obsolete paths and
+case-only duplicates while retaining files whose size and hash match.
+
+Interrupted Windows installer downloads only reuse parts belonging to the exact installer
+version, language and file list. Unidentified or mismatched caches are discarded, and `--clean`
+also removes the installer cache. An incomplete part never becomes a reusable completed file.
+
 ## Commands
 
 | Command | What it does |

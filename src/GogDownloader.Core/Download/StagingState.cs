@@ -45,6 +45,9 @@ public sealed record StagingState(string BuildId, string Language, string Platfo
 
         var zip = staging + ".zip";
         if (File.Exists(zip)) File.Delete(zip);
+
+        var installer = staging + ".installer";
+        if (Directory.Exists(installer)) Directory.Delete(installer, recursive: true);
     }
 }
 

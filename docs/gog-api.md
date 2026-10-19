@@ -214,6 +214,27 @@ A depot has `manifest` (hash), `productId`, `languages[]`, `osBitness`, `size` a
 `compressedSize`. A depot belongs in the download when `productId` is the base game or an
 owned DLC, **and** `languages` contains `*` or the target language.
 
+### Overlapping base and DLC files
+
+Verified 2026-10-19 against Factorio Windows build `60131509574317522` (2.1.22): the base
+product `1238653230` and Space Age `1831417704` contain different bytes at
+`bin/x64/factorio.exe` (49,352,656 vs 49,344,464 bytes) and `bin/x64/factorio.pdb`.
+Keeping the first file silently retains the base executable while recording the DLC as installed.
+Apply base depots first, then owned DLC in repository order, replacing colliding files. Preserve
+the base path spelling, and reconcile resumed staging with the exact paths in the current plan:
+an older DLC-first download may have left a different spelling on a case-sensitive disk.
+Generation 1 follows the same base-before-DLC rule using `gameIDs`.
+
+Size alone cannot validate a staged file against an overlay. A file without a whole-file hash
+must be downloaded again, even when its chunks have hashes. Only verified files may be reused;
+unplanned files and directories must not enter the ZIP.
+
+Platform backups with `ContentRevision: 1` apply this rule and validate installer-cache identity.
+Older DLC and Windows installer backups are refreshed once; ZIP CRC checks cannot detect content selected
+from the wrong source. Installer caches bind the installer id, version, OS, language, size and
+file list (part ids, sizes and API downlinks), not the temporary signed download URLs. Only fully
+received parts are renamed out of `.tmp`; a new source or `--clean` invalidates cached parts.
+
 > **Language tags are full codes**, `en-US` and `de-DE`, never `en` or `de`. Comparing the
 > raw string a user typed matches only the `*` depots, and the game downloads as a near-empty
 > archive — this is exactly what happened to Agony, which listed as 44 B. gogdl resolves the

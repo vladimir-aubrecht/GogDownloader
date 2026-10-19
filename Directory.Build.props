@@ -11,6 +11,6 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
 
     <!-- A push is a release. Every push bumps the version. -->
-    <Version>0.42.0</Version>
+    <Version>0.43.0</Version>
   </PropertyGroup>
 </Project>

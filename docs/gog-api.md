@@ -105,6 +105,11 @@ The response has `items[]`; each entry carries `branch` and `repository_manifest
 URL). When `items` is empty the game has no content system support, so the depot path is
 impossible.
 
+Build discovery tries generation 2, then generation 1 only for an empty public build list
+or HTTP 404. Other HTTP errors (including 401/403, 429 and 5xx) must propagate after the HTTP
+handler's retries; they do not prove the game has no depot. Sync records a persistent failure
+instead of silently reclassifying the game as installer-only.
+
 Manifests are **zlib-compressed JSON** (`zlib.decompress(data, 15)`).
 
 ### galaxy_path
@@ -326,6 +331,27 @@ Directory entries end with `/`. A symlink is an entry whose external attributes 
 (`S_ISLNK` of `ext_attrs >> 16`), and its *content* is the link target.
 
 Entries are stored (method 0) or deflated (method 8), and carry a CRC-32 to verify against.
+
+Game file bodies are streamed from HTTP into staging. Keep offsets, compressed lengths and
+installed lengths as 64-bit values throughout; buffering a complete v1 file or Linux entry in a
+`byte[]` imposes a 2 GiB limit and makes concurrent large files exhaust RAM. V1 streams verify
+MD5 incrementally, and Linux streams verify uncompressed length and CRC-32 incrementally while
+reporting compressed bytes. An empty stored entry needs no HTTP range.
+
+Installer transfers use the same rate limiter as Galaxy depot transfers. This includes Linux
+metadata ranges, streamed entry bodies and whole Windows installer parts; throttling remains
+cancellable and accounts for downloaded (compressed) bytes rather than inflated content.
+
+Symlink targets are resolved against the entire planned install tree before downloading.
+Directory aliases expand recursively, including nested links; chained links are independent of
+manifest order. Dangling links and cycles fail rather than silently creating incomplete backups.
+The free-space estimate includes bytes duplicated by dereferencing links.
+
+Installer identity uses `installer-{normalized-language}-{version}-{total-size}` from the selected
+installer, not the first entry in the product's installer list. Snapshot selection and live
+selection use the same language aliases and English fallback. If the live version differs from
+the snapshot, the build identity, version name, staging state and archive name follow the live
+installer. `diff` compares against the installer selected for the saved backup's requested language.
 
 Curiosity: `linux.py` requests `os/windows/builds` even for a Linux game. I did not investigate
 why — probably to determine the version or whether the title exists. Do not copy this blindly.

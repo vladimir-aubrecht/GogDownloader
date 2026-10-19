@@ -139,4 +139,8 @@ expect "verify needs a backup directory"    "No such backup directory"     \
 expect "--fix cannot conjure a missing archive" "0 repaired, 0 broken, 2 missing"  verifycmd --fix
 
 echo
+echo "== GameVault sync against a fixture API =="
+sh tests/gamevault-sync.sh
+
+echo
 echo "All checks passed."

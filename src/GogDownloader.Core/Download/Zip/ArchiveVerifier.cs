@@ -55,6 +55,8 @@ public static class ArchiveVerifier
                 if (length != entry.Length)
                     throw new ArchiveCorruptException(
                         $"{entry.FullName}: inflated to {length} bytes, header says {entry.Length}.");
+                if (crc != entry.Crc32)
+                    throw new ArchiveCorruptException($"{entry.FullName}: CRC does not match the header.");
 
                 await using var source = File.OpenRead(sourcePath);
                 var (sourceCrc, sourceLength) = await ReadAsync(source, _ => { }, ct);

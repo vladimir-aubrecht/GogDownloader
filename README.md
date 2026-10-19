@@ -68,6 +68,26 @@ Interrupted Windows installer downloads only reuse parts belonging to the exact 
 version, language and file list. Unidentified or mismatched caches are discarded, and `--clean`
 also removes the installer cache. An incomplete part never becomes a reusable completed file.
 
+Resuming an interrupted Inno backup replaces staging with a fresh successful extraction,
+including nested directories. Cancelling extraction terminates the running extractor's process
+tree and cancels output reads, even if a launcher has exited with a descendant holding a pipe.
+Build API outages are reported as errors rather than a missing Galaxy depot.
+
+`--limit-rate` applies to depot content and both installer paths, including Linux installer
+metadata reads. All transfers share the same bandwidth budget and can be cancelled while waiting.
+Archive verification compares content with staging and with the CRC recorded in the ZIP.
+`verify --deep --fix` checks all payloads after repairing headers. When an update renames an
+archive, the previous archive is kept until the new manifest has been saved successfully.
+
+Installer build identities include the selected installer's language, version and size. `diff`
+uses the backup's requested language when comparing installer versions; older installer identities
+are refreshed once. The metadata and archive name follow the live installer actually downloaded.
+
+Directory and chained symlinks are copied as ordinary files and directories. Missing targets and
+cycles fail before an archive is published. Existing archives produced with missing link content
+need a download with `--force`. Generation 1 depot files and Linux installer entries stream into
+staging with bounded buffers, including files larger than 2 GiB.
+
 ## Commands
 
 | Command | What it does |
@@ -220,7 +240,8 @@ mount use an interruptible copy followed by an atomic rename at the destination.
 
 - `src/GogDownloader.Core` — the library: GOG API, content system, download, zip writer.
 - `src/GogDownloader.Cli` — the command-line front end.
-- `tests/GogDownloader.Probes` — a dependency-free probe suite; `scripts/check.sh` runs it.
+- `tests/GogDownloader.Probes` — a dependency-free probe suite; `scripts/check.sh` runs it
+  and the GameVault sync fixture tests (which require `jq`, with HTTP calls mocked).
 - `docs/gog-api.md`, `docs/gamevault.md` — verified references for the two undocumented APIs.
 - `scripts/` — `check.sh`, `release.sh`, `vendor-ref.sh`, and the GameVault sync script above.
 

@@ -65,7 +65,7 @@ login() {
     printf '%s' "$token"
 }
 
-# GameVault's game list, one row per game: "id<TAB>filename<TAB>current_launch_executable".
+# GameVault's game list, one JSON object per game, including both launch fields.
 # Following pagination to the end so a library larger than one page still matches.
 list_games() {
     page=1
@@ -78,12 +78,13 @@ list_games() {
             return 1
         fi
         count=$(printf '%s' "$body" | jq '.data | length')
-        printf '%s' "$body" | jq -r '
-            .data[] | [
-                .id,
-                (.file_path // "" | sub(".*/"; "")),
-                (.user_metadata.launch_executable // "")
-            ] | @tsv'
+        printf '%s' "$body" | jq -c '
+            .data[] | {
+                id,
+                archive: (.file_path // "" | sub(".*/"; "")),
+                executable: (.user_metadata.launch_executable // ""),
+                parameters: (.user_metadata.launch_parameters // "")
+            }'
         [ "$count" -lt 100 ] && break
         page=$((page + 1))
     done
@@ -96,28 +97,31 @@ sync_once() {
 
     tally=$(mktemp)
 
-    # filename -> "id<TAB>current_executable". An unreachable GameVault fails the pass
+    # Match by filename. An unreachable GameVault fails the pass
     # cleanly here instead of mislabelling every archive as "not in GameVault yet".
     games=$(list_games) || { rm -f "$tally"; return 1; }
 
     # Each backup's .gogdl.json can describe several platforms, each its own archive.
-    find "$BACKUP_DIR" -maxdepth 2 -name '.gogdl.json' -type f 2>/dev/null | while read -r manifest; do
-        jq -r '
+    find "$BACKUP_DIR" -maxdepth 2 -name '.gogdl.json' -type f 2>/dev/null | while IFS= read -r manifest; do
+        jq -c '
             .Platforms | to_entries[] | .value
             | select(.LaunchExecutable != null and .LaunchExecutable != "")
-            | [.ArchiveName, .LaunchExecutable, (.LaunchParameters // "")] | @tsv' "$manifest" \
-        | while IFS="$(printf '\t')" read -r archive executable parameters; do
-            row=$(printf '%s\n' "$games" | awk -F'\t' -v n="$archive" '$2 == n { print; exit }')
+            | {archive: .ArchiveName, executable: .LaunchExecutable,
+               parameters: (.LaunchParameters // "")}' "$manifest" \
+        | while IFS= read -r backup; do
+            archive=$(printf '%s' "$backup" | jq -r '.archive')
+            executable=$(printf '%s' "$backup" | jq -r '.executable')
+            row=$(printf '%s\n' "$games" | jq -sc --arg n "$archive" 'map(select(.archive == $n)) | .[0] // empty')
 
             if [ -z "$row" ]; then
                 echo "skipped   $archive (not in GameVault yet)"
                 echo unmatched >>"$tally"; continue
             fi
 
-            id=$(printf '%s' "$row" | cut -f1)
-            have=$(printf '%s' "$row" | cut -f3)
+            id=$(printf '%s' "$row" | jq -r '.id')
 
-            if [ "$have" = "$executable" ]; then
+            if printf '%s' "$row" | jq -e --argjson want "$backup" \
+                    '.executable == $want.executable and .parameters == $want.parameters' >/dev/null; then
                 echo current >>"$tally"; continue
             fi
 
@@ -126,8 +130,11 @@ sync_once() {
                 echo would >>"$tally"; continue
             fi
 
-            payload=$(jq -n --arg e "$executable" --arg p "$parameters" \
-                '{user_metadata: {launch_executable: $e, launch_parameters: (if $p == "" then null else $p end)}}')
+            # Keep paths and arguments as JSON until the request, preserving backslashes,
+            # quotes and whitespace that a TSV/read round-trip would change.
+            payload=$(printf '%s' "$backup" | jq -c \
+                '{user_metadata: {launch_executable: .executable,
+                  launch_parameters: (if .parameters == "" then null else .parameters end)}}')
 
             if curl -fsSL -H "Authorization: Bearer $TOKEN" -X PUT -H 'Content-Type: application/json' \
                     -d "$payload" "$API/games/$id" >/dev/null; then

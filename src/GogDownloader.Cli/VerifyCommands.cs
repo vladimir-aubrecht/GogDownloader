@@ -84,19 +84,27 @@ public static class VerifyCommands
                 try
                 {
                     var entries = ArchiveRepair.Repair(archive.Path);
-                    repaired.Add(archive);
-
-                    if (!slugsOnly)
+                    // A header repair says nothing about the other payloads. Honor --deep
+                    // afterward, and count the archive as repaired only when all checks pass.
+                    problems = ArchiveCheck.Headers(archive.Path);
+                    if (deep && problems.Count == 0)
+                        problems = await ArchiveCheck.DeepAsync(archive.Path, ct: ct);
+                    if (problems.Count == 0)
                     {
-                        Clear();
-                        Console.WriteLine($"{archive.Title} — repaired {entries.Count} " +
-                                          $"{(entries.Count == 1 ? "entry" : "entries")}: {string.Join(", ", entries.Take(5))}" +
-                                          (entries.Count > 5 ? ", ..." : ""));
-                    }
+                        repaired.Add(archive);
 
-                    continue;
+                        if (!slugsOnly)
+                        {
+                            Clear();
+                            Console.WriteLine($"{archive.Title} — repaired {entries.Count} " +
+                                              $"{(entries.Count == 1 ? "entry" : "entries")}: {string.Join(", ", entries.Take(5))}" +
+                                              (entries.Count > 5 ? ", ..." : ""));
+                        }
+
+                        continue;
+                    }
                 }
-                catch (Exception e) when (e is ArchiveRepairException or ZipFormatException or IOException)
+                catch (Exception e) when (e is ArchiveRepairException or ZipFormatException or InvalidDataException or IOException)
                 {
                     problems = [.. problems, new ArchiveProblem("", $"repair refused: {e.Message}")];
                 }

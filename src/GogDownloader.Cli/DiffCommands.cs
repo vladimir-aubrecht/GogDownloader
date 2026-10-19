@@ -57,6 +57,11 @@ public static class DiffCommands
                 rows.Add(new Row(State.Outdated, game,
                     $"have {Describe(backup.VersionName, backup.BuildId)}, " +
                     $"GOG has {Describe(availability.Depot.VersionName, availability.Depot.BuildId)}", size));
+            else if (availability.Depot is null && availability.InstallerFor(backup.Language) is { } installer
+                     && backup.BuildId != installer.BuildId)
+                rows.Add(new Row(State.Outdated, game,
+                    $"have {Describe(backup.VersionName, backup.BuildId)}, " +
+                    $"GOG has {Describe(installer.Version, installer.BuildId)}", size));
             else if (!backup.ContainsDlcs(game.DlcsFor(platform).Select(d => d.ProductId)))
                 rows.Add(new Row(State.Outdated, game, "owned DLC missing from the backup", size));
             else if (backup.RequiresContentRefresh(platform))

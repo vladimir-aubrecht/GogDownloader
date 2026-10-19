@@ -29,8 +29,10 @@ public sealed class InnoExtractFailedException(string message) : Exception(messa
 /// The installer lives *beside* the staging directory, because everything inside staging is
 /// zipped, and it survives an interrupted run so the next one does not download it again.
 /// </summary>
-public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
+public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn, RateLimiter? limiter = null)
 {
+    private readonly RateLimiter _limiter = limiter ?? new(0);
+
     /// <summary>Inno Setup puts the game under `app`; the rest is installer bookkeeping.</summary>
     private const string GameDirectory = "app";
 
@@ -121,6 +123,7 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
                         int read;
                         while ((read = await source.WithStallTimeoutAsync(buffer, ct)) > 0)
                         {
+                            await _limiter.ConsumeAsync(read, ct);
                             await destination.WriteAsync(buffer.AsMemory(0, read), ct);
                             downloaded += read;
                             progress?.Report(new DownloadProgress("download", downloaded, total, parts.Count, installer.Files.Count));
@@ -153,10 +156,11 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
     /// </summary>
     internal static async Task ExtractAsync(string setup, string staging, string scratch, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
         Directory.CreateDirectory(scratch);
 
-        var process = new Process
+        using var process = new Process
         {
             StartInfo = new ProcessStartInfo("innoextract")
             {
@@ -168,20 +172,50 @@ public sealed class InnoSetupExtractor(GogApiClient api, HttpClient cdn)
         };
 
         process.Start();
-        var stderr = await process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
+        // Drain both pipes while the process runs: a full stdout pipe otherwise blocks the
+        // child even while we are waiting for stderr. Output is discarded, diagnostics kept.
+        // A launcher can exit while a descendant still holds a pipe. Cancel the reads too,
+        // otherwise waiting for EOF remains unbounded even after the parent has exited.
+        var stdout = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, ct);
+        var stderr = process.StandardError.ReadToEndAsync(ct);
+        var output = Task.WhenAll(stdout, stderr);
+        try
+        {
+            await process.WaitForExitAsync(ct);
+            await output;
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelling the wait alone leaves innoextract writing into scratch after the
+            // caller has returned (and may already be cleaning it or starting another run).
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { /* it exited between cancellation and Kill */ }
+            await process.WaitForExitAsync(CancellationToken.None);
+            // Observe both readers before disposing their streams. Their cancelled reads
+            // finish without needing EOF from an already orphaned descendant.
+            try { await output; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            throw;
+        }
+        ct.ThrowIfCancellationRequested();
 
         if (process.ExitCode != 0)
         {
             Directory.Delete(scratch, recursive: true);
-            throw new InnoExtractFailedException($"innoextract failed ({process.ExitCode}): {stderr.Trim()}");
+            throw new InnoExtractFailedException($"innoextract failed ({process.ExitCode}): {(await stderr).Trim()}");
         }
 
         var app = Path.Combine(scratch, GameDirectory);
         var root = Directory.Exists(app) ? app : scratch;
 
+        // A previous run may have finished extraction and stopped during zipping. Publish a
+        // complete fresh tree instead of merging it with that staging or colliding with its
+        // directories. Keep the previous staging untouched until extraction has succeeded.
+        if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+        Directory.CreateDirectory(staging);
         foreach (var source in Directory.EnumerateFileSystemEntries(root))
         {
+            ct.ThrowIfCancellationRequested();
             var destination = Path.Combine(staging, Path.GetFileName(source));
             if (Directory.Exists(source)) Directory.Move(source, destination);
             else File.Move(source, destination, overwrite: true);

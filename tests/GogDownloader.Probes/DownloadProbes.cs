@@ -594,11 +594,13 @@ public static class DownloadProbes
 
         var cancelSource = Path.Combine(root, "c.zip");
         File.Copy(zipPath, cancelSource);
-        using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50)))
+        using (var cts = new CancellationTokenSource())
         {
             var cancelTarget = Path.Combine(target, "cancelled.zip");
+            // Cancel after bytes have reached the temporary file, independent of disk speed.
+            var cancelProgress = new SyncProgress<DownloadProgress>(p => { if (p.Bytes > 0) cts.Cancel(); });
             Probe.Check("cross volume: the copy is interruptible",
-                Throws(() => GameDownloader.PublishArchive(cancelSource, cancelTarget, false, null, cts.Token)));
+                Throws(() => GameDownloader.PublishArchive(cancelSource, cancelTarget, false, cancelProgress, cts.Token)));
             Probe.Check("cross volume: a cancelled copy leaves no .tmp", !File.Exists(cancelTarget + ".tmp"));
             Probe.Check("cross volume: a cancelled copy creates no target", !File.Exists(cancelTarget));
             Probe.Check("cross volume: a cancelled copy keeps the source", File.Exists(cancelSource));

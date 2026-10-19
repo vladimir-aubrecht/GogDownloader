@@ -28,8 +28,10 @@ public sealed class InstallerFormatException(string message) : Exception(message
 ///
 /// Verified against heroic-gogdl `gogdl/dl/objects/linux.py`.
 /// </summary>
-public sealed class MojoSetupReader(HttpClient http, string url)
+public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? limiter = null)
 {
+    private readonly RateLimiter _limiter = limiter ?? new(0);
+
     private const uint LocalFileHeader = 0x04034b50;
     private const uint CentralHeader = 0x02014b50;
     private const uint EndOfCentralDirectory = 0x06054b50;
@@ -163,34 +165,81 @@ public sealed class MojoSetupReader(HttpClient http, string url)
         throw new InstallerFormatException($"Missing extra field {wanted:X4} in the central directory.");
     }
 
-    /// <summary>Reads one entry, inflating it when needed and checking its CRC.</summary>
+    /// <summary>Buffer a small entry, such as a symlink target. Game files use CopyEntryAsync.</summary>
     public async Task<byte[]> ReadEntryAsync(
         InstallerEntry entry, IProgress<long>? bytes, CancellationToken ct)
     {
-        var raw = await ReadRangeAsync(_archiveStart + entry.DataOffset, (int)entry.CompressedSize, ct, bytes);
+        if (entry.Size > Array.MaxLength)
+            throw new ArgumentOutOfRangeException(nameof(entry), "Use CopyEntryAsync for files beyond the array size limit.");
+        using var output = new MemoryStream();
+        await CopyEntryAsync(entry, output, bytes, ct);
+        return output.ToArray();
+    }
 
-        byte[] content;
-        if (entry.Deflated)
-        {
-            await using var deflate = new DeflateStream(new MemoryStream(raw), CompressionMode.Decompress);
-            var output = new MemoryStream(capacity: (int)Math.Max(entry.Size, 1));
-            await deflate.CopyToAsync(output, ct);
-            content = output.ToArray();
-        }
-        else
-        {
-            content = raw;
-        }
-
-        if (content.Length != entry.Size)
-            throw new InstallerFormatException($"{entry.Name}: expected {entry.Size} bytes, got {content.Length}.");
-
+    /// <summary>Stream and verify one entry without buffering its compressed or installed size.</summary>
+    public async Task CopyEntryAsync(
+        InstallerEntry entry, Stream destination, IProgress<long>? bytes, CancellationToken ct)
+    {
         var crc = new Crc32();
-        crc.Append(content);
+        if (entry.CompressedSize > 0)
+        {
+            var from = _archiveStart + entry.DataOffset;
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Range = new RangeHeaderValue(from, checked(from + entry.CompressedSize - 1));
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+            response.EnsureSuccessStatusCode();
+            await using var raw = await response.Content.ReadAsStreamAsync(ct);
+            using var compressed = new EntryReadStream(raw, entry.CompressedSize, bytes, _limiter);
+            await using var content = entry.Deflated
+                ? (Stream)new DeflateStream(compressed, CompressionMode.Decompress, leaveOpen: true) : compressed;
+            var buffer = new byte[64 * 1024];
+            long written = 0;
+            int read;
+            while ((read = await content.ReadAsync(buffer, ct)) > 0)
+            {
+                written += read;
+                if (written > entry.Size)
+                    throw new InstallerFormatException($"{entry.Name}: more than {entry.Size} bytes after decompression.");
+                crc.Append(buffer.AsSpan(0, read));
+                await destination.WriteAsync(buffer.AsMemory(0, read), ct);
+            }
+            if (written != entry.Size)
+                throw new InstallerFormatException($"{entry.Name}: expected {entry.Size} bytes, got {written}.");
+            // A deflate decoder may finish before reading the very end of its HTTP range.
+            while (await compressed.ReadAsync(buffer, ct) > 0) { }
+            if (compressed.Position != entry.CompressedSize || await raw.WithStallTimeoutAsync(buffer.AsMemory(0, 1), ct) != 0)
+                throw new InstallerFormatException($"{entry.Name}: compressed size does not match {entry.CompressedSize}.");
+        }
+        else if (entry.Size != 0)
+            throw new InstallerFormatException($"{entry.Name}: nonempty entry has no compressed data.");
+
         if (crc.Value != entry.Crc32)
             throw new ChunkChecksumException(entry.Crc32.ToString("x8"), crc.Value.ToString("x8"));
+    }
 
-        return content;
+    private sealed class EntryReadStream(Stream source, long size, IProgress<long>? progress, RateLimiter limiter) : Stream
+    {
+        private long _read;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => size;
+        public override long Position { get => _read; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            var remaining = size - _read;
+            if (remaining == 0) return 0;
+            var read = await source.WithStallTimeoutAsync(buffer[..(int)Math.Min(buffer.Length, remaining)], ct);
+            await limiter.ConsumeAsync(read, ct);
+            _read += read;
+            progress?.Report(read);
+            return read;
+        }
     }
 
     private async Task<byte[]> ReadRangeAsync(
@@ -201,16 +250,24 @@ public sealed class MojoSetupReader(HttpClient http, string url)
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(from, from + length - 1);
 
-        using var response = await http.SendAsync(request, ct);
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
         // Any ranged response tells us how long the installer is.
         if (_fileSize == 0 && response.Content.Headers.ContentRange?.Length is { } total)
             _fileSize = total;
 
-        var data = await response.Content.ReadAsByteArrayAsync(ct);
-        bytes?.Report(data.Length);
-        return data;
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var data = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        int read;
+        while ((read = await stream.WithStallTimeoutAsync(buffer, ct)) > 0)
+        {
+            await _limiter.ConsumeAsync(read, ct);
+            data.Write(buffer, 0, read);
+            bytes?.Report(read);
+        }
+        return data.ToArray();
     }
 
     private static long IndexOfSignature(byte[] data, uint signature)

@@ -131,6 +131,10 @@ archive filename GameVault indexed, sets each game's `launch_executable` via
 run on a timer — see `scripts/gamevault-sync.compose.yml` for a sidecar. The GameVault
 dependency lives entirely in that script, on the operator's side.
 
+Sync compares both the executable and its arguments. An argument-only change is an update,
+including removing arguments (sent as `null`). Missing, null and empty arguments compare equally.
+Paths and arguments remain JSON strings throughout the sync so backslashes and whitespace survive.
+
 ## API used by the sync script
 
 | Purpose | Endpoint |

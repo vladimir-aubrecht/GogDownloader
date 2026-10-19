@@ -7,7 +7,11 @@ namespace GogDownloader.Core.Library;
 
 public sealed record BuildRef(string BuildId, int Generation, string? VersionName, string? Manifest);
 
-public sealed record InstallerRef(string Language, string? Version, long TotalSize);
+public sealed record InstallerRef(string Language, string? Version, long TotalSize)
+{
+    [JsonIgnore]
+    public string BuildId => InstallerSelection.BuildId(Language, Version, TotalSize);
+}
 
 /// <summary>How a given platform of a given game can be obtained.</summary>
 public sealed record PlatformAvailability
@@ -54,6 +58,7 @@ public sealed record PlatformAvailability
     public bool HasLegacyDepot => Depot is { Generation: 1 };
 
     public bool HasInstaller => Installers.Count > 0;
+    public InstallerRef? InstallerFor(string language) => InstallerSelection.Select(Installers, language, i => i.Language);
     public bool Unavailable => !HasDepot && !HasInstaller;
 
     public long LargestInstallerSize => Installers.Count == 0 ? 0 : Installers.Max(i => i.TotalSize);

@@ -164,7 +164,10 @@ public sealed class GogApiClient(HttpClient http)
                       $"/os/{platform.ContentSystemName()}/builds?generation={generation}";
 
             using var response = await http.GetAsync(url, ct);
-            if (!response.IsSuccessStatusCode) continue;
+            if (response.StatusCode == HttpStatusCode.NotFound) continue;
+            // An outage or an authentication failure says nothing about depot availability.
+            // Let the HTTP retry handler recover it, then report any persistent error.
+            response.EnsureSuccessStatusCode();
 
             var builds = await response.Content.ReadFromJsonAsync<BuildsResponse>(cancellationToken: ct);
             // Only the public branch matters; branch != null are beta channels.

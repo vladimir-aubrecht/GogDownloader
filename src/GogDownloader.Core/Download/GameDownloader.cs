@@ -78,16 +78,6 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 {
     private readonly HttpClient cdn = cdn ?? new HttpClient();
 
-    /// <summary>
-    /// Linux has no builds, so a backup is identified by the installer version and size. A new
-    /// installer changes one or the other, which is what makes a rerun fetch it again.
-    /// </summary>
-    private static string InstallerBuildId(Library.PlatformAvailability availability)
-    {
-        var installer = availability.Installers.First();
-        return $"installer-{installer.Version ?? "0"}-{installer.TotalSize}";
-    }
-
     public async Task<DownloadResult> RunAsync(
         LibraryEntry game,
         DownloadOptions options,
@@ -98,7 +88,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             return new DownloadResult(DownloadOutcome.NoDepot,
                 Detail: $"The library has nothing for {options.Platform.ApiName()}.");
 
-        // Linux has no Galaxy depots at all, so its build identity is the installer version.
+        // Linux has no Galaxy depots, so its build identity comes from the chosen installer.
         var build = availability.Depot;
         var fromInstaller = build is null && availability.HasInstaller;
 
@@ -116,14 +106,17 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             return new DownloadResult(DownloadOutcome.NoDepot,
                 Detail: new InnoExtractMissingException().Message);
 
-        var buildId = build?.BuildId ?? InstallerBuildId(availability);
-        var versionName = build?.VersionName ?? availability.Installers.FirstOrDefault()?.Version;
+        var selectedInstaller = fromInstaller ? availability.InstallerFor(options.Language) : null;
+        // A snapshot without a matching language cannot authorize a skip; live product data
+        // below may already contain that language (or a new English fallback).
+        var buildId = build?.BuildId ?? selectedInstaller?.BuildId ?? "";
+        var versionName = build?.VersionName ?? (selectedInstaller ?? availability.InstallerFor(options.Language))?.Version;
 
         var gameDirectory = Path.Combine(options.OutputRoot, game.DirectoryName);
         var archiveName = GameVaultName.For(game, options.Platform, versionName);
 
         var existing = await BackupManifest.LoadAsync(gameDirectory, ct);
-        if (!options.Force
+        if (!options.Force && buildId.Length > 0
             && existing?.Platforms.GetValueOrDefault(options.Platform) is { } done
             && done.Matches(gameDirectory, buildId, options.Language,
                 game.DlcsFor(options.Platform).Select(d => d.ProductId), options.Platform))
@@ -153,7 +146,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         {
             source = build switch
             {
-                null => new InstallerSource(api, cdn, game.Id, options.Language),
+                null => new InstallerSource(api, cdn, game.Id, options.Language, content.Limiter),
                 { Generation: 1 } => new DepotSourceV1(content, api, build.Manifest!, options.Platform.ContentSystemName(), options.Language),
                 _ => new DepotSourceV2(content, api, build.Manifest!, options.Language),
             };
@@ -209,7 +202,24 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             }
         }
 
+        // A snapshot may lag behind the live product. Record the installer actually selected,
+        // and recognize an already completed live version even while the snapshot is stale.
+        var actualInstaller = setup ?? (source as InstallerSource)?.SelectedInstaller;
+        if (actualInstaller is not null)
+        {
+            buildId = InstallerSelection.BuildId(actualInstaller.Language, actualInstaller.Version, actualInstaller.TotalSize);
+            versionName = actualInstaller.Version;
+            archiveName = GameVaultName.For(game, options.Platform, versionName);
+            if (!options.Force && existing?.Platforms.GetValueOrDefault(options.Platform) is { } current
+                && current.Matches(gameDirectory, buildId, options.Language, [], options.Platform))
+                return new DownloadResult(DownloadOutcome.AlreadyDone, Path.Combine(gameDirectory, current.ArchiveName),
+                    $"Build {buildId} is already backed up.");
+        }
+
+        if (plan is not null) plan = LinkResolver.Resolve(plan, options.Platform);
         var totalCompressed = plan?.DownloadBytes ?? setup!.TotalSize;
+        // Link copies also occupy the ZIP, without adding any network download bytes.
+        var archiveEstimate = totalCompressed + (plan?.LinkBytes ?? 0);
 
         // An Inno Setup installer does not say how large the game unpacks to. Three times the
         // installer is the rule of thumb, and the check is a courtesy anyway.
@@ -229,7 +239,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         // Bytes already on disk do not need to be found again, or a resume would be refused on
         // a volume that in fact has room for what is left.
         var alreadyStaged = resumable ? DirectorySize(staging) : 0;
-        var stagingNeeds = Math.Max(0, installedSize + totalCompressed - alreadyStaged);
+        var stagingNeeds = Math.Max(0, installedSize + archiveEstimate - alreadyStaged);
 
         // Staging holds the unpacked game and the zip side by side; the target only needs the
         // zip. Failing here beats failing after an hour of downloading.
@@ -238,7 +248,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 Detail: $"{options.StagingDirectory} needs {Human(short1)} more free. Pick another --staging.");
 
         if (!SameVolume(options.StagingDirectory, gameDirectory)
-            && FreeSpaceShortfall(gameDirectory, totalCompressed) is { } short2)
+            && FreeSpaceShortfall(gameDirectory, archiveEstimate) is { } short2)
             return new DownloadResult(DownloadOutcome.NotEnoughSpace,
                 Detail: $"{gameDirectory} needs {Human(short2)} more free.");
 
@@ -251,7 +261,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             if (innoSetup)
                 // The extract scratch is named by game id alone: innoextract is not long-path
                 // aware, and a slug-length prefix under a deep game tree crosses Windows MAX_PATH.
-                await new InnoSetupExtractor(api, cdn)
+                await new InnoSetupExtractor(api, cdn, content.Limiter)
                     .FillAsync(setup!, staging, staging + ".installer",
                         Path.Combine(options.StagingDirectory, $"{game.Id}.x"), progress, ct);
             else
@@ -293,11 +303,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             var archivePath = Path.Combine(gameDirectory, archiveName);
             PublishArchive(stagingZip, archivePath, SameVolume(stagingZip, archivePath), progress, ct);
 
-            // A new build renames the archive, so the old one would linger and GameVault would
-            // index the same game twice.
             var previous = existing?.Platforms.GetValueOrDefault(options.Platform)?.ArchiveName;
-            if (previous is not null && previous != archiveName)
-                File.Delete(Path.Combine(gameDirectory, previous));
 
             var manifest = existing ?? new BackupManifest
             {
@@ -328,6 +334,11 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
 
             // Only now does the game count as downloaded.
             await manifest.SaveAsync(gameDirectory, ct);
+
+            // Keep the previous archive until the manifest commits. If saving fails or is
+            // cancelled, the on-disk manifest must still reference an intact backup.
+            if (previous is not null && previous != archiveName)
+                File.Delete(Path.Combine(gameDirectory, previous));
 
             // Only a finished backup may throw its staging away. An interrupted run keeps it,
             // so the next one resumes instead of re-downloading tens of gigabytes.
@@ -659,14 +670,15 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         if (unfetchable.Count > 0)
             throw new DownloadIncompleteException(unfetchable);
 
-        // Symlinks are dereferenced: the target is relative to the install root.
+        // The resolver flattened directory and chained links to verified regular files.
         foreach (var link in plan.Links)
         {
             var linkSource = Path.Combine(staging, SafeRelative(link.Target));
             var destination = Path.Combine(staging, SafeRelative(link.Path));
-            if (!File.Exists(linkSource)) continue;
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            File.Copy(linkSource, destination, overwrite: true);
+            await using var sourceFile = File.OpenRead(linkSource);
+            await using var targetFile = File.Create(destination);
+            await sourceFile.CopyToAsync(targetFile, ct);
         }
     }
 
@@ -686,8 +698,8 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
         await slots.WaitAsync(ct);
         try
         {
-            var data = await source.FetchAsync(file, part, bytes, ct);
-            await RandomAccess.WriteAsync(handle, data, part.DestinationOffset, ct);
+            using var destination = new PartWriteStream(handle, part.DestinationOffset);
+            await source.CopyToAsync(file, part, destination, bytes, ct);
         }
         finally
         {

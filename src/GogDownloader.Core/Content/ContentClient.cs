@@ -15,6 +15,8 @@ namespace GogDownloader.Core.Content;
 /// </summary>
 public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter limiter)
 {
+    internal RateLimiter Limiter => limiter;
+
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public Task<RepositoryManifest?> GetRepositoryManifestAsync(string url, CancellationToken ct) =>
@@ -54,13 +56,25 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
     }
 
     /// <summary>
-    /// Reads one file out of a v1 depot blob. The bytes are stored uncompressed, so the file's
-    /// own md5 verifies them directly.
+    /// Buffered convenience for small v1 ranges. Game downloads use CopyRangeAsync.
     /// </summary>
     public async Task<byte[]> DownloadRangeAsync(
         SecureLinkEndpoint endpoint, long offset, long size, string? md5,
         IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
     {
+        if (size > Array.MaxLength)
+            throw new ArgumentOutOfRangeException(nameof(size), "Use CopyRangeAsync for files beyond the array size limit.");
+        using var output = new MemoryStream();
+        await CopyRangeAsync(endpoint, offset, size, md5, output, bytes, freshFromOrigin, ct);
+        return output.ToArray();
+    }
+
+    /// <summary>Streams a v1 file with bounded memory, including files beyond the array size limit.</summary>
+    public async Task CopyRangeAsync(
+        SecureLinkEndpoint endpoint, long offset, long size, string? md5, Stream destination,
+        IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
+    {
+        if (size == 0) return;
         using var request = new HttpRequestMessage(HttpMethod.Get, endpoint.BlobUrl());
         request.Headers.Range = new RangeHeaderValue(offset, offset + size - 1);
         if (freshFromOrigin) BypassCache(request);
@@ -69,7 +83,8 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new SecureLinkExpiredException();
         response.EnsureSuccessStatusCode();
 
-        var buffer = new MemoryStream(capacity: (int)Math.Max(size, 1));
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+        long received = 0;
         try
         {
             await using var stream = await response.Content.ReadAsStreamAsync(ct);
@@ -80,7 +95,11 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
                 while ((read = await stream.WithStallTimeoutAsync(scratch, ct)) > 0)
                 {
                     await limiter.ConsumeAsync(read, ct);
-                    buffer.Write(scratch, 0, read);
+                    received += read;
+                    if (received > size)
+                        throw new ChunkChecksumException($"{size} bytes", $"at least {received} bytes");
+                    hash.AppendData(scratch, 0, read);
+                    await destination.WriteAsync(scratch.AsMemory(0, read), ct);
                     bytes?.Report(read);
                 }
             }
@@ -96,21 +115,18 @@ public sealed class ContentClient(HttpClient authed, HttpClient cdn, RateLimiter
                 $"HTTP {(int)response.StatusCode} {response.Version} " +
                 $"content-length={response.Content.Headers.ContentLength?.ToString() ?? "?"} " +
                 $"encoding=[{string.Join(",", response.Content.Headers.ContentEncoding)}] " +
-                $"got={buffer.Length}B — {e.Message}", e);
+                $"got={received}B — {e.Message}", e);
         }
 
-        var data = buffer.GetBuffer().AsMemory(0, (int)buffer.Length);
-        if (data.Length != size)
-            throw new ChunkChecksumException($"{size} bytes", $"{data.Length} bytes");
+        if (received != size)
+            throw new ChunkChecksumException($"{size} bytes", $"{received} bytes");
 
         if (md5 is { Length: > 0 })
         {
-            var actual = Convert.ToHexStringLower(MD5.HashData(data.Span));
+            var actual = Convert.ToHexStringLower(hash.GetHashAndReset());
             if (!string.Equals(actual, md5, StringComparison.OrdinalIgnoreCase))
                 throw new ChunkChecksumException(md5, actual);
         }
-
-        return data.ToArray();
     }
 
     /// <summary>

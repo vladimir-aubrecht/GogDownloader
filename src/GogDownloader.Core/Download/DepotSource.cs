@@ -35,7 +35,8 @@ public sealed record DepotPlan(
     List<string> Dependencies)
 {
     public long DownloadBytes => Files.Sum(f => f.DownloadSize);
-    public long InstalledBytes => Files.Sum(f => f.Size);
+    public long LinkBytes { get; init; }
+    public long InstalledBytes => Files.Sum(f => f.Size) + LinkBytes;
 }
 
 public sealed class NoDepotForLanguageException(string language)
@@ -67,6 +68,13 @@ public abstract class ContentSource
     protected abstract Task<byte[]> FetchOnceAsync(
         PlannedFile file, PlannedPart part, IProgress<long>? bytes, int attempt, CancellationToken ct);
 
+    protected virtual async Task CopyOnceAsync(
+        PlannedFile file, PlannedPart part, Stream destination, IProgress<long>? bytes, int attempt, CancellationToken ct)
+    {
+        var data = await FetchOnceAsync(file, part, bytes, attempt, ct);
+        await destination.WriteAsync(data, ct);
+    }
+
     /// <summary>Called when a signed URL expired, so the next attempt asks for a fresh one.</summary>
     protected virtual Task RefreshAsync(PlannedFile file, CancellationToken ct) => Task.CompletedTask;
 
@@ -77,8 +85,20 @@ public abstract class ContentSource
     /// that a single try must not abandon a whole game over: an expired signed URL, a corrupted
     /// transfer, and — the common one — a connection dropped mid-body.
     /// </summary>
-    public async Task<byte[]> FetchAsync(
-        PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct)
+    public Task<byte[]> FetchAsync(PlannedFile file, PlannedPart part, IProgress<long>? bytes, CancellationToken ct) =>
+        WithRetryAsync(file, (counting, attempt) => FetchOnceAsync(file, part, counting, attempt, ct), bytes, ct);
+
+    /// <summary>Copy into a part-local seekable stream, rewinding it before every retry.</summary>
+    public Task CopyToAsync(PlannedFile file, PlannedPart part, Stream destination, IProgress<long>? bytes, CancellationToken ct) =>
+        WithRetryAsync(file, async (counting, attempt) =>
+        {
+            destination.Position = 0;
+            await CopyOnceAsync(file, part, destination, counting, attempt, ct);
+            return true;
+        }, bytes, ct);
+
+    private async Task<T> WithRetryAsync<T>(
+        PlannedFile file, Func<IProgress<long>?, int, Task<T>> transfer, IProgress<long>? bytes, CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -93,7 +113,7 @@ public abstract class ContentSource
                 // First try may be served from the CDN cache; every retry bypasses it, in case
                 // the edge is holding a truncated object — the deterministic short read that no
                 // amount of same-URL retrying fixes.
-                return await FetchOnceAsync(file, part, counting, attempt, ct);
+                return await transfer(counting, attempt);
             }
             catch (SecureLinkExpiredException) when (attempt < MaxAttempts)
             {
@@ -182,6 +202,20 @@ public abstract class DepotSource(ContentClient content) : ContentSource
 
     protected override async Task<byte[]> FetchOnceAsync(
         PlannedFile file, PlannedPart part, IProgress<long>? bytes, int attempt, CancellationToken ct)
+        => await FetchPartAsync(await EndpointAsync(file, attempt, ct), part, bytes, attempt > 0, ct);
+
+    protected virtual async Task CopyPartAsync(
+        SecureLinkEndpoint endpoint, PlannedPart part, Stream destination, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct)
+    {
+        var data = await FetchPartAsync(endpoint, part, bytes, freshFromOrigin, ct);
+        await destination.WriteAsync(data, ct);
+    }
+
+    protected override async Task CopyOnceAsync(
+        PlannedFile file, PlannedPart part, Stream destination, IProgress<long>? bytes, int attempt, CancellationToken ct) =>
+        await CopyPartAsync(await EndpointAsync(file, attempt, ct), part, destination, bytes, attempt > 0, ct);
+
+    private async Task<SecureLinkEndpoint> EndpointAsync(PlannedFile file, int attempt, CancellationToken ct)
     {
         // GOG signs several CDN endpoints, best first. The first attempt uses the best one; each
         // retry moves to the next, because a broken object on one CDN — the deterministic
@@ -192,7 +226,7 @@ public abstract class DepotSource(ContentClient content) : ContentSource
         if (attempt > 0 && endpoints.Count > 1)
             RetryObserver?.Invoke($"{file.RelativePath}: trying CDN endpoint {attempt % endpoints.Count + 1}/{endpoints.Count}");
 
-        return await FetchPartAsync(endpoint, part, bytes, freshFromOrigin: attempt > 0, ct);
+        return endpoint;
     }
 
     protected override async Task RefreshAsync(PlannedFile file, CancellationToken ct)
@@ -384,4 +418,8 @@ public sealed class DepotSourceV1(
     protected override Task<byte[]> FetchPartAsync(
         SecureLinkEndpoint endpoint, PlannedPart part, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
         Content.DownloadRangeAsync(endpoint, part.SourceOffset, part.Size, part.Md5, bytes, freshFromOrigin, ct);
+
+    protected override Task CopyPartAsync(
+        SecureLinkEndpoint endpoint, PlannedPart part, Stream destination, IProgress<long>? bytes, bool freshFromOrigin, CancellationToken ct) =>
+        Content.CopyRangeAsync(endpoint, part.SourceOffset, part.Size, part.Md5, destination, bytes, freshFromOrigin, ct);
 }

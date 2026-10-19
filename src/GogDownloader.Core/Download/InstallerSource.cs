@@ -12,11 +12,12 @@ public sealed class NoLinuxInstallerException(string language)
 /// shell script with a ZIP payload. The ZIP's central directory lives at the end, so HTTP Range
 /// requests reach the game files directly and the installer itself is never downloaded.
 /// </summary>
-public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameId, string language)
+public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameId, string language, RateLimiter? limiter = null)
     : ContentSource
 {
     private MojoSetupReader? _reader;
     private readonly Dictionary<string, InstallerEntry> _entries = new(StringComparer.Ordinal);
+    public Installer? SelectedInstaller { get; private set; }
 
     public override async Task<DepotPlan> PlanAsync(CancellationToken ct)
     {
@@ -30,9 +31,11 @@ public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameI
         if (Select(installers, language) is not { } installer || installer.Files.Count == 0)
             throw new NoLinuxInstallerException(language);
 
+        SelectedInstaller = installer;
+
         var url = await api.ResolveDownlinkAsync(installer.Files[0].Downlink, ct);
 
-        _reader = new MojoSetupReader(cdn, url);
+        _reader = new MojoSetupReader(cdn, url, limiter);
         await _reader.OpenAsync(ct);
 
         var files = new List<PlannedFile>();
@@ -104,21 +107,18 @@ public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameI
     }
 
     /// <summary>English installers are multilanguage, which makes them the fallback gogdl uses.</summary>
-    internal static Installer? Select(List<Installer> installers, string language)
-    {
-        if (installers.Count <= 1) return installers.FirstOrDefault();
-
-        var requested = GogLanguage.Parse(language);
-        if (requested is not null && installers.FirstOrDefault(i => requested.Matches(i.Language)) is { } exact)
-            return exact;
-
-        return installers.FirstOrDefault(i => i.Language.Equals("en", StringComparison.OrdinalIgnoreCase))
-               ?? installers.FirstOrDefault(i => GogLanguage.Parse("en")?.Matches(i.Language) == true);
-    }
+    internal static Installer? Select(List<Installer> installers, string language) =>
+        InstallerSelection.Select(installers, language, i => i.Language);
 
     protected override Task<byte[]> FetchOnceAsync(
         PlannedFile file, PlannedPart part, IProgress<long>? bytes, int attempt, CancellationToken ct) =>
         _reader is null || !_entries.TryGetValue(file.RelativePath, out var entry)
             ? throw new InvalidOperationException("The installer was not opened; call PlanAsync first.")
             : _reader.ReadEntryAsync(entry, bytes, ct);
+
+    protected override Task CopyOnceAsync(
+        PlannedFile file, PlannedPart part, Stream destination, IProgress<long>? bytes, int attempt, CancellationToken ct) =>
+        _reader is null || !_entries.TryGetValue(file.RelativePath, out var entry)
+            ? throw new InvalidOperationException("The installer was not opened; call PlanAsync first.")
+            : _reader.CopyEntryAsync(entry, destination, bytes, ct);
 }

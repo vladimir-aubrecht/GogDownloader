@@ -1,0 +1,16 @@
+using System.Runtime.CompilerServices;
+using GogArchiver.Core.Download.Zip;
+using GogArchiver.Core.Content;
+[assembly: TypeForwardedTo(typeof(ArchiveCheck))]
+[assembly: TypeForwardedTo(typeof(ArchiveProblem))]
+[assembly: TypeForwardedTo(typeof(ArchiveRepair))]
+[assembly: TypeForwardedTo(typeof(ArchiveRepairException))]
+[assembly: TypeForwardedTo(typeof(ArchiveVerifier))]
+[assembly: TypeForwardedTo(typeof(ArchiveCorruptException))]
+[assembly: TypeForwardedTo(typeof(ParallelZipWriter))]
+[assembly: TypeForwardedTo(typeof(ZipProgress))]
+[assembly: TypeForwardedTo(typeof(ZipInspector))]
+[assembly: TypeForwardedTo(typeof(ZipEntryHeader))]
+[assembly: TypeForwardedTo(typeof(ZipFormatException))]
+[assembly: TypeForwardedTo(typeof(Crc32))]
+[assembly: TypeForwardedTo(typeof(RateLimiter))]

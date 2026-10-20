@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Push the launch executable of each backup into GameVault.
 #
-# GogDownloader deliberately knows nothing about GameVault. It records what GOG says the launcher
+# GogArchiver deliberately knows nothing about GameVault. It records what GOG says the launcher
 # is into each backup's .gogdl.json; this script is the glue that turns that into GameVault API
 # calls. It lives here, not in the tool, so the dependency stays on your side.
 #
@@ -12,7 +12,7 @@
 #   GAMEVAULT_URL        e.g. http://gamevault-backend:8080
 #   GAMEVAULT_USER       a user with the EDITOR role
 #   GAMEVAULT_PASSWORD
-#   BACKUP_DIR           the --out directory GogDownloader wrote to      (default /files)
+#   BACKUP_DIR           the --out directory GogArchiver wrote to      (default /files)
 #   SYNC_INTERVAL        seconds between passes; unset means one pass and exit
 #   DRY_RUN=1            report what would change without changing it
 set -eu
@@ -81,6 +81,7 @@ list_games() {
         printf '%s' "$body" | jq -c '
             .data[] | {
                 id,
+                path: (.file_path // ""),
                 archive: (.file_path // "" | sub(".*/"; "")),
                 executable: (.user_metadata.launch_executable // ""),
                 parameters: (.user_metadata.launch_parameters // "")
@@ -101,17 +102,49 @@ sync_once() {
     # cleanly here instead of mislabelling every archive as "not in GameVault yet".
     games=$(list_games) || { rm -f "$tally"; return 1; }
 
-    # Each backup's .gogdl.json can describe several platforms, each its own archive.
-    find "$BACKUP_DIR" -maxdepth 2 -name '.gogdl.json' -type f 2>/dev/null | while IFS= read -r manifest; do
-        jq -c '
-            .Platforms | to_entries[] | .value
+    # GOG keeps its legacy metadata; native Steam archives use the shared version-2 format.
+    # Other producers may use .gogdl.json with another schema, which must stay untouched.
+    find "$BACKUP_DIR" -maxdepth 2 \( -name '.gogdl.json' -o -name '.gamebackup.json' \) -type f 2>/dev/null | while IFS= read -r manifest; do
+        format=${manifest##*/}
+        directory=${manifest%/*}
+        legacy="$directory/.gogdl.json"
+        modern="$directory/.gamebackup.json"
+        if [ -f "$legacy" ] && [ -f "$modern" ] && jq -e '
+            with_entries(.key |= ascii_downcase)
+            | if has("source") then (.source | strings | ascii_downcase) == "gog" else true end' "$legacy" >/dev/null; then
+            # The original CLI can update its metadata independently. Use it only when both
+            # envelopes agree on the owner; a conflict must never change GameVault metadata.
+            [ "$format" = ".gogdl.json" ] || continue
+            if ! jq -se 'map(with_entries(.key |= ascii_downcase))
+                | (.[1].source | strings | ascii_downcase) == "gog"
+                  and (.[0].gameid | tostring) == .[1].productid' "$legacy" "$modern" >/dev/null; then
+                echo "FAILED    conflicting metadata owners in $directory" >&2
+                echo failed >>"$tally"; continue
+            fi
+        fi
+        jq -c --arg format "$format" '
+            select(with_entries(.key |= ascii_downcase)
+                | if $format == ".gamebackup.json" then
+                    .schemaversion == 2 and ((.source | strings | ascii_downcase) | . == "gog" or . == "steam")
+                  elif has("source") then (.source | strings | ascii_downcase) == "gog"
+                  else true end)
+            | .Platforms | to_entries[] | .value
             | select(.LaunchExecutable != null and .LaunchExecutable != "")
             | {archive: .ArchiveName, executable: .LaunchExecutable,
                parameters: (.LaunchParameters // "")}' "$manifest" \
         | while IFS= read -r backup; do
             archive=$(printf '%s' "$backup" | jq -r '.archive')
             executable=$(printf '%s' "$backup" | jq -r '.executable')
-            row=$(printf '%s\n' "$games" | jq -sc --arg n "$archive" 'map(select(.archive == $n)) | .[0] // empty')
+            relative=${directory#"${BACKUP_DIR%/}/"}
+            matches=$(printf '%s\n' "$games" | jq -sc --arg n "$archive" 'map(select(.archive == $n))')
+            if [ "$(printf '%s' "$matches" | jq 'length')" -gt 1 ]; then
+                matches=$(printf '%s' "$matches" | jq -c --arg suffix "/$relative/$archive" 'map(select(.path | endswith($suffix)))')
+                if [ "$(printf '%s' "$matches" | jq 'length')" -ne 1 ]; then
+                    echo "FAILED    ambiguous GameVault archive: $archive" >&2
+                    echo failed >>"$tally"; continue
+                fi
+            fi
+            row=$(printf '%s' "$matches" | jq -c '.[0] // empty')
 
             if [ -z "$row" ]; then
                 echo "skipped   $archive (not in GameVault yet)"

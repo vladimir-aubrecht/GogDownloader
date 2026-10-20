@@ -1,0 +1,174 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace GameArchiver.Core;
+
+public enum GameOs { Windows, Mac, Linux }
+
+public sealed record GameKey
+{
+    public string Source { get; }
+    public string ProductId { get; }
+    [JsonConstructor]
+    public GameKey(string source, string productId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        ArgumentException.ThrowIfNullOrWhiteSpace(productId);
+        Source = source.ToLowerInvariant();
+        ProductId = productId;
+    }
+    public override string ToString() => $"{Source}:{ProductId}";
+}
+
+public sealed record GameInfo(GameKey Key, string Title, string Slug)
+{
+    public bool EarlyAccess { get; init; }
+    public string Kind { get; init; } = "game";
+    public Dictionary<GameOs, GameVersion> Versions { get; init; } = [];
+    public List<string> OwnedDlcs { get; init; } = [];
+    public HashSet<GameOs>? BackupPlatforms { get; init; }
+    public bool CanBackUp(GameOs platform) => Versions.ContainsKey(platform) &&
+        (BackupPlatforms?.Contains(platform) ?? Kind is "game" or "application" or "demo" or "pack");
+}
+
+public sealed record GameVersion(string BuildId)
+{
+    public int ContentRevision { get; init; } = 1;
+    public string? Name { get; init; }
+    public string Branch { get; init; } = "public";
+    public string Language { get; init; } = "en";
+    public bool BuildVariesByLanguage { get; init; }
+    public string Architecture { get; init; } = "64";
+    public Dictionary<string, string> Manifests { get; init; } = [];
+    public List<string> Dlcs { get; init; } = [];
+    public long DownloadSize { get; init; }
+    public long InstalledSize { get; init; }
+
+    internal bool IsValid => BuildId is not null && Branch is not null && Language is not null && Architecture is not null
+        && Manifests is not null && Dlcs is not null && Dlcs.All(d => !string.IsNullOrWhiteSpace(d));
+
+    public bool Matches(GameVersion other) => IsValid && other.IsValid && ContentRevision == other.ContentRevision && BuildId == other.BuildId
+        && Branch == other.Branch && Architecture == other.Architecture && string.Equals(Language, other.Language, StringComparison.OrdinalIgnoreCase)
+        && Manifests.OrderBy(k => k.Key).SequenceEqual(other.Manifests.OrderBy(k => k.Key))
+        && Dlcs.Order().SequenceEqual(other.Dlcs.Order());
+}
+
+public record GameSelection
+{
+    public GameOs Platform { get; init; } = GameOs.Windows;
+    public string Language { get; init; } = "en";
+    public string Branch { get; init; } = "public";
+    public string Architecture { get; init; } = "64";
+    public virtual void Validate()
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(Language);
+        ArgumentException.ThrowIfNullOrWhiteSpace(Branch);
+        if (!Enum.IsDefined(Platform) || Architecture is not "32" and not "64" and not "arm64")
+            throw new ArgumentException("Invalid platform or architecture selection.");
+    }
+}
+
+public sealed record ArchiveOptions : GameSelection
+{
+    public required string OutputRoot { get; init; }
+    public string? DirectoryName { get; init; }
+    public string? StagingRoot { get; init; }
+    public int MaxConnections { get; init; } = 5;
+    public int CompressionThreads { get; init; } = Environment.ProcessorCount;
+    public long MaxBytesPerSecond { get; init; }
+    public bool Force { get; init; }
+    public bool Clean { get; init; }
+    public bool Reuse { get; init; } = true;
+    public bool Verify { get; init; } = true;
+    public bool WriteLauncher { get; init; } = true;
+    public string StagingDirectory => StagingRoot ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "gamearchive", "staging");
+    public override void Validate()
+    {
+        base.Validate();
+        ArgumentException.ThrowIfNullOrWhiteSpace(OutputRoot);
+        if (MaxConnections <= 0 || CompressionThreads <= 0 || MaxBytesPerSecond < 0)
+            throw new ArgumentOutOfRangeException(nameof(MaxConnections), "Invalid platform, concurrency or bandwidth setting.");
+        if (DirectoryName is not null) ArchivePaths.ValidateName(DirectoryName);
+    }
+}
+
+public sealed record ArchiveProgress(string Phase, long Bytes = 0, long TotalBytes = 0, int Files = 0, int TotalFiles = 0);
+public enum ArchiveOutcome { Completed, AlreadyDone, Unavailable, NotEnoughSpace, Incomplete }
+public sealed record ArchiveResult(GameKey Key, ArchiveOutcome Outcome, string? ArchivePath = null, string? Detail = null);
+public sealed class InlineProgress<T>(Action<T> report) : IProgress<T> { public void Report(T value) => report(value); }
+public sealed record StoreLibraryResult(IReadOnlyList<GameInfo> Games)
+{
+    public IReadOnlyDictionary<string, string> Failures { get; init; } = new Dictionary<string, string>();
+}
+
+/// <summary>Each implementation is independently usable and owns its authenticated session.</summary>
+public interface IGameStore : IAsyncDisposable
+{
+    string Source { get; }
+    Task<StoreLibraryResult> SyncLibraryAsync(CancellationToken ct = default);
+    Task<GameVersion> GetVersionAsync(string productId, GameSelection options, CancellationToken ct = default);
+    Task<ArchiveResult> DownloadAsync(string productId, ArchiveOptions options,
+        IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default);
+}
+
+public sealed record ArchiveLibrary
+{
+    public int SchemaVersion { get; init; } = 1;
+    public DateTimeOffset SyncedAt { get; init; } = DateTimeOffset.UtcNow;
+    public List<GameInfo> Games { get; init; } = [];
+    public Dictionary<string, string> Failures { get; init; } = [];
+
+    /// <summary>Resolve filtered DLC selections to their archivable parents for this OS.</summary>
+    public IReadOnlyList<GameInfo> SelectDownloads(IEnumerable<GameInfo> selected, GameOs platform)
+    {
+        var result = new Dictionary<GameKey, GameInfo>();
+        foreach (var game in selected)
+        {
+            var parents = Games.Where(parent => parent.Key.Source == game.Key.Source && parent.Key != game.Key
+                && parent.CanBackUp(platform) && parent.Versions[platform].Dlcs.Contains(game.Key.ProductId)).ToList();
+            if (parents.Count > 0)
+                foreach (var parent in parents) result.TryAdd(parent.Key, parent);
+            else if (game.CanBackUp(platform)) result.TryAdd(game.Key, game);
+        }
+        return result.Values.ToList();
+    }
+    public static string DefaultPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "gamearchive", "library.json");
+    public Task SaveAsync(string path, CancellationToken ct = default) => ArchiveJson.SaveAsync(path, this, ct);
+    public static async Task<ArchiveLibrary> LoadAsync(string path, CancellationToken ct = default)
+    {
+        await using var stream = File.OpenRead(path);
+        var library = await JsonSerializer.DeserializeAsync<ArchiveLibrary>(stream, ArchiveJson.Options, ct)
+            ?? throw new InvalidDataException("Empty library snapshot.");
+        if (library.SchemaVersion != 1) throw new InvalidDataException("Unsupported library snapshot schema.");
+        if (library.Games is null || library.Failures is null || library.Games.Any(g => g is null || g.Key is null
+            || g.Versions is null || g.Versions.Any(v => !Enum.IsDefined(v.Key) || v.Value is null || !v.Value.IsValid)
+            || g.OwnedDlcs is null || g.Title is null || g.Slug is null)
+            || library.Games.GroupBy(g => g.Key).Any(g => g.Count() > 1))
+            throw new InvalidDataException("Library snapshot contains missing or duplicate identities.");
+        return library;
+    }
+}
+
+public static class ArchiveJson
+{
+    public static JsonSerializerOptions Options { get; } = new()
+    {
+        WriteIndented = true, PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() },
+    };
+    public static async Task SaveAsync<T>(string path, T value, CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            await using (var stream = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                await JsonSerializer.SerializeAsync(stream, value, Options, ct);
+            ct.ThrowIfCancellationRequested();
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally { File.Delete(tmp); }
+    }
+}

@@ -35,7 +35,7 @@ type**, so macOS archives stay "undetected".
 
 **Subfolders are indexed.** `readAllFiles()` calls `readdirp` with
 `depth: configuration.GAMES.SEARCH_RECURSIVE ? undefined : 0`, and `SEARCH_RECURSIVE`
-defaults to `true` in `configuration.ts`. So a `{slug}__{gameId}/` directory per game is fine.
+defaults to `true` in `configuration.ts`. So a `{slug}/` directory per game is fine.
 
 **Non-game files are ignored, not errors.** `isValidFilePath()` rejects anything whose
 extension is not in `SUPPORTED_FILE_FORMATS`, logging at debug level. `.gogdl.json` next to
@@ -134,6 +134,15 @@ dependency lives entirely in that script, on the operator's side.
 Sync compares both the executable and its arguments. An argument-only change is an update,
 including removing arguments (sent as `null`). Missing, null and empty arguments compare equally.
 Paths and arguments remain JSON strings throughout the sync so backslashes and whitespace survive.
+Legacy `.gogdl.json` manifests require `Source` to be `gog` (case-insensitive), or absent.
+Native `.gamebackup.json` schema 2 manifests support `gog` and `steam`; the launch fields
+have the same names. Explicit foreign sources are skipped before reading platform data.
+If both manifests exist, they must agree on ownership; a matching GOG legacy manifest takes
+precedence. Conflicting identities stop synchronization for that folder.
+
+When multiple GameVault entries share an archive filename, the script also matches the backup's
+relative folder against GameVault's file path. If that still leaves an ambiguous match, it
+reports an error and updates none of those entries.
 
 ## API used by the sync script
 

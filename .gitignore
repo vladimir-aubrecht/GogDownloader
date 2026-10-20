@@ -8,3 +8,5 @@ obj/
 
 # Download output
 gog-backup/
+game-backup/
+steam-tokens.json

@@ -6,7 +6,7 @@ command -v jq >/dev/null || { echo "jq is required for the GameVault sync probes
 SYNC_FIXTURE=$(mktemp -d)
 export SYNC_FIXTURE
 trap 'rm -rf "$SYNC_FIXTURE"' EXIT
-mkdir -p "$SYNC_FIXTURE/bin" "$SYNC_FIXTURE/backups/game__1"
+mkdir -p "$SYNC_FIXTURE/bin" "$SYNC_FIXTURE/backups/game"
 cat > "$SYNC_FIXTURE/bin/curl" <<'SH'
 #!/usr/bin/env sh
 set -eu
@@ -17,6 +17,7 @@ while [ "$#" -gt 0 ]; do
         *) url="$1"; shift ;;
     esac
 done
+
 case "$url" in
     */auth/basic/login) printf '{"access_token":"fixture"}' ;;
     */games\?*) cat "$SYNC_FIXTURE/games.json" ;;
@@ -42,11 +43,11 @@ desired_parameters=$(printf '%s\t%s\n%s' '--profile "A B"' 'C:\Users\Player' '--
 write_backup() {
     jq -n --arg e "$desired_executable" --arg p "$desired_parameters" \
         '{Platforms: {Windows: {ArchiveName: "Game.zip", LaunchExecutable: $e, LaunchParameters: $p}}}' \
-        > "$BACKUP_DIR/game__1/.gogdl.json"
+        > "$BACKUP_DIR/game/.gogdl.json"
 }
 write_game() {
     jq -n --arg e "$1" --arg p "$2" \
-        '{data: [{id: 1, file_path: "/files/game__1/Game.zip", user_metadata: {launch_executable: $e, launch_parameters: $p}}]}' \
+        '{data: [{id: 1, file_path: "/files/game/Game.zip", user_metadata: {launch_executable: $e, launch_parameters: $p}}]}' \
         > "$SYNC_FIXTURE/games.json"
 }
 run_sync() {
@@ -93,3 +94,68 @@ run_sync
 check "an executable change still updates both fields" \
     jq -e --arg e "$desired_executable" --arg p "$desired_parameters" \
         '.user_metadata == {launch_executable: $e, launch_parameters: $p}' "$SYNC_FIXTURE/requests.jsonl"
+
+mkdir -p "$BACKUP_DIR/foreign"
+printf '%s\n' '{"Source":"steam","Platforms":"a different schema"}' > "$BACKUP_DIR/foreign/.gogdl.json"
+jq '.Source = "GOG"' "$BACKUP_DIR/game/.gogdl.json" > "$SYNC_FIXTURE/source.json"
+mv "$SYNC_FIXTURE/source.json" "$BACKUP_DIR/game/.gogdl.json"
+run_sync
+check "sync accepts explicit GOG sources and ignores foreign schemas" test "$(printf '%s' "$result" | tail -n 1)" = \
+    'done: 1 updated, 0 current, 0 would change, 0 not in GameVault, 0 failed.'
+
+for source in '"Steam"' '"manual"' 'null' '""' '42'; do
+    jq --argjson source "$source" 'del(.Source) | .source = $source' \
+        "$BACKUP_DIR/game/.gogdl.json" > "$SYNC_FIXTURE/source.json"
+    mv "$SYNC_FIXTURE/source.json" "$BACKUP_DIR/game/.gogdl.json"
+    run_sync
+    check "sync never writes launch metadata from source $source" test ! -s "$SYNC_FIXTURE/requests.jsonl"
+done
+
+# Native Steam metadata shares the launch fields, but lives in its own versioned envelope.
+write_backup
+jq '. + {SchemaVersion: 2, Source: "steam", ProductId: "1", Slug: "game", Title: "Game"}' \
+    "$BACKUP_DIR/game/.gogdl.json" > "$BACKUP_DIR/game/.gamebackup.json"
+rm "$BACKUP_DIR/game/.gogdl.json"
+run_sync
+check "sync reads launch metadata from native Steam archives" \
+    jq -e --arg e "$desired_executable" '.user_metadata.launch_executable == $e' "$SYNC_FIXTURE/requests.jsonl"
+jq '.Source = "epic"' "$BACKUP_DIR/game/.gamebackup.json" > "$SYNC_FIXTURE/source.json"
+mv "$SYNC_FIXTURE/source.json" "$BACKUP_DIR/game/.gamebackup.json"
+run_sync
+check "unsupported modern sources remain untouched" test ! -s "$SYNC_FIXTURE/requests.jsonl"
+
+jq '.Source = "steam"' "$BACKUP_DIR/game/.gamebackup.json" > "$SYNC_FIXTURE/source.json"
+mv "$SYNC_FIXTURE/source.json" "$BACKUP_DIR/game/.gamebackup.json"
+write_game 'old.exe' '--old'
+jq '.data = [(.data[0] + {id: 2, file_path: "/files/other/Game.zip"}), .data[0]]' \
+    "$SYNC_FIXTURE/games.json" > "$SYNC_FIXTURE/matches.json"
+mv "$SYNC_FIXTURE/matches.json" "$SYNC_FIXTURE/games.json"
+run_sync
+check "duplicate archive basenames are matched by their backup folder" test "$(wc -l < "$SYNC_FIXTURE/requests.jsonl")" -eq 1
+jq '.data[1].file_path = "/files/elsewhere/Game.zip"' "$SYNC_FIXTURE/games.json" > "$SYNC_FIXTURE/matches.json"
+mv "$SYNC_FIXTURE/matches.json" "$SYNC_FIXTURE/games.json"
+: > "$SYNC_FIXTURE/requests.jsonl"
+failed=0
+result=$(sh scripts/gamevault-sync.sh 2>&1) || failed=$?
+check "an ambiguous archive match fails without updating another game's launcher" test "$failed" -eq 1
+check "ambiguous matches make no update request" test ! -s "$SYNC_FIXTURE/requests.jsonl"
+
+write_game 'old.exe' '--old'
+write_backup
+jq '. + {GameId: 1, Source: "gog"}' "$BACKUP_DIR/game/.gogdl.json" > "$SYNC_FIXTURE/source.json"
+mv "$SYNC_FIXTURE/source.json" "$BACKUP_DIR/game/.gogdl.json"
+jq '.Source = "gog" | .Platforms.Windows.LaunchExecutable = "stale.exe"' \
+    "$BACKUP_DIR/game/.gamebackup.json" > "$SYNC_FIXTURE/source.json"
+mv "$SYNC_FIXTURE/source.json" "$BACKUP_DIR/game/.gamebackup.json"
+run_sync
+check "matching dual metadata envelopes use the authoritative GOG launcher once" \
+    test "$(wc -l < "$SYNC_FIXTURE/requests.jsonl")" -eq 1
+check "stale native GOG launch data cannot override current legacy metadata" \
+    jq -e --arg e "$desired_executable" '.user_metadata.launch_executable == $e' "$SYNC_FIXTURE/requests.jsonl"
+jq '.Source = "steam"' "$BACKUP_DIR/game/.gamebackup.json" > "$SYNC_FIXTURE/source.json"
+mv "$SYNC_FIXTURE/source.json" "$BACKUP_DIR/game/.gamebackup.json"
+: > "$SYNC_FIXTURE/requests.jsonl"
+failed=0
+result=$(sh scripts/gamevault-sync.sh 2>&1) || failed=$?
+check "conflicting metadata owners fail without a GameVault update" test "$failed" -eq 1
+check "conflicting owners make no update request" test ! -s "$SYNC_FIXTURE/requests.jsonl"

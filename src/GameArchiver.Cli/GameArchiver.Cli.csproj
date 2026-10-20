@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><PackAsTool>true</PackAsTool><ToolCommandName>gamearchiver</ToolCommandName>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Description>Archive owned GOG and Steam games through standalone providers and a unified API.</Description>
+    <PackageProjectUrl>https://github.com/vladimir-aubrecht/gogdownloader</PackageProjectUrl>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../GameArchiver/GameArchiver.csproj" /></ItemGroup>
+  <ItemGroup><None Include="../../README.md" Pack="true" PackagePath="/" /></ItemGroup>
+</Project>

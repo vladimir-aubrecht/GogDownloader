@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>GogArchiver.Probes</AssemblyName>
+    <RootNamespace>GogArchiver.Probes</RootNamespace>
+  </PropertyGroup>
+
+  <!-- No test framework on purpose: this project depends on nothing outside the SDK,
+       matching the rest of the repo. `Probe.Check` is all the assertion machinery needed. -->
+  <ItemGroup>
+    <ProjectReference Include="../../src/GogArchiver.Core/GogArchiver.Core.csproj" />
+    <ProjectReference Include="../../src/GogArchiver.Cli/GogArchiver.Cli.csproj" />
+      <ProjectReference Include="../../src/GameArchiver.Cli/GameArchiver.Cli.csproj" />
+  </ItemGroup>
+
+</Project>

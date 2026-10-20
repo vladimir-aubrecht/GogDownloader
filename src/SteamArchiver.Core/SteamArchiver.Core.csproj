@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../GameArchiver.Core/GameArchiver.Core.csproj" />
+    <PackageReference Include="SteamKit2" Version="3.4.0" GeneratePathProperty="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="$(PkgSteamKit2)/license.txt" Link="third-party/SteamKit2-LICENSE.txt"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Pack="true" PackagePath="licenses/SteamKit2-LICENSE.txt" />
+    <None Include="$(PkgSteamKit2)/3rd party.txt" Link="third-party/SteamKit2-THIRD-PARTY.txt"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Pack="true" PackagePath="licenses/SteamKit2-THIRD-PARTY.txt" />
+    <None Include="../../THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Pack="true" PackagePath="" />
+  </ItemGroup>
+</Project>

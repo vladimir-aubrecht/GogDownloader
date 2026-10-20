@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../GameArchiver.Core/GameArchiver.Core.csproj" />
+    <ProjectReference Include="../GogArchiver.Core/GogArchiver.Core.csproj" />
+    <ProjectReference Include="../SteamArchiver.Core/SteamArchiver.Core.csproj" />
+  </ItemGroup>
+</Project>

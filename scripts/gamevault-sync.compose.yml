@@ -1,10 +1,10 @@
 # A sidecar that keeps GameVault's launch executables in step with your backups.
 #
-# GogDownloader records the launcher GOG declares into each backup's .gogdl.json; this service
+# GogArchiver records the launcher GOG declares into each backup's .gogdl.json; this service
 # reads those and calls the GameVault API. The dependency on GameVault lives here, in your
 # compose file, not in the backup tool.
 #
-# Mount the same volume GameVault indexes and the directory GogDownloader wrote to (often the
+# Mount the same volume GameVault indexes and the directory GogArchiver wrote to (often the
 # same one), then set the three GAMEVAULT_* values.
 
 services:

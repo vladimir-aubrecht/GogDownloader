@@ -267,7 +267,8 @@ internal sealed class SteamKitSession : ISteamSession
 
     private async Task<SteamApp> DecodeProductAsync(uint appId, SteamApps.PICSProductInfoCallback.PICSProductInfo product, CancellationToken ct)
     {
-        if (product.MissingToken) throw new SteamAuthenticationException($"Missing Steam access token for app {appId}.");
+        if (product.MissingToken) throw new SteamAuthenticationException(
+            $"Steam did not grant access to appinfo for {appId} (PICS missing_token). The app may be private or retired.");
         var info = product.KeyValues;
         if (product.UseHttp && product.HttpUri is { } uri)
         {

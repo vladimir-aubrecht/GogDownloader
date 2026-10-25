@@ -142,7 +142,10 @@ public sealed class SteamClient : IGameStore
                 if (original.OsList.Length > 0 && !original.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase)) continue;
                 var depot = original;
                 var visited = new HashSet<uint>();
-                while (depot.SharedFromApp != 0)
+                // A shared depot can already publish its manifest in the licensed app's
+                // appinfo. Only look up its source when the selected branch is missing:
+                // source appinfo may be private even though this depot is accessible.
+                while (depot.SharedFromApp != 0 && !depot.Manifests.ContainsKey(options.Branch))
                 {
                     if (!visited.Add(depot.SharedFromApp)) throw new InvalidDataException("Cyclic shared Steam depot.");
                     var shared = (await _session.GetAppAsync(depot.SharedFromApp, ct)).Depots.SingleOrDefault(d => d.DepotId == depot.DepotId)

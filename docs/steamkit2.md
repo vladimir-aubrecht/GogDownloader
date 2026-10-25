@@ -53,7 +53,7 @@ Appinfo fields used by this provider:
 | `depots/branches/{branch}/buildid` | Branch build identifier |
 | `depots/{depot}/config/oslist`, `osarch`, `language` | Depot selection constraints |
 | `depots/{depot}/dlcappid` | DLC-specific content, gated by license |
-| `depots/{depot}/depotfromapp` | Shared depot; resolve appinfo recursively with cycle checks |
+| `depots/{depot}/depotfromapp` | Shared depot; resolve source appinfo only when the selected branch has no local manifest, with cycle checks |
 | `depots/{depot}/manifests/{branch}/gid` | Unsigned 64-bit manifest ID |
 | `config/launch/*` | Executable/arguments and OS constraint |
 
@@ -62,6 +62,29 @@ depot/manifest selection, not just the top-level build number. Private/encrypted
 are rejected rather than silently replaced by another branch.
 
 Primary sources: `Steam/Handlers/SteamApps/SteamApps.cs`, `Callbacks.cs`, `Types/KeyValue.cs`.
+
+### Shared depot manifests and unavailable appinfo
+
+A shared depot can publish its manifest directly in the licensed game's appinfo alongside
+`depotfromapp`. Prefer that manifest for the selected branch; the source application's metadata
+may be inaccessible and may describe a different manifest. Look up source appinfo only when
+the local entry has no manifest for that branch. Authorize depot keys and manifest requests
+against the licensed parent game, and retain the shared depot in the archive and completion
+metadata. A failed depot download must still prevent completion.
+
+Observed on 2026-10-25 in the public appinfo cache at
+`https://api.steamcmd.net/v1/info/{appid}`: BioShock Infinite (8870), XCOM 2 (268500), BioShock
+Remastered (409710), BioShock 2 Remastered (409720) and XCOM: Chimera Squad (882100) each expose
+Windows depot 1523211 with `depotfromapp=1523210` and public manifest 5488617169383930545.
+Appinfo for 1523210, 41710 and 223060 contains only identity/public-only fields and
+`_missing_token=true`; the user's authenticated PICS requests also reported missing tokens.
+These observations motivate the shared-depot regression fixture; the application never calls
+this public cache or hardcodes these IDs.
+
+Do not suppress actual PICS access failures or treat empty appinfo as a game. `missing_token`
+describes access to an individual application's metadata. The unavailable application remains
+a per-app sync failure and an older snapshot entry is retained when present. It must not make
+other games fail when their own appinfo already contains the required shared manifests.
 
 ## SteamPipe downloads
 

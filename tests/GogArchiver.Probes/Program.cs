@@ -13,6 +13,7 @@ await MultiStoreProbes.RunAsync();
 await SteamConnectionProbes.RunAsync();
 await SteamSharedDepotProbes.RunAsync();
 await SteamAppInfoProbes.RunAsync();
+await DownloadSizeProbes.RunAsync();
 await ProviderLayoutProbes.RunAsync();
 await ArchiveFileProbes.RunAsync();
 await ReviewProbes.RunAsync();

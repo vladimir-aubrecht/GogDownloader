@@ -126,6 +126,11 @@ An injected `ISteamSession` supplies a controlled protocol boundary for embeddin
 owned by `SteamClient`. It returns licensed AppIDs, parsed appinfo and a content session. The
 default implementation is `SteamKitSession`; it uses CM callbacks, license/package tokens, PICS,
 Steam Guard and SteamPipe through SteamKit2. Library metadata is requested in batches.
+Steam sync and version queries populate `GameVersion.DownloadSize` and `InstalledSize` from
+the final selected depot manifests, including owned DLC and deduplicating shared depots.
+If any selected depot lacks a size, the corresponding total is zero (unknown). GOG installer
+versions use the selected installer size for `DownloadSize`. These are full-content estimates,
+independent of cache/resume savings, and do not change content-version identity.
 Missing-token appinfo responses receive one individual token/product-info retry. Persistent
 errors include token states and licensing package IDs without exposing token values.
 `ISteamSession.GetAppNamesAsync` is an optional label lookup with an empty default implementation.

@@ -11,6 +11,8 @@ public sealed record SteamDepot(uint DepotId)
     public string Architecture { get; init; } = "";
     public string Language { get; init; } = "";
     public Dictionary<string, ulong> Manifests { get; init; } = [];
+    public Dictionary<string, long> DownloadSizes { get; init; } = [];
+    public Dictionary<string, long> InstalledSizes { get; init; } = [];
 }
 
 public sealed record SteamApp(uint AppId, string Title)
@@ -46,9 +48,17 @@ public sealed record SteamApp(uint AppId, string Title)
                 Language = d["config"]["language"].AsString() ?? "",
                 Manifests = d["manifests"].Children.Select(b => (Name: b.Name!, Id: b["gid"].AsUnsignedLong()))
                     .Where(b => b.Id > 0).ToDictionary(b => b.Name, b => b.Id),
+                DownloadSizes = Sizes(d["manifests"], "download"),
+                InstalledSizes = Sizes(d["manifests"], "size"),
             }).ToList(),
         };
     }
+
+    private static Dictionary<string, long> Sizes(KeyValue manifests, string field) => manifests.Children
+        .Where(b => b["gid"].AsUnsignedLong() > 0)
+        .Select(b => (Name: b.Name!, Size: long.TryParse(b[field].Value, System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var size) ? (long?)size : null))
+        .Where(b => b.Size is >= 0).ToDictionary(b => b.Name, b => b.Size!.Value);
 }
 public sealed record SteamLaunch(string Executable, string? Arguments, string OsList = "");
 

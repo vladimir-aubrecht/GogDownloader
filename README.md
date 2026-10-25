@@ -119,6 +119,31 @@ The native Steam path is exercised with controlled session/CDN fixtures. A live 
 depot download and execution on ARM64 still need verification on a real account/device. No
 Steam credentials are required to build or run the test suite.
 
+## Download a subset by size
+
+Use `--max-size` with `download --all` to select games whose recorded full download estimate
+is **below** the limit. Run sync after updating to populate Steam sizes, then preview:
+
+```sh
+dotnet run --project src/GameArchiver.Cli -- library sync --source steam
+dotnet run --project src/GameArchiver.Cli -- download --all --source steam --max-size 100MB --dry-run
+dotnet run --project src/GameArchiver.Cli -- download --all --source steam --max-size 100MB --out /backups
+```
+
+The filter also works with GOG or all providers and with a title/slug search. It uses the last
+snapshot without network requests. Steam sizes include the selected OS, language, architecture,
+branch and owned DLC, counting a shared depot once. GOG installer estimates use the selected
+installer's total size. A DLC selection is resolved to its base game before applying the limit.
+
+Unknown sizes, retained failed-sync metadata and sizes for another language/branch/architecture
+are skipped and counted in the summary. A new sync populates the default English, public,
+64-bit Steam selection. The estimate is for a full transfer, independent of resume/reuse, and
+is neither the resulting ZIP size nor a hard network-byte cap; a newer live build may differ.
+
+`100MB` means 100,000,000 bytes; `100MiB` or `100M` means 104,857,600 bytes. Bare numbers mean
+bytes. KB/MB/GB/TB use powers of 1000; KiB/MiB/GiB/TiB and K/M/G/T use powers of 1024.
+Fractional units such as `0.1GiB` are accepted and rounded down to whole bytes.
+
 ## Add, find or replace files in existing ZIPs
 
 The unified CLI can edit all completed archives in a backup directory without logging into a

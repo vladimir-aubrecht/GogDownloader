@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using GameArchiver.Core;
 using GogArchiver.Core;
 using GogArchiver.Core.Auth;
@@ -14,7 +15,7 @@ public static class ArchiveCommandLine
         "deep", "fix", "refresh", "keys", "help", "version", "ignore-case"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
-        "file", "entry", "name", "path"];
+        "file", "entry", "name", "path", "max-size"];
 
     /// <summary>Run the same CLI with supplied stores for embedding or offline integration tests.</summary>
     public static async Task<int> RunAsync(string[] args, CancellationToken ct = default,
@@ -69,6 +70,12 @@ public static class ArchiveCommandLine
         var snapshotPath = flags.GetValueOrDefault("snapshot", ArchiveLibrary.DefaultPath);
         var command = positionals[0];
         var subcommand = positionals.ElementAtOrDefault(1);
+        long? maxSize = null;
+        if (flags.TryGetValue("max-size", out var sizeLimit))
+        {
+            if (command != "download" || !flags.ContainsKey("all")) throw new ArgumentException("--max-size requires download --all.");
+            maxSize = ParseSizeLimit(sizeLimit);
+        }
         ArchiveLibrary? library = null;
         var legacy = false;
         if (command is not "auth" and not "verify" and not "archive" && File.Exists(snapshotPath))
@@ -239,7 +246,26 @@ public static class ArchiveCommandLine
             if (flags.ContainsKey("all"))
             {
                 if (library is null) throw new FileNotFoundException("No aggregate library snapshot. Run library sync first.");
-                keys.AddRange(library.SelectDownloads(games.Where(g => Search(g, search)), options.Platform).Select(g => g.Key));
+                var candidates = library.SelectDownloads(games.Where(g => Search(g, search)), options.Platform);
+                var tooLarge = 0; var unknown = 0;
+                foreach (var game in candidates)
+                {
+                    if (maxSize is null) { keys.Add(game.Key); continue; }
+                    var version = game.Versions[options.Platform];
+                    if (library.Failures.ContainsKey(game.Key.Source) || library.Failures.ContainsKey(game.Key.ToString())
+                        || version.DownloadSize <= 0 || version.Branch != options.Branch
+                        || !string.Equals(version.Language, options.Language, StringComparison.OrdinalIgnoreCase)
+                        || version.Architecture.Length > 0 && version.Architecture != options.Architecture)
+                    { unknown++; continue; }
+                    if (version.DownloadSize >= maxSize.Value) { tooLarge++; continue; }
+                    keys.Add(game.Key);
+                }
+                if (maxSize is not null)
+                {
+                    Console.Error.WriteLine($"Size filter: {keys.Count} selected below {maxSize.Value} bytes (download estimate); "
+                        + $"{tooLarge} at or above the limit; {unknown} with unknown or incompatible size.");
+                    if (unknown > 0) Console.Error.WriteLine("Run library sync to update sizes. The size filter requires the snapshot's language, branch and architecture.");
+                }
             }
             else
             {
@@ -288,6 +314,28 @@ public static class ArchiveCommandLine
         var name = library.FailureNames.GetValueOrDefault(key);
         if (string.IsNullOrWhiteSpace(name)) name = library.Games.FirstOrDefault(g => g.Key.ToString() == key)?.Title;
         return $"{(string.IsNullOrWhiteSpace(name) ? "Name unavailable" : name)} ({key})";
+    }
+
+    private static long ParseSizeLimit(string value)
+    {
+        var match = Regex.Match(value.Trim(), @"^([0-9]+(?:\.[0-9]+)?)\s*(B|K|M|G|T|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (match.Success && decimal.TryParse(match.Groups[1].Value, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var number))
+        {
+            var multiplier = match.Groups[2].Value.ToLowerInvariant() switch
+            {
+                "kb" => 1_000L, "mb" => 1_000_000L, "gb" => 1_000_000_000L, "tb" => 1_000_000_000_000L,
+                "k" or "kib" => 1L << 10, "m" or "mib" => 1L << 20, "g" or "gib" => 1L << 30, "t" or "tib" => 1L << 40,
+                _ => 1L,
+            };
+            try
+            {
+                var bytes = number * multiplier;
+                if (bytes >= 1 && bytes <= long.MaxValue) return (long)bytes;
+            }
+            catch (OverflowException) { }
+        }
+        throw new ArgumentException("Invalid --max-size. Use a positive size in bytes or units, for example 100MB or 1GiB.");
     }
 
     private static bool Search(GameInfo game, string search) => search.Length == 0
@@ -363,6 +411,7 @@ public static class ArchiveCommandLine
           --layout flat|provider --provider-dir PROVIDER=FOLDER (repeatable; implies provider layout)
           --platform windows|linux|mac --language en --arch 32|64|arm64 --branch public
           --directory NAME --connections N --compression-threads N --limit-rate 5M
+          --max-size 100MB (download --all: below the recorded full download size; unknown sizes skipped)
           --force --clean --no-reuse --no-verify --no-launcher --dry-run
         Auth: --gog-tokens FILE --steam-tokens FILE --username NAME --code URL
           Steam password: interactive prompt or GAMEARCHIVE_STEAM_PASSWORD

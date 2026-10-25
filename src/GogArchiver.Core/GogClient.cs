@@ -143,7 +143,8 @@ public sealed class GogClient : IGameStore
             Name = availability.Depot?.VersionName ?? installer?.Version, Language = language, Architecture = "",
             BuildVariesByLanguage = availability.Depot is null,
             Dlcs = game.DlcsFor((GamePlatform)platform).Select(d => d.ProductId).ToList(),
-            DownloadSize = availability.DownloadSize, InstalledSize = availability.InstalledSize,
+            DownloadSize = availability.Depot is null ? installer?.TotalSize ?? 0 : availability.DownloadSize,
+            InstalledSize = availability.InstalledSize,
         };
     }
 

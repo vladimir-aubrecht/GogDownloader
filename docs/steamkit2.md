@@ -63,11 +63,19 @@ Appinfo fields used by this provider:
 | `depots/{depot}/dlcappid` | DLC-specific content, gated by license |
 | `depots/{depot}/depotfromapp` | Shared depot; resolve source appinfo only when the selected branch has no local manifest, with cycle checks |
 | `depots/{depot}/manifests/{branch}/gid` | Unsigned 64-bit manifest ID |
+| `depots/{depot}/manifests/{branch}/download`, `size` | Full compressed/download and unpacked byte estimates for that manifest |
 | `config/launch/*` | Executable/arguments and OS constraint |
 
 Main content precedes DLC content when merging paths. The archive's identity includes the final
 depot/manifest selection, not just the top-level build number. Private/encrypted branch manifests
 are rejected rather than silently replaced by another branch.
+
+Record both sizes for the final selected depot set, after OS/language/architecture/DLC
+filtering and shared-depot resolution. Count repeated depot/manifest pairs once. Size data
+from another manifest must never be reused after a DLC override. Missing or malformed size
+fields make that total unknown (zero in `GameVersion`), rather than summing only known depots.
+A known zero-byte depot is valid when other selected depots have content. Size estimates do
+not participate in `GameVersion.Matches`, so learning a size does not invalidate a backup.
 
 Primary sources: `Steam/Handlers/SteamApps/SteamApps.cs`, `Callbacks.cs`, `Types/KeyValue.cs`.
 
@@ -88,6 +96,15 @@ Appinfo for 1523210, 41710 and 223060 contains only identity/public-only fields 
 `_missing_token=true`; the user's authenticated PICS requests also reported missing tokens.
 These observations motivate the shared-depot regression fixture; the application never calls
 this public cache or hardcodes these IDs.
+
+A later authenticated run confirmed explicit `AppTokensDenied` responses on both the initial
+and individual request for all 15 remaining AppIDs. The optional name lookup returned no names.
+Package membership provides context but does not establish the private app's title: the public
+`https://store.steampowered.com/api/packagedetails?packageids={packageid}&l=english` endpoint
+maps package 466 to S.T.A.L.K.E.R.: Shadow of Chernobyl (main AppID 4500), package 7254 to Magicka
+(42910), and package 2120 to Majesty 2 (25980). The denied extra AppIDs in those packages were
+41710, 479520 and 481220 respectively. Do not label these extra apps with the main game's name
+or conclude that the main game is missing just because the extra app's metadata is unavailable.
 
 Do not suppress actual PICS access failures or treat empty appinfo as a game. `missing_token`
 describes access to an individual application's metadata. The unavailable application remains

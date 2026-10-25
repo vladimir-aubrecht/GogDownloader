@@ -142,7 +142,7 @@ public sealed class SteamClient : IGameStore
             .Where(owned.Contains).Distinct().Order().ToList();
         var apps = new List<SteamApp> { app };
         foreach (var dlc in dlcs) apps.Add(await _session.GetAppAsync(dlc, ct));
-        var selected = new Dictionary<uint, (SteamDepotRequest Request, bool Dlc)>();
+        var selected = new Dictionary<uint, (SteamDepotRequest Request, bool Dlc, long? DownloadSize, long? InstalledSize)>();
         foreach (var parent in apps)
         {
             var eligible = new List<SteamDepot>();
@@ -187,9 +187,19 @@ public sealed class SteamClient : IGameStore
                 if (!depot.Manifests.TryGetValue(options.Branch, out var manifest))
                     throw new NotSupportedException($"No accessible '{options.Branch}' manifest for depot {depot.DepotId}; private branches are not supported.");
                 var isDlc = parent.AppId != app.AppId || depot.DlcAppId != 0;
-                var request = selected.TryGetValue(depot.DepotId, out var existing) && existing.Request.ManifestId == manifest
+                var sameManifest = selected.TryGetValue(depot.DepotId, out var existing) && existing.Request.ManifestId == manifest;
+                var request = sameManifest
                     ? existing.Request : new SteamDepotRequest(parent.AppId, depot.DepotId, manifest, options.Branch);
-                selected[depot.DepotId] = (request, isDlc || existing.Dlc);
+                long? downloadSize = depot.DownloadSizes.TryGetValue(options.Branch, out var download) ? download : null;
+                long? installedSize = depot.InstalledSizes.TryGetValue(options.Branch, out var installed) ? installed : null;
+                if (sameManifest)
+                {
+                    // A repeated depot is downloaded once. Its size can be present in only
+                    // one app's metadata; never carry sizes over to a different manifest.
+                    downloadSize = MergeSize(downloadSize, existing.DownloadSize);
+                    installedSize = MergeSize(installedSize, existing.InstalledSize);
+                }
+                selected[depot.DepotId] = (request, isDlc || existing.Dlc, downloadSize, installedSize);
             }
         }
         if (selected.Count == 0) throw new InvalidDataException("Steam selection contains no downloadable depots.");
@@ -200,8 +210,18 @@ public sealed class SteamClient : IGameStore
             Name = buildId, Branch = options.Branch, Architecture = options.Architecture, Language = options.Language.ToLowerInvariant(),
             Dlcs = game.OwnedDlcs, Manifests = selected.Values.Select(d => d.Request).OrderBy(d => d.DepotId)
                 .ToDictionary(d => d.DepotId.ToString(), d => d.ManifestId.ToString()),
+            DownloadSize = TotalSize(selected.Values.Select(d => d.DownloadSize)),
+            InstalledSize = TotalSize(selected.Values.Select(d => d.InstalledSize)),
         };
         return new(game, version, selected.Values.OrderBy(d => d.Dlc).ThenBy(d => d.Request.DepotId).Select(d => d.Request).ToList(), app);
+    }
+
+    private static long? MergeSize(long? current, long? previous) => current is not null && previous is not null
+        ? Math.Max(current.Value, previous.Value) : current ?? previous;
+    private static long TotalSize(IEnumerable<long?> sizes)
+    {
+        var values = sizes.ToArray();
+        return values.All(s => s is >= 0) ? values.Sum(s => s!.Value) : 0;
     }
 
     public async Task<GameVersion> GetVersionAsync(string productId, GameSelection options, CancellationToken ct = default)

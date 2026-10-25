@@ -97,15 +97,28 @@ credentials/Steam Guard, or after logon. After updating the code, rebuild before
 
 If Steam reports missing access tokens for individual apps, sync retries each affected app
 once with a fresh individual token request. Persistent failures include the token response
-states and owning package IDs, with no token values. They remain recorded failures; a name
+states and owning package IDs, with no token values. Confirmed access denials have a shorter
+default display; `--details` on `library sync` or `library failures` shows the complete diagnostic.
+They remain recorded failures with a nonzero sync exit status; a name
 alone does not make an app downloadable. Failures show a title from Steam or an earlier snapshot
 when available, otherwise `Name unavailable (steam:ID)`.
+
+Multiple active licenses granting the same AppID are combined before appinfo is requested.
+A different accessible app in the same package does not prove that the denied app is available,
+even if their titles match. Such failures are not suppressed.
+
+`Saved N products` counts unique `(source, product ID)` entries in the saved snapshot, including
+DLC, applications, demos and tools. It is neither a license count nor the Steam client's game
+count. Sync also prints a per-source breakdown by product type; `library stats --source steam`
+shows the same breakdown offline. A source-filtered sync retains the other stores' entries and
+older entries for failed products, so the saved total can include both.
 
 Inspect the saved failures without logging in or repeating sync:
 
 ```sh
 dotnet run --project src/GameArchiver.Cli -- library failures --source steam
 dotnet run --project src/GameArchiver.Cli -- library failures "title or AppID" --source steam
+dotnet run --project src/GameArchiver.Cli -- library failures --source steam --details
 ```
 
 The rename changes project, assembly and namespace names, plus the unified tool command to

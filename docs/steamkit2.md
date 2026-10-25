@@ -37,6 +37,10 @@ Primary sources: `Samples/000_Authentication/Program.cs`, `Steam/Authentication/
 `LicenseListCallback` supplies package IDs, flags and package access tokens. Ask PICS for package
 info with those tokens and read package `appids`. Do not invent ownership by treating public
 appinfo as an ownership grant. Expired/cancelled/not-activated licenses are excluded.
+Union AppIDs from all active packages before fetching appinfo: duplicate licenses do not add
+duplicate library entries. A package can contain games, DLC, software, demos and tools, so
+the saved product count is not a license count or the Steam client's game count. Display the
+product types separately, using `common/type`.
 
 Request app access tokens with `PICSGetAccessTokens`, then app info with `PICSGetProductInfo`.
 `AsyncJobMultiple.ResultSet.Complete` and `Failed` must be checked; partial results are not a
@@ -110,6 +114,15 @@ Do not suppress actual PICS access failures or treat empty appinfo as a game. `m
 describes access to an individual application's metadata. The unavailable application remains
 a per-app sync failure and an older snapshot entry is retained when present. It must not make
 other games fail when their own appinfo already contains the required shared manifests.
+An accessible different AppID in the same package, even with the same title, is not evidence
+that the denied AppID is available through another license. Keep the failure unless that
+same AppID actually succeeds. Do not reclassify these failures as harmless package duplicates.
+
+When both token requests explicitly deny the same AppID, the CLI uses a concise summary and
+retains full diagnostics in `Failures`; `--details` on sync or offline failures prints them.
+If a game fails on a required app's metadata, its summary names that required AppID. Timeouts,
+omitted tokens and other failures keep their diagnostic text instead of claiming a confirmed
+access denial. Summaries never alter failure status or the sync exit code.
 
 For diagnostic display names, keep any name present in PICS even if protected appinfo is
 unavailable. For failures without names, try `Player.GetOwnedGames#1` through SteamKit2 unified

@@ -12,7 +12,7 @@ namespace GameArchiver.Cli;
 public static class ArchiveCommandLine
 {
     private static readonly HashSet<string> Switches = ["all", "dry-run", "force", "clean", "no-reuse", "no-verify", "no-launcher",
-        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case"];
+        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
         "file", "entry", "name", "path", "max-size"];
@@ -149,9 +149,13 @@ public static class ArchiveCommandLine
                 throw new ArgumentException("Use a separate path for the aggregate snapshot; --gog-snapshot selects the original GOG snapshot.");
             library = await archive.SyncLibraryAsync(library, ct);
             await library.SaveAsync(snapshotPath, ct);
-            Console.WriteLine($"Saved {library.Games.Count} games to {snapshotPath}.");
+            Console.WriteLine($"Saved {library.Games.Count} product{(library.Games.Count == 1 ? "" : "s")} to {snapshotPath}.");
+            PrintLibraryStats(library.Games);
             var currentFailures = library.Failures.Where(f => archive.Sources.Contains(f.Key.Split(':', 2)[0])).ToList();
-            foreach (var failure in currentFailures) Console.Error.WriteLine($"Failed {FailureLabel(library, failure.Key)}: {failure.Value}");
+            foreach (var failure in currentFailures) Console.Error.WriteLine($"Failed {FailureLabel(library, failure.Key)}: "
+                + (flags.ContainsKey("details") ? failure.Value : library.FailureSummaries.GetValueOrDefault(failure.Key, failure.Value)));
+            if (currentFailures.Count > 0 && !flags.ContainsKey("details"))
+                Console.Error.WriteLine($"{currentFailures.Count} unresolved sync failures. Use --details for full diagnostics (also supported by library failures).");
             return currentFailures.Count == 0 ? 0 : 1;
         }
         var search = string.Join(' ', positionals.Skip(command is "library" or "archive" ? 2 : 1));
@@ -165,13 +169,14 @@ public static class ArchiveCommandLine
                     && (search.Length == 0 || f.Key.Contains(search, StringComparison.OrdinalIgnoreCase)
                         || FailureLabel(library, f.Key).Contains(search, StringComparison.OrdinalIgnoreCase)
                         || f.Value.Contains(search, StringComparison.OrdinalIgnoreCase))).OrderBy(f => f.Key).ToList();
-                foreach (var failure in failures) Console.WriteLine($"{FailureLabel(library, failure.Key)}: {failure.Value}");
+                foreach (var failure in failures) Console.WriteLine($"{FailureLabel(library, failure.Key)}: "
+                    + (flags.ContainsKey("details") ? failure.Value : library.FailureSummaries.GetValueOrDefault(failure.Key, failure.Value)));
                 Console.WriteLine($"{failures.Count} recorded sync failures.");
                 return 0;
             }
             games = games.Where(g => Search(g, search)).ToList();
             if (subcommand == "stats")
-            { foreach (var group in games.GroupBy(g => g.Key.Source)) Console.WriteLine($"{group.Key}: {group.Count()} products, {group.Count(g => g.Versions.Keys.Any(g.CanBackUp))} archivable"); return 0; }
+            { PrintLibraryStats(games); return 0; }
             if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats|failures");
             foreach (var game in games)
                 Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}");
@@ -316,6 +321,23 @@ public static class ArchiveCommandLine
         return $"{(string.IsNullOrWhiteSpace(name) ? "Name unavailable" : name)} ({key})";
     }
 
+    private static void PrintLibraryStats(IEnumerable<GameInfo> games)
+    {
+        var order = new[] { "game", "dlc", "application", "demo", "tool", "music", "video", "pack", "container" };
+        foreach (var source in games.GroupBy(g => g.Key.Source).OrderBy(g => g.Key))
+        {
+            var kinds = source.GroupBy(g => (g.Kind ?? "").ToLowerInvariant())
+                .OrderBy(g => Array.IndexOf(order, g.Key) is var index && index >= 0 ? index : order.Length).ThenBy(g => g.Key)
+                .Select(g => $"{g.Count()} " + (g.Key switch
+                {
+                    "game" or "application" or "demo" or "tool" or "pack" or "container" or "video" => g.Key + (g.Count() == 1 ? "" : "s"),
+                    "dlc" => "DLC", "" => "unknown", _ => g.Key,
+                }));
+            Console.WriteLine($"{source.Key}: {source.Count()} product{(source.Count() == 1 ? "" : "s")} ({string.Join(", ", kinds)}), "
+                + $"{source.Count(g => g.Versions.Keys.Any(g.CanBackUp))} archivable");
+        }
+    }
+
     private static long ParseSizeLimit(string value)
     {
         var match = Regex.Match(value.Trim(), @"^([0-9]+(?:\.[0-9]+)?)\s*(B|K|M|G|T|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?$",
@@ -399,6 +421,7 @@ public static class ArchiveCommandLine
         gamearchiver — archive owned GOG and Steam games
           auth login|status|logout --source gog|steam
           library sync|list|stats|failures [search] [--source gog|steam|all]
+            --details shows full diagnostics for library sync or library failures
           download <source:ID|slug> [--source gog|steam] | download --all [search]
           diff [search] [--refresh] [--keys]
           verify [search] [--deep] [--fix] [--keys]

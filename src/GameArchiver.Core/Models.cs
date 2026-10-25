@@ -117,6 +117,8 @@ public sealed record StoreLibraryResult(IReadOnlyList<GameInfo> Games)
 {
     public IReadOnlyDictionary<string, string> Failures { get; init; } = new Dictionary<string, string>();
     public IReadOnlyDictionary<string, string> FailureNames { get; init; } = new Dictionary<string, string>();
+    /// <summary>Optional display summaries; Failures retains full diagnostics and determines failure status.</summary>
+    public IReadOnlyDictionary<string, string> FailureSummaries { get; init; } = new Dictionary<string, string>();
 }
 
 /// <summary>Each implementation is independently usable and owns its authenticated session.</summary>
@@ -136,6 +138,8 @@ public sealed record ArchiveLibrary
     public List<GameInfo> Games { get; init; } = [];
     public Dictionary<string, string> Failures { get; init; } = [];
     public Dictionary<string, string> FailureNames { get; init; } = [];
+    /// <summary>Optional display summaries keyed by source:product ID. Full diagnostics remain in Failures.</summary>
+    public Dictionary<string, string> FailureSummaries { get; init; } = [];
 
     /// <summary>Resolve filtered DLC selections to their archivable parents for this OS.</summary>
     public IReadOnlyList<GameInfo> SelectDownloads(IEnumerable<GameInfo> selected, GameOs platform)
@@ -160,7 +164,8 @@ public sealed record ArchiveLibrary
         var library = await JsonSerializer.DeserializeAsync<ArchiveLibrary>(stream, ArchiveJson.Options, ct)
             ?? throw new InvalidDataException("Empty library snapshot.");
         if (library.SchemaVersion != 1) throw new InvalidDataException("Unsupported library snapshot schema.");
-        if (library.Games is null || library.Failures is null || library.FailureNames is null || library.Games.Any(g => g is null || g.Key is null
+        if (library.Games is null || library.Failures is null || library.FailureNames is null || library.FailureSummaries is null
+            || library.Games.Any(g => g is null || g.Key is null
             || g.Versions is null || g.Versions.Any(v => !Enum.IsDefined(v.Key) || v.Value is null || !v.Value.IsValid)
             || g.OwnedDlcs is null || g.Title is null || g.Slug is null)
             || library.Games.GroupBy(g => g.Key).Any(g => g.Count() > 1))

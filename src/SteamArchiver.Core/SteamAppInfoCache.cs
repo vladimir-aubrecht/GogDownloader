@@ -8,6 +8,7 @@ internal enum SteamAppTokenStatus { Denied, Omitted, Public, Granted }
 internal sealed class SteamAppInfoAccessException(uint appId, SteamAppTokenStatus tokenStatus)
     : IOException($"Steam appinfo for {appId} requires an access token (PICS missing_token; token request: {Describe(tokenStatus)}).")
 {
+    public uint AppId { get; } = appId;
     public SteamAppTokenStatus TokenStatus { get; } = tokenStatus;
 
     internal static SteamAppTokenStatus Status(uint appId, IReadOnlyDictionary<uint, ulong> tokens, IEnumerable<uint> denied) =>
@@ -21,6 +22,17 @@ internal sealed class SteamAppInfoAccessException(uint appId, SteamAppTokenStatu
         SteamAppTokenStatus.Public => "public (zero token)",
         _ => "nonzero token returned",
     };
+}
+
+internal sealed class SteamAppInfoRecheckException(uint appId, SteamAppTokenStatus initialStatus,
+    uint[] packageIds, Exception retryError) : IOException(
+        $"Appinfo recheck for {appId} failed. Initial token request: {SteamAppInfoAccessException.Describe(initialStatus)}. "
+        + $"Licensed packages: {(packageIds.Length == 0 ? "none in the current license list" : string.Join(", ", packageIds.Distinct().Order()))}. "
+        + $"Individual retry: {retryError.Message}", retryError)
+{
+    public uint AppId { get; } = appId;
+    public bool ExplicitlyDenied { get; } = initialStatus == SteamAppTokenStatus.Denied
+        && retryError is SteamAppInfoAccessException retry && retry.AppId == appId && retry.TokenStatus == SteamAppTokenStatus.Denied;
 }
 
 internal sealed record SteamAppInfoResult(SteamApp? App = null, Exception? Error = null);
@@ -70,13 +82,7 @@ internal sealed class SteamAppInfoCache(
                 try { result = Result(await fetch([id], ct), id); }
                 catch (Exception e) when (e is not OperationCanceledException) { result = new(Error: e); }
                 if (result.Error is not null)
-                {
-                    var packages = _packages.GetValueOrDefault(id, []);
-                    var origin = packages.Length == 0 ? "none in the current license list" : string.Join(", ", packages.Distinct().Order());
-                    result = new(Error: new IOException($"Appinfo recheck for {id} failed. Initial token request: "
-                        + $"{SteamAppInfoAccessException.Describe(first.TokenStatus)}. Licensed packages: {origin}. "
-                        + $"Individual retry: {result.Error.Message}", result.Error));
-                }
+                    result = new(Error: new SteamAppInfoRecheckException(id, first.TokenStatus, _packages.GetValueOrDefault(id, []), result.Error));
             }
             ct.ThrowIfCancellationRequested();
             _entries[id] = result;

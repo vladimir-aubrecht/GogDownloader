@@ -51,13 +51,16 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
                     if (string.IsNullOrWhiteSpace(name)) name = previous?.FailureNames.GetValueOrDefault(key.ToString());
                     if (!string.IsNullOrWhiteSpace(name)) names[key.ToString()] = name;
                 }
-                return (Games: games, Failures: snapshot.Failures.ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value), Names: names);
+                return (Games: games, Failures: snapshot.Failures.ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value), Names: names,
+                    Summaries: snapshot.FailureSummaries.Where(f => snapshot.Failures.ContainsKey(f.Key) && !string.IsNullOrWhiteSpace(f.Value))
+                        .ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value));
             }
             catch (Exception e) when (e is not OperationCanceledException)
             {
                 return (Games: previous?.Games.Where(g => g.Key.Source == source).ToList() ?? [],
                     Failures: new Dictionary<string, string> { [source] = e.Message },
-                    Names: previous?.FailureNames.Where(f => f.Key.Split(':', 2)[0] == source).ToDictionary() ?? new Dictionary<string, string>());
+                    Names: previous?.FailureNames.Where(f => f.Key.Split(':', 2)[0] == source).ToDictionary() ?? new Dictionary<string, string>(),
+                    Summaries: new Dictionary<string, string>());
             }
         }));
         // Syncing a selected source must not remove other stores from a shared snapshot.
@@ -69,6 +72,8 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
                 .Where(f => !_stores.ContainsKey(f.Key.Split(':', 2)[0])) ?? [])
                 .ToDictionary(p => p.Key, p => p.Value),
             FailureNames = results.SelectMany(r => r.Names).Concat(previous?.FailureNames
+                .Where(f => !_stores.ContainsKey(f.Key.Split(':', 2)[0])) ?? []).ToDictionary(),
+            FailureSummaries = results.SelectMany(r => r.Summaries).Concat(previous?.FailureSummaries
                 .Where(f => !_stores.ContainsKey(f.Key.Split(':', 2)[0])) ?? []).ToDictionary(),
         };
     }

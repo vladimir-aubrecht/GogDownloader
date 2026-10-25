@@ -61,6 +61,7 @@ public sealed class SteamClient : IGameStore
             await _session.PreloadAppsAsync(owned, ct);
             var games = new List<GameInfo>();
             var failures = new Dictionary<string, string>();
+            var summaries = new Dictionary<string, string>();
             var names = new Dictionary<string, string>();
             foreach (var id in owned.Order())
             {
@@ -95,7 +96,18 @@ public sealed class SteamClient : IGameStore
                     }
                     games.Add(game);
                 }
-                catch (Exception e) when (e is not OperationCanceledException) { failures[id.ToString()] = e.Message; }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    failures[id.ToString()] = e.Message;
+                    for (Exception? cause = e; cause is not null; cause = cause.InnerException)
+                        if (cause is SteamAppInfoRecheckException { ExplicitlyDenied: true } denied)
+                        {
+                            summaries[id.ToString()] = denied.AppId == id
+                                ? "Steam denied access to this app's metadata after retry."
+                                : $"Required Steam app {denied.AppId} is unavailable: metadata access denied after retry.";
+                            break;
+                        }
+                }
             }
             var missingNames = failures.Keys.Where(id => !names.ContainsKey(id)).Select(uint.Parse).ToHashSet();
             if (missingNames.Count > 0)
@@ -107,7 +119,8 @@ public sealed class SteamClient : IGameStore
                 }
                 catch (Exception e) when (e is not OperationCanceledException) { /* Optional labels must not discard a successful sync. */ }
             }
-            return new(games) { Failures = failures, FailureNames = names.Where(p => failures.ContainsKey(p.Key)).ToDictionary() };
+            return new(games) { Failures = failures, FailureNames = names.Where(p => failures.ContainsKey(p.Key)).ToDictionary(),
+                FailureSummaries = summaries };
         }
         finally { _gate.Release(); }
     }

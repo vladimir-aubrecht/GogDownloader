@@ -138,6 +138,17 @@ The native session uses PICS names and, for missing labels, a bounded `Player.Ge
 request. Names never supply ownership or downloadable content. `StoreLibraryResult.FailureNames`
 and `ArchiveLibrary.FailureNames` carry optional display names for failed IDs; older snapshots
 remain readable. The aggregator also retains names from previous snapshots during failures.
+`FailureSummaries` on both result types provides optional concise display text; `Failures`
+always retains the full diagnostics and determines failure status. The CLI defaults to a
+summary when available and accepts `--details` to show the full diagnostic. Refresh replaces
+summaries for the selected source so stale diagnoses cannot label new failures.
+
+Despite the historical `Games` property name, the list contains products of all returned
+types (`GameInfo.Kind`), including DLC, applications, demos and tools. Steam first unions
+AppIDs from active license packages; several licenses for the same AppID produce one entry.
+Shared package membership or a matching title never merges different AppIDs or dismisses an
+unresolved appinfo failure. The aggregate snapshot can also retain old entries for failed
+products and unselected providers; its total is not the number of newly refreshed games.
 
 ## Aggregate API
 

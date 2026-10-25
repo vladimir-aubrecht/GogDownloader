@@ -11,7 +11,8 @@ internal sealed record ContentHttpContext(CancellationToken Cancellation, RateLi
 
 /// <summary>SteamKit2's CDN API has no caller cancellation parameter. Own the HTTP body
 /// lifetime so cancellation aborts reads before the caller can reuse a chunk buffer.</summary>
-internal sealed class SteamContentHttpHandler(ContentHttpContext? context) : DelegatingHandler(new SocketsHttpHandler())
+internal sealed class SteamContentHttpHandler(ContentHttpContext? context, HttpMessageHandler? transport = null)
+    : DelegatingHandler(transport ?? new SocketsHttpHandler())
 {
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {

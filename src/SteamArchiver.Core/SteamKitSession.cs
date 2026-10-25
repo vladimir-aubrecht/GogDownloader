@@ -21,41 +21,81 @@ internal sealed class SteamKitSession : ISteamSession
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _pump;
     private readonly SemaphoreSlim _authGate = new(1, 1);
-    private readonly TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<SteamUser.LoggedOnCallback> _loggedOn = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<SteamApps.LicenseListCallback> _licenses = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ConcurrentDictionary<uint, SteamApp> _appCache = new();
     private readonly ConcurrentDictionary<uint, Exception> _appFailures = new();
     private readonly AsyncLocal<ContentHttpContext?> _httpContext = new();
-    private bool _connecting;
+    private volatile bool _connectionEstablished;
+    private volatile string _phase = "connecting to Steam";
+    private SteamAuthenticationException? _disconnectError;
     private bool _authenticated;
-    public bool Disconnected { get; private set; }
+    private volatile bool _disconnected;
+    public bool Disconnected => _disconnected;
     private int _disposed;
     private SteamApps.LicenseListCallback? _currentLicenses;
 
-    public SteamKitSession(SteamClientOptions options)
+    public SteamKitSession(SteamClientOptions options, Action<ISteamConfigurationBuilder>? configure = null)
     {
         _options = options;
-        _client = new(SteamConfiguration.Create(b => b.WithHttpClientFactory(_ =>
-            new HttpClient(new SteamContentHttpHandler(_httpContext.Value)) { Timeout = options.OperationTimeout })));
+        _client = new(SteamConfiguration.Create(b =>
+        {
+            b.WithHttpClientFactory(purpose => CreateHttpClient(purpose, options.OperationTimeout, _httpContext.Value));
+            configure?.Invoke(b);
+        }));
         _user = _client.GetHandler<SteamUser>()!;
         _apps = _client.GetHandler<SteamApps>()!;
         _content = _client.GetHandler<SteamContent>()!;
         _callbacks = new(_client);
-        _callbacks.Subscribe<KitClient.ConnectedCallback>(_ => _connected.TrySetResult());
+        _callbacks.Subscribe<KitClient.ConnectedCallback>(_ =>
+        {
+            if (_stop.IsCancellationRequested || Disconnected) return;
+            _phase = "starting authentication";
+            _connectionEstablished = true;
+            _connected.TrySetResult();
+        });
         _callbacks.Subscribe<SteamUser.LoggedOnCallback>(r => _loggedOn.TrySetResult(r));
         _callbacks.Subscribe<SteamApps.LicenseListCallback>(r => { _currentLicenses = r; _licenses.TrySetResult(r); });
         _callbacks.Subscribe<KitClient.DisconnectedCallback>(_ =>
         {
-            Disconnected = true;
+            if (_stop.IsCancellationRequested) return;
+            var error = new SteamAuthenticationException(_connectionEstablished
+                ? $"Steam disconnected while {_phase}. Retry the operation."
+                : "Could not establish a Steam connection (before authentication).");
+            if (!_connectionEstablished)
+            {
+                // SteamKit marks the failed CM endpoint bad; ConnectAsync can try another.
+                // Do not poison the authentication/license tasks before authentication begins.
+                _connected.TrySetException(error);
+                return;
+            }
             _authenticated = false;
-            Fail(new SteamAuthenticationException("Steam disconnected. Recreate the client to reconnect."));
+            _disconnectError = error;
+            _disconnected = true;
+            Fail(error);
         });
         _pump = Task.Run(() =>
         {
             try { while (!_stop.IsCancellationRequested) _callbacks.RunWaitCallbacks(TimeSpan.FromMilliseconds(100)); }
-            catch (Exception e) { Fail(e); }
+            catch (Exception e)
+            {
+                _authenticated = false;
+                _disconnectError = new SteamAuthenticationException($"Steam callback processing failed while {_phase}.", e);
+                _disconnected = true;
+                Fail(_disconnectError);
+            }
         });
+    }
+
+    internal static HttpClient CreateHttpClient(HttpClientPurpose purpose, TimeSpan timeout,
+        ContentHttpContext? context = null, HttpMessageHandler? transport = null)
+    {
+        // ClientWebSocket reads the upgraded response synchronously and requires a duplex
+        // stream. The CDN wrapper supports async, read-only bodies and must never wrap it.
+        HttpMessageHandler handler = purpose == HttpClientPurpose.CMWebSocket
+            ? transport ?? new SocketsHttpHandler() : new SteamContentHttpHandler(context, transport);
+        return new HttpClient(handler) { Timeout = timeout };
     }
 
     private void Fail(Exception error)
@@ -64,10 +104,56 @@ internal sealed class SteamKitSession : ISteamSession
     }
     private Task<T> WaitAsync<T>(Task<T> task, CancellationToken ct) => task.WaitAsync(_options.OperationTimeout, ct);
 
-    private async Task ConnectAsync(CancellationToken ct)
+    internal async Task ConnectAsync(CancellationToken ct)
     {
-        if (!_connecting) { _connecting = true; _client.Connect(); }
-        await _connected.Task.WaitAsync(_options.OperationTimeout, ct);
+        if (Disconnected) throw _disconnectError ?? new SteamAuthenticationException("Steam session is disconnected. Retry the operation.");
+        if (_connectionEstablished) return;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
+        timeout.CancelAfter(_options.OperationTimeout);
+        SteamAuthenticationException? last = null;
+        try
+        {
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                if (Disconnected) throw _disconnectError!;
+                _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                _client.Connect();
+                try
+                {
+                    await _connected.Task.WaitAsync(timeout.Token);
+                    if (Disconnected) throw _disconnectError!;
+                    return;
+                }
+                catch (SteamAuthenticationException e) when (!_connectionEstablished && !Disconnected)
+                {
+                    last = e;
+                    if (attempt < 3) await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), timeout.Token);
+                }
+            }
+            throw new SteamAuthenticationException("Could not connect to Steam after 3 attempts, before authentication. "
+                + "Check the network, proxy/firewall and Steam availability, then retry.", last);
+        }
+        catch (OperationCanceledException e)
+        {
+            var cancelled = ct.IsCancellationRequested || _stop.IsCancellationRequested;
+            _disconnectError = new SteamAuthenticationException(cancelled
+                ? "Steam connection was cancelled. Retry the operation."
+                : "Timed out connecting to Steam, before authentication. Retry the operation.", e);
+            _disconnected = true;
+            _client.Disconnect();
+            Fail(_disconnectError);
+            if (cancelled) throw;
+            throw _disconnectError;
+        }
+        catch (SteamAuthenticationException e)
+        {
+            _disconnectError = e;
+            _disconnected = true;
+            Fail(e);
+            _client.Disconnect();
+            throw;
+        }
     }
 
     public async Task LoginAsync(SteamCredentials? credentials, CancellationToken ct)
@@ -75,7 +161,7 @@ internal sealed class SteamKitSession : ISteamSession
         await _authGate.WaitAsync(ct);
         try
         {
-            if (Disconnected) throw new SteamAuthenticationException("Steam disconnected; recreate the session to reconnect.");
+            if (Disconnected) throw _disconnectError ?? new SteamAuthenticationException("Steam session is disconnected. Retry the operation.");
             if (_authenticated) return;
             SteamTokens? tokens;
             try { tokens = await SteamTokenFile.LoadAsync(_options.TokenPath, ct); }
@@ -85,28 +171,33 @@ internal sealed class SteamKitSession : ISteamSession
             await ConnectAsync(ct);
             if (credentials is not null)
             {
+                _phase = "authenticating credentials";
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
                 timeout.CancelAfter(_options.OperationTimeout);
                 var session = await WaitAsync(_client.Authentication.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
                 {
                     Username = credentials.Username, Password = credentials.Password, IsPersistentSession = true,
                     GuardData = tokens?.AccountName == credentials.Username ? tokens.GuardData : null,
-                    Authenticator = new Authenticator(_options.Authenticate, timeout.Token),
+                    Authenticator = new Authenticator(_options.Authenticate, timeout.Token,
+                        challenge => _phase = $"waiting for Steam Guard ({challenge.Kind})"),
                 }), timeout.Token);
                 var response = await session.PollingWaitForResultAsync(timeout.Token);
                 tokens = new(response.AccountName, response.RefreshToken, response.NewGuardData);
             }
             if (tokens is null) throw new SteamAuthenticationException("Not logged into Steam. Run gamearchiver auth login --source steam.");
+            _phase = "logging on with the Steam session token";
             _user.LogOn(new() { Username = tokens.AccountName, AccessToken = tokens.RefreshToken, ShouldRememberPassword = true });
             var result = await WaitAsync(_loggedOn.Task, ct);
             if (result.Result != EResult.OK) throw new SteamAuthenticationException($"Steam login failed: {result.Result}. Log in again.");
+            if (Disconnected) throw _disconnectError!;
             _authenticated = true;
+            _phase = "using the authenticated session";
             if (credentials is not null) await SteamTokenFile.SaveAsync(_options.TokenPath, tokens, ct);
         }
         catch (SteamKit2.Authentication.AuthenticationException e)
         { throw new SteamAuthenticationException($"Steam rejected authentication: {e.Result}.", e); }
         catch (AsyncJobFailedException e)
-        { throw new SteamAuthenticationException("Steam authentication connection failed. Retry the login.", e); }
+        { throw _disconnectError ?? new SteamAuthenticationException($"Steam connection failed while {_phase}. Retry the operation.", e); }
         finally { _authGate.Release(); }
     }
 
@@ -214,11 +305,16 @@ internal sealed class SteamKitSession : ISteamSession
         _authGate.Dispose(); _stop.Dispose();
     }
 
-    private sealed class Authenticator(Func<SteamChallenge, CancellationToken, Task<string>>? prompt, CancellationToken ct) : IAuthenticator
+    private sealed class Authenticator(Func<SteamChallenge, CancellationToken, Task<string>>? prompt, CancellationToken ct,
+        Action<SteamChallenge> onChallenge) : IAuthenticator
     {
-        private Task<string> Ask(SteamChallenge challenge) => prompt is null
-            ? throw new SteamAuthenticationException($"Steam requires {challenge.Kind}; supply SteamClientOptions.Authenticate.")
-            : prompt(challenge, ct).WaitAsync(ct);
+        private Task<string> Ask(SteamChallenge challenge)
+        {
+            onChallenge(challenge);
+            return prompt is null
+                ? throw new SteamAuthenticationException($"Steam requires {challenge.Kind}; supply SteamClientOptions.Authenticate.")
+                : prompt(challenge, ct).WaitAsync(ct);
+        }
         public Task<string> GetDeviceCodeAsync(bool previousCodeWasIncorrect) => Ask(new(SteamChallengeKind.DeviceCode, previousCodeWasIncorrect));
         public Task<string> GetEmailCodeAsync(string email, bool previousCodeWasIncorrect) => Ask(new(SteamChallengeKind.EmailCode, previousCodeWasIncorrect, email));
         public async Task<bool> AcceptDeviceConfirmationAsync() => string.Equals(

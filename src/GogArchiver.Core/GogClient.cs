@@ -190,6 +190,7 @@ public sealed class GogClient : IGameStore
         var (snapshot, game) = await ResolveAsync(productId, options.Platform, ct);
         var key = new GameKey(Source, game.Id.ToString());
         if (snapshot.PackDuplicates(game).Count > 0) return new(key, ArchiveOutcome.Unavailable, Detail: "Pack is covered by separately owned games.");
+        options = await ProviderOutput.PrepareAsync(options, Source, ct);
         var name = await ArchiveCatalog.ResolveNameAsync(new(key, game.Title, game.Slug), options, ct);
         if (options.DirectoryName is null && string.Equals(name, game.DirectoryName, StringComparison.OrdinalIgnoreCase))
             BackupDirectory.ValidateSelection(snapshot.Games, [game]);

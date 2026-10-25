@@ -10,6 +10,7 @@ public sealed record PlatformArchive
     public required long ArchiveSize { get; init; }
     public long InstalledSize { get; init; }
     public DateTimeOffset CompletedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? ModifiedAt { get; init; }
     public bool NeedsRefresh { get; init; }
     public string RuntimeRequirement { get; init; } = "unknown";
     public string? LaunchExecutable { get; init; }
@@ -35,6 +36,10 @@ public sealed record ArchiveMetadata
     [System.Text.Json.Serialization.JsonIgnore]
     public GameKey Key => new(Source, ProductId);
 
+    /// <summary>The authoritative file selected by LoadAsync; null for newly constructed metadata.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? LoadedFileName { get; private init; }
+
     public Task SaveAsync(string directory, CancellationToken ct = default) =>
         ArchiveJson.SaveAsync(Path.Combine(directory, FileName), this, ct);
 
@@ -48,7 +53,8 @@ public sealed record ArchiveMetadata
         if (modern is not null && legacy is not null && modern.Key != legacy.Key)
             throw new ArchiveConflictException($"Conflicting metadata owners in '{directory}'.");
         // The original GOG CLI may update its manifest independently of the aggregator.
-        return legacy ?? modern;
+        if (legacy is not null) return legacy with { LoadedFileName = LegacyFileName };
+        return modern is null ? null : modern with { LoadedFileName = FileName };
     }
 
     /// <summary>Ownership lookup does not interpret another provider's platform schema.</summary>
@@ -133,6 +139,7 @@ public sealed record ArchiveMetadata
                 ArchiveName = Text(v, "ArchiveName"), ArchiveSize = v.GetProperty("ArchiveSize").GetInt64(),
                 InstalledSize = v.GetProperty("InstalledSize").GetInt64(),
                 CompletedAt = v.TryGetProperty("CompletedAt", out var time) ? time.GetDateTimeOffset() : DateTimeOffset.MinValue,
+                ModifiedAt = v.TryGetProperty("ModifiedAt", out var modified) && modified.ValueKind != JsonValueKind.Null ? modified.GetDateTimeOffset() : null,
                 NeedsRefresh = oldContent && (dlcs.Count > 0 || platform == GameOs.Windows && build.StartsWith("installer-")),
                 RuntimeRequirement = "drm-free", LaunchExecutable = Text(v, "LaunchExecutable"), LaunchParameters = Text(v, "LaunchParameters"),
                 Files = v.TryGetProperty("Files", out var files) ? files.EnumerateObject().ToDictionary(f => f.Name,
@@ -163,7 +170,7 @@ public static class ArchiveCatalog
 
     public static async Task<string> ResolveNameAsync(GameInfo game, ArchiveOptions options, CancellationToken ct)
     {
-        options.Validate();
+        options = ProviderOutput.Resolve(options, game.Key.Source);
         var entries = Directory.Exists(options.OutputRoot) ? Directory.EnumerateFileSystemEntries(options.OutputRoot).ToList() : [];
         string? FindUniqueEntry(string name)
         {
@@ -208,7 +215,7 @@ public static class ArchiveCatalog
 
     public static async Task<ArchiveLocation> ReserveAsync(GameInfo game, ArchiveOptions options, CancellationToken ct)
     {
-        options.Validate();
+        options = await ProviderOutput.PrepareAsync(options, game.Key.Source, ct);
         using var reservation = await ArchiveReservation.AcquireAsync(options.OutputRoot, ct);
         var name = await ResolveNameAsync(game, options, ct);
         var path = Path.Combine(options.OutputRoot, name);

@@ -29,6 +29,7 @@ public static class MultiStoreProbes
         try
         {
             await MixedLibraryAsync(root);
+            await ProviderLayoutAsync(root);
             await SteamSnapshotAsync(root);
             await SteamRecoveryAsync(root);
             await SteamFailuresAsync(root);
@@ -136,6 +137,47 @@ public static class MultiStoreProbes
         Probe.Check("GOG archive references cannot escape their backup directory",
             await ThrowsAsync(() => gog.DownloadAsync("1", options with { Force = true })) && requests.Calls == 0
             && (await File.ReadAllBytesAsync(gogResult.ArchivePath!)).SequenceEqual(originalBytes));
+    }
+
+    private static async Task ProviderLayoutAsync(string root)
+    {
+        var options = Options(root, "providers") with { Layout = ArchiveLayout.Provider };
+        var game = new LibraryEntry { Id = 1, Slug = "the_game", Title = "The Game",
+            Platforms = new() { [GamePlatform.Windows] = new() { Depot = new("1", 2, "1", "https://fixture.invalid/repository") } } };
+        var snapshot = new LibrarySnapshot { SchemaVersion = LibrarySnapshot.CurrentSchema, Games = [game] };
+        var legacy = Path.Combine(options.OutputRoot, "gog", game.LegacyDirectoryName);
+        Directory.CreateDirectory(legacy);
+        var zipPath = Path.Combine(legacy, "GOG.zip");
+        using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+        using (var writer = new StreamWriter(zip.CreateEntry("gog.txt").Open())) writer.Write("GOG content");
+        var bytes = await File.ReadAllBytesAsync(zipPath);
+        await new BackupManifest { GameId = 1, Slug = game.Slug, Title = game.Title, Platforms = new()
+        { [GamePlatform.Windows] = new() { BuildId = "1", ContentRevision = 1, Language = "en", ArchiveName = "GOG.zip",
+            ArchiveSize = bytes.Length, InstalledSize = 11 } } }.SaveAsync(legacy);
+        using var requests = new NoRequests();
+        using var http = new HttpClient(requests);
+        var gog = new GogClient(new(http), new(http, http, new(0)), http, snapshot);
+        var fixture = new SteamFixture();
+        var steam = new SteamStore(fixture);
+        await using var archive = new GameArchiverClient(gog, steam);
+        var gogResult = await gog.DownloadAsync("1", options);
+        var steamResult = await steam.DownloadAsync("1", options);
+        Probe.Check("standalone GOG and Steam clients honor provider output folders",
+            gogResult.ArchivePath == Path.Combine(options.OutputRoot, "gog", "the_game", "GOG.zip")
+            && Path.GetDirectoryName(steamResult.ArchivePath) == Path.Combine(options.OutputRoot, "steam", "the_game")
+            && gogResult.Outcome == ArchiveOutcome.AlreadyDone && steamResult.Outcome == ArchiveOutcome.Completed);
+        Probe.Check("legacy folder migration within a provider reuses GOG content without network",
+            !Directory.Exists(legacy) && requests.Calls == 0 && bytes.SequenceEqual(await File.ReadAllBytesAsync(gogResult.ArchivePath!)));
+        var calls = fixture.ManifestCalls;
+        var again = await archive.DownloadAsync(new("steam", "1"), options);
+        Probe.Check("aggregate routing does not nest an additional provider folder or rebuild the archive",
+            again.Outcome == ArchiveOutcome.AlreadyDone && again.ArchivePath == steamResult.ArchivePath
+            && fixture.ManifestCalls == calls && !Directory.Exists(Path.Combine(options.OutputRoot, "steam", "steam")));
+        var library = new ArchiveLibrary { Games = GogClient.ConvertLibrary(snapshot)
+            .Concat((await steam.SyncLibraryAsync()).Games).ToList() };
+        Probe.Check("aggregate diff and verification read actual provider archives",
+            (await archive.DiffAsync(library, options)) is { Count: 2 } rows && rows.All(r => r.Status == ArchiveStatus.Current)
+            && (await archive.VerifyAsync(options, deep: true)) is { Count: 2 } checks && checks.All(r => r.Problems.Count == 0));
     }
 
     private static async Task SteamSnapshotAsync(string root)

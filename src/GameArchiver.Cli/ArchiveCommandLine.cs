@@ -11,16 +11,23 @@ namespace GameArchiver.Cli;
 public static class ArchiveCommandLine
 {
     private static readonly HashSet<string> Switches = ["all", "dry-run", "force", "clean", "no-reuse", "no-verify", "no-launcher",
-        "deep", "fix", "refresh", "keys", "help", "version"];
-    private static readonly HashSet<string> Values = ["source", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
-        "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code"];
+        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case"];
+    private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
+        "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
+        "file", "entry", "name", "path"];
 
     /// <summary>Run the same CLI with supplied stores for embedding or offline integration tests.</summary>
     public static async Task<int> RunAsync(string[] args, CancellationToken ct = default,
         Func<string, IEnumerable<IGameStore>>? storeFactory = null)
     {
         try { return await RunCoreAsync(args, storeFactory, ct); }
-        catch (OperationCanceledException) { Console.Error.WriteLine("Interrupted. Downloaded files were kept; rerun to resume."); return 130; }
+        catch (OperationCanceledException)
+        {
+            Console.Error.WriteLine(args.Contains("archive")
+                ? "Interrupted. Completed archive edits were kept; unfinished edits were not committed."
+                : "Interrupted. Downloaded files were kept; rerun to resume.");
+            return 130;
+        }
         catch (Exception e) when (e is IOException or InvalidDataException or ArgumentException or NotSupportedException
             or InvalidOperationException or KeyNotFoundException or JsonException or GogAuthException or SteamAuthenticationException or TimeoutException or HttpRequestException)
         { Console.Error.WriteLine(e.Message); return 1; }
@@ -29,6 +36,7 @@ public static class ArchiveCommandLine
     private static async Task<int> RunCoreAsync(string[] args, Func<string, IEnumerable<IGameStore>>? factory, CancellationToken ct)
     {
         var flags = new Dictionary<string, string>();
+        var providerDirectories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var positionals = new List<string>();
         for (var i = 0; i < args.Length; i++)
             if (args[i].StartsWith("--"))
@@ -36,20 +44,34 @@ public static class ArchiveCommandLine
                 var key = args[i][2..];
                 if (!Switches.Contains(key) && !Values.Contains(key)) throw new ArgumentException($"Unknown option --{key}.");
                 if (Switches.Contains(key)) flags[key] = "";
-                else if (i + 1 < args.Length && !args[i + 1].StartsWith("--")) flags[key] = args[++i];
+                else if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
+                {
+                    var value = args[++i];
+                    if (key == "provider-dir")
+                    {
+                        var parts = value.Split('=', 2);
+                        if (parts.Length != 2 || !providerDirectories.TryAdd(parts[0].ToLowerInvariant(), parts[1]))
+                            throw new ArgumentException("Use --provider-dir PROVIDER=FOLDER once per provider.");
+                    }
+                    else
+                    {
+                        flags[key] = value;
+                    }
+                }
                 else throw new ArgumentException($"Missing value for --{key}.");
             }
             else positionals.Add(args[i]);
         if (flags.ContainsKey("version")) { Console.WriteLine(typeof(GameArchiverClient).Assembly.GetName().Version?.ToString(3)); return 0; }
         if (flags.ContainsKey("help") || positionals.Count == 0) { Usage(); return flags.ContainsKey("help") ? 0 : 1; }
         var source = flags.GetValueOrDefault("source", "all").ToLowerInvariant();
-        if (source is not "gog" and not "steam" and not "all") throw new ArgumentException($"Unknown source '{source}'.");
+        ArchivePaths.ValidateName(source);
+        if (factory is null && source is not "gog" and not "steam" and not "all") throw new ArgumentException($"Unknown source '{source}'.");
         var snapshotPath = flags.GetValueOrDefault("snapshot", ArchiveLibrary.DefaultPath);
         var command = positionals[0];
         var subcommand = positionals.ElementAtOrDefault(1);
         ArchiveLibrary? library = null;
         var legacy = false;
-        if (command is not "auth" and not "verify" && File.Exists(snapshotPath))
+        if (command is not "auth" and not "verify" and not "archive" && File.Exists(snapshotPath))
         {
             using var json = JsonDocument.Parse(await File.ReadAllTextAsync(snapshotPath, ct));
             legacy = json.RootElement.TryGetProperty("Games", out var rawGames) && (rawGames.GetArrayLength() > 0
@@ -83,6 +105,7 @@ public static class ArchiveCommandLine
         }
         var stores = (factory ?? DefaultStores)(source).ToArray();
         await using var archive = new GameArchiverClient(stores);
+        if (source != "all" && !archive.Sources.Contains(source)) throw new ArgumentException($"Unknown source '{source}'.");
         if (command == "auth")
         {
             if (source == "all") throw new ArgumentException("Authentication requires --source gog or --source steam.");
@@ -124,7 +147,7 @@ public static class ArchiveCommandLine
             foreach (var failure in currentFailures) Console.Error.WriteLine($"Failed {failure.Key}: {failure.Value}");
             return currentFailures.Count == 0 ? 0 : 1;
         }
-        var search = string.Join(' ', positionals.Skip(command == "library" ? 2 : 1));
+        var search = string.Join(' ', positionals.Skip(command is "library" or "archive" ? 2 : 1));
         var games = library?.Games.Where(g => source == "all" || g.Key.Source == source).ToList() ?? [];
         if (command == "library")
         {
@@ -137,10 +160,46 @@ public static class ArchiveCommandLine
                 Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}");
             return games.Count == 0 ? 1 : 0;
         }
-        var options = Options(flags);
+        var options = Options(flags, providerDirectories);
+        var knownProviders = factory is null ? new[] { "gog", "steam" } : archive.Sources.ToArray();
+        if (providerDirectories.Keys.Any(p => !knownProviders.Contains(p, StringComparer.OrdinalIgnoreCase)))
+            throw new ArgumentException("--provider-dir names an unregistered provider.");
+        ProviderOutput.Validate(options, knownProviders);
+        if (command == "archive")
+        {
+            var operation = subcommand switch
+            {
+                "find" => ArchiveFileOperation.Find, "add" => ArchiveFileOperation.Add, "replace" => ArchiveFileOperation.Replace,
+                _ => throw new ArgumentException("Usage: archive find|add|replace [search] --file FILE --entry PATH | --name NAME | --path PATH"),
+            };
+            if (flags.ContainsKey("name") && flags.ContainsKey("path")) throw new ArgumentException("Use either --name or --path, not both.");
+            var request = new ArchiveFileRequest
+            {
+                Operation = operation, FilePath = flags.GetValueOrDefault("file"), EntryPath = flags.GetValueOrDefault("entry"),
+                Match = flags.GetValueOrDefault("name") ?? flags.GetValueOrDefault("path"),
+                MatchBy = flags.ContainsKey("path") ? ArchiveFileMatch.Path : ArchiveFileMatch.Name,
+                IgnoreCase = flags.ContainsKey("ignore-case"), DryRun = flags.ContainsKey("dry-run"), Search = search,
+                Platform = flags.ContainsKey("platform") ? options.Platform : null,
+            };
+            var results = await archive.ProcessArchiveFilesAsync(options, request, new InlineProgress<ArchiveProgress>(p =>
+                Console.Error.Write($"\r{p.Phase}: {p.Bytes}/{p.TotalBytes} bytes       ")), ct);
+            Console.Error.WriteLine();
+            foreach (var result in results)
+            {
+                Console.WriteLine($"{result.Status}: {result.Key} {result.Platform}: {result.ArchivePath}");
+                foreach (var change in result.Changes)
+                    Console.WriteLine($"  {change.EntryPath}{(change.BackupPath is null ? "" : $" (original -> {change.BackupPath})")}");
+                if (result.Detail is not null) Console.WriteLine($"  {result.Detail}");
+            }
+            Console.WriteLine($"{results.Count(r => r.Status == ArchiveFileStatus.Updated)} updated, {results.Count(r => r.Status == ArchiveFileStatus.Preview)} preview, "
+                + $"{results.Count(r => r.Status == ArchiveFileStatus.Matched)} matched, {results.Count(r => r.Status == ArchiveFileStatus.NoMatch)} no match, "
+                + $"{results.Count(r => r.Status == ArchiveFileStatus.Failed)} failed.");
+            return results.Count == 0 || results.Any(r => r.Status == ArchiveFileStatus.Failed)
+                || results.All(r => r.Status == ArchiveFileStatus.NoMatch) ? 1 : 0;
+        }
         if (command == "verify")
         {
-            var results = await archive.VerifyAsync(options.OutputRoot, flags.ContainsKey("deep"), flags.ContainsKey("fix"), search, ct,
+            var results = await archive.VerifyAsync(options, flags.ContainsKey("deep"), flags.ContainsKey("fix"), search, ct,
                 flags.ContainsKey("platform") ? options.Platform : null);
             foreach (var result in results)
             {
@@ -160,7 +219,7 @@ public static class ArchiveCommandLine
                 if (flags.ContainsKey("keys")) { if (row.Status is ArchiveStatus.Missing or ArchiveStatus.Outdated) Console.WriteLine(row.Game.Key); }
                 else Console.WriteLine($"{row.Status,-12} {row.Game.Key,-25} {row.Game.Slug}: {row.Detail}");
             if (!flags.ContainsKey("keys"))
-                foreach (var orphan in await archive.FindOrphansAsync(library, options.OutputRoot, ct))
+                foreach (var orphan in await archive.FindOrphansAsync(library, options, ct))
                     Console.WriteLine($"Not in library: {orphan.Metadata.Key} {orphan.Directory}");
             return rows.Any(r => r.Status is ArchiveStatus.Conflict or ArchiveStatus.Unavailable or ArchiveStatus.Unknown) ? 1 : 0;
         }
@@ -191,7 +250,13 @@ public static class ArchiveCommandLine
             var failed = false;
             foreach (var key in keys.Distinct())
             {
-                if (flags.ContainsKey("dry-run")) { Console.WriteLine(key); continue; }
+                if (flags.ContainsKey("dry-run"))
+                {
+                    var resolved = ProviderOutput.Resolve(options, key.Source);
+                    Console.WriteLine(key);
+                    if (options.Layout == ArchiveLayout.Provider) Console.Error.WriteLine($"{key}: output root {resolved.OutputRoot}");
+                    continue;
+                }
                 try
                 {
                     var result = await archive.DownloadAsync(key, options, new InlineProgress<ArchiveProgress>(p =>
@@ -215,7 +280,7 @@ public static class ArchiveCommandLine
         return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed
             : throw new ArgumentException($"Invalid integer for --{name}.");
     }
-    private static ArchiveOptions Options(Dictionary<string, string> flags)
+    private static ArchiveOptions Options(Dictionary<string, string> flags, Dictionary<string, string> providerDirectories)
     {
         var platform = flags.GetValueOrDefault("platform", "windows").ToLowerInvariant() switch
         { "windows" or "win" => GameOs.Windows, "linux" => GameOs.Linux, "mac" or "macos" or "osx" => GameOs.Mac, _ => throw new ArgumentException("Unknown platform.") };
@@ -229,6 +294,9 @@ public static class ArchiveCommandLine
         var options = new ArchiveOptions
         {
             OutputRoot = Path.GetFullPath(flags.GetValueOrDefault("out", "game-backup")), Platform = platform,
+            Layout = flags.GetValueOrDefault("layout", providerDirectories.Count > 0 ? "provider" : "flat").ToLowerInvariant() switch
+            { "flat" => ArchiveLayout.Flat, "provider" => ArchiveLayout.Provider, _ => throw new ArgumentException("Unknown layout; use flat or provider.") },
+            ProviderDirectories = providerDirectories,
             Language = flags.GetValueOrDefault("language", "en"), Branch = flags.GetValueOrDefault("branch", "public"),
             Architecture = flags.GetValueOrDefault("arch", "64"), StagingRoot = flags.GetValueOrDefault("staging"),
             DirectoryName = flags.GetValueOrDefault("directory"), MaxConnections = Integer(flags, "connections", 5),
@@ -268,7 +336,13 @@ public static class ArchiveCommandLine
           download <source:ID|slug> [--source gog|steam] | download --all [search]
           diff [search] [--refresh] [--keys]
           verify [search] [--deep] [--fix] [--keys]
+          archive find [search] (--name NAME | --path PATH) [--ignore-case]
+          archive add [search] --file FILE [--entry PATH] [--dry-run]
+          archive replace [search] --file FILE (--name NAME | --path PATH) [--ignore-case] [--dry-run]
+        Archive files: all completed ZIPs in the selected output/source/layout; all platforms unless filtered.
+          Replaced entries gain .backup (repeated if occupied). Matches are literal and case-sensitive by default.
         Options: --out DIR --staging DIR --snapshot FILE --gog-snapshot FILE
+          --layout flat|provider --provider-dir PROVIDER=FOLDER (repeatable; implies provider layout)
           --platform windows|linux|mac --language en --arch 32|64|arm64 --branch public
           --directory NAME --connections N --compression-threads N --limit-rate 5M
           --force --clean --no-reuse --no-verify --no-launcher --dry-run

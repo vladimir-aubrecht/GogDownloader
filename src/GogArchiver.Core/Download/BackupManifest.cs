@@ -45,6 +45,7 @@ public sealed record PlatformBackup
     public required long InstalledSize { get; init; }
 
     public DateTimeOffset CompletedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? ModifiedAt { get; init; }
 
     /// <summary>Owned DLC whose depots are in the zip.</summary>
     public List<string> Dlcs { get; init; } = [];

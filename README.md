@@ -58,6 +58,30 @@ are never adopted. Existing directories are found by their metadata identity eve
 rename. Games with the same slug within one store remain separate products; choose distinct
 folder names explicitly.
 
+To keep each provider in its own folder, add `--layout provider`:
+
+```sh
+# /backups/gog/<slug>/ and /backups/steam/<slug>/
+dotnet run --project src/GameArchiver.Cli -- download --all --source all --out /backups --layout provider
+dotnet run --project src/GameArchiver.Cli -- diff --out /backups --layout provider
+dotnet run --project src/GameArchiver.Cli -- verify --deep --out /backups --layout provider
+
+# Only GOG, in /backups/drm_free/<slug>/; provider-dir implies provider layout.
+dotnet run --project src/GameArchiver.Cli -- download --all --source gog --out /backups --provider-dir gog=drm_free
+```
+
+`--source gog|steam|all` applies to library, download, diff and verify commands. The default
+`--layout flat` keeps all game folders directly under `--out`. Repeat `--provider-dir` to
+customize multiple provider folder names, for example `--provider-dir gog=drm_free
+--provider-dir steam=steam_library`. Unmapped providers use their source names. Names are single
+portable directory names, not paths; they must be distinct even ignoring case. `--directory`
+still selects one game's folder inside its provider folder.
+
+Use the same layout and folder settings for download, diff and verify. These settings select
+the destination; they do not move existing backups. To switch layouts without downloading
+again, stop active downloads and move each complete game folder, including its metadata,
+into the chosen provider folder. Existing backups there are recognized by identity.
+
 Steam currently supports public and other unencrypted branches for which all selected depots
 have accessible manifests. Use `--branch`, `--language`, and `--arch 32|64|arm64` to select content.
 Steam Guard supports email/device codes and mobile approval. For noninteractive login use
@@ -65,6 +89,11 @@ Steam Guard supports email/device codes and mobile approval. For noninteractive 
 `GAMEARCHIVE_STEAM_GUARD_CODE`. Passwords are never stored. Remembered refresh/guard tokens are
 stored separately from GOG, with mode 0600 from creation on Unix. `--steam-tokens` and
 `--gog-tokens` override their paths.
+
+Steam makes up to three initial connection attempts within one operation timeout.
+Disconnection errors identify whether the connection failed before authentication, during
+credentials/Steam Guard, or after logon. After updating the code, rebuild before using
+`--no-build` (for example, `dotnet build -c Release`); otherwise the CLI runs the old binary.
 
 The rename changes project, assembly and namespace names, plus the unified tool command to
 `gamearchiver`. Existing configuration/staging directories (`gogdownloader` and `gamearchive`),
@@ -76,6 +105,56 @@ references and `using` directives, and use `GameArchiverClient` for the aggregat
 The native Steam path is exercised with controlled session/CDN fixtures. A live login, licensed
 depot download and execution on ARM64 still need verification on a real account/device. No
 Steam credentials are required to build or run the test suite.
+
+## Add, find or replace files in existing ZIPs
+
+The unified CLI can edit all completed archives in a backup directory without logging into a
+store or loading a library snapshot. It discovers ZIPs through `.gogdl.json` / `.gamebackup.json`;
+unmanaged ZIPs and unreferenced leftover archives are not touched. Source selection and output
+layout work exactly as for `verify`. All platforms are included unless `--platform` is supplied.
+
+```sh
+# Add readme.txt at the root of every GOG archive; preview first.
+dotnet run --project src/GameArchiver.Cli -- archive add --file ./readme.txt --out /backups/gog --source gog --dry-run
+dotnet run --project src/GameArchiver.Cli -- archive add --file ./readme.txt --out /backups/gog --source gog
+
+# Choose a different destination inside each ZIP.
+dotnet run --project src/GameArchiver.Cli -- archive add --file ./readme.txt --entry extras/info.txt --out /backups --layout provider
+
+# Find by filename anywhere in the ZIP, or by its exact relative path.
+dotnet run --project src/GameArchiver.Cli -- archive find --name readme.txt --out /backups --layout provider
+dotnet run --project src/GameArchiver.Cli -- archive find --path docs/readme.txt --out /backups --layout provider
+
+# Replace every matching file, retaining each original next to it.
+dotnet run --project src/GameArchiver.Cli -- archive replace --name readme.txt --file ./replacement.txt --out /backups --layout provider --dry-run
+dotnet run --project src/GameArchiver.Cli -- archive replace --path docs/readme.txt --file ./replacement.txt --out /backups --layout provider
+```
+
+`add` defaults to the source filename at the ZIP root. If that entry already exists, its
+original content becomes `readme.txt.backup`. Existing backups are never overwritten: the next
+available name is `readme.txt.backup.backup`, and so on. Case-only collisions during `add`
+replace the existing entry while retaining its spelling. `replace` changes only matched files;
+it does not add anything to archives with no match. Names/paths are literal (no glob patterns),
+case-sensitive unless `--ignore-case` is supplied. A positional search after `add`, `find` or
+`replace` filters games by title/slug. Exit status is nonzero on any failure or when nothing matches.
+
+Each ZIP is rewritten using bounded buffers and existing compressed payloads; games are never
+unpacked or recompressed in full. The output volume needs space for a second ZIP while that
+archive is being edited. Source compression uses local `--staging` and is shared across the batch.
+Inserted content is verified, and archive/installed sizes and file hashes are updated in metadata;
+`ModifiedAt` records the local edit while the downloaded version and `CompletedAt` remain unchanged.
+To verify existing content as well, run `verify --deep` separately.
+
+Publication adds a `(local-<unique-id>)` marker before `.zip` (ignored by GameVault's title parser).
+Long filenames are shortened to fit 255 UTF-8 bytes, preserving Unicode characters and GameVault
+type tags; exceptionally long version labels are shortened too. Temporary ZIPs use independent
+short names, and preview applies the same filename rules.
+The new ZIP is published before metadata switches to it, then the old ZIP is removed. This keeps
+the previous backup usable on failure; a process crash may leave an unreferenced ZIP or `.tmp`
+file, but cannot switch metadata to a partial archive. Each archive commits independently, so
+already completed edits remain after cancellation. Successive edits replace the filename marker.
+These are local edits, not persistent download rules: a future update or forced download rebuilds
+the game from store content, so custom additions/replacements need to be applied again.
 
 ## C# API
 

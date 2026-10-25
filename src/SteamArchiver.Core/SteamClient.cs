@@ -209,6 +209,7 @@ public sealed class SteamClient : IGameStore
     private async Task<ArchiveResult> DownloadCoreAsync(string productId, ArchiveOptions options, IProgress<ArchiveProgress>? progress, CancellationToken ct)
     {
         var selection = await SelectAsync(productId, options, ct);
+        options = await ProviderOutput.PrepareAsync(options, Source, ct);
         var reservation = await ArchiveCatalog.ReserveAsync(selection.Game, options, ct);
         using var lease = await ArchiveCatalog.AcquireOwnedAsync(reservation, selection.Game.Key, ct);
         var location = lease.Location;

@@ -9,7 +9,7 @@ public sealed record VerificationResult(GameKey Key, GameOs Platform, string Arc
     IReadOnlyList<ArchiveProblem> Problems, bool Repaired = false, bool Missing = false);
 
 /// <summary>Aggregates independently usable store clients. Owns the supplied clients by default.</summary>
-public sealed class GameArchiverClient : IAsyncDisposable
+public sealed partial class GameArchiverClient : IAsyncDisposable
 {
     private readonly Dictionary<string, IGameStore> _stores;
     private readonly bool _ownsStores;
@@ -63,15 +63,34 @@ public sealed class GameArchiverClient : IAsyncDisposable
 
     public Task<GameVersion> GetVersionAsync(GameKey key, GameSelection options, CancellationToken ct = default) =>
         Store(key.Source).GetVersionAsync(key.ProductId, options, ct);
-    public Task<ArchiveResult> DownloadAsync(GameKey key, ArchiveOptions options,
-        IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default) =>
-        Store(key.Source).DownloadAsync(key.ProductId, options, progress, ct);
+    public async Task<ArchiveResult> DownloadAsync(GameKey key, ArchiveOptions options,
+        IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default)
+    {
+        var store = Store(key.Source);
+        ProviderOutput.Validate(options, _stores.Keys);
+        options = await ProviderOutput.PrepareAsync(options, key.Source, ct);
+        return await store.DownloadAsync(key.ProductId, options, progress, ct);
+    }
+
+    private async Task<List<ArchiveLocation>> ScanAsync(ArchiveOptions options, CancellationToken ct)
+    {
+        ProviderOutput.Validate(options, _stores.Keys);
+        if (options.Layout == ArchiveLayout.Flat)
+            return await ArchiveCatalog.ScanAsync(options.OutputRoot, ct, _stores.Keys.ToHashSet());
+        var result = new List<ArchiveLocation>();
+        foreach (var source in _stores.Keys)
+        {
+            var resolved = ProviderOutput.Resolve(options, source);
+            result.AddRange(await ArchiveCatalog.ScanAsync(resolved.OutputRoot, ct, new HashSet<string> { source }));
+        }
+        return result;
+    }
 
     public async Task<IReadOnlyList<ArchiveDifference>> DiffAsync(ArchiveLibrary library, ArchiveOptions options,
         bool refreshVersions = false, CancellationToken ct = default)
     {
         options.Validate();
-        var catalog = await ArchiveCatalog.ScanAsync(options.OutputRoot, ct, _stores.Keys.ToHashSet());
+        var catalog = await ScanAsync(options, ct);
         var rows = new List<ArchiveDifference>();
         foreach (var game in library.Games.Where(g => _stores.ContainsKey(g.Key.Source) && g.CanBackUp(options.Platform)))
         {
@@ -92,7 +111,7 @@ public sealed class GameArchiverClient : IAsyncDisposable
                 ArchiveStatus state; string detail;
                 if (backup is null)
                 {
-                    _ = await ArchiveCatalog.ResolveNameAsync(game, options, ct);
+                    _ = await ArchiveCatalog.ResolveNameAsync(game, ProviderOutput.Resolve(options, game.Key.Source), ct);
                     state = ArchiveStatus.Missing; detail = "not backed up";
                 }
                 else if (!backup.HasArchive(location!.Directory)) { state = ArchiveStatus.Missing; detail = "archive missing or size changed"; }
@@ -123,18 +142,25 @@ public sealed class GameArchiverClient : IAsyncDisposable
         return rows;
     }
 
-    public async Task<IReadOnlyList<ArchiveLocation>> FindOrphansAsync(ArchiveLibrary library, string outputRoot, CancellationToken ct = default)
+    public Task<IReadOnlyList<ArchiveLocation>> FindOrphansAsync(ArchiveLibrary library, string outputRoot, CancellationToken ct = default) =>
+        FindOrphansAsync(library, new ArchiveOptions { OutputRoot = outputRoot }, ct);
+
+    public async Task<IReadOnlyList<ArchiveLocation>> FindOrphansAsync(ArchiveLibrary library, ArchiveOptions options, CancellationToken ct = default)
     {
         var known = library.Games.Select(g => g.Key).ToHashSet();
-        return (await ArchiveCatalog.ScanAsync(outputRoot, ct, _stores.Keys.ToHashSet()))
+        return (await ScanAsync(options, ct))
             .Where(l => _stores.ContainsKey(l.Metadata.Source) && !known.Contains(l.Metadata.Key)).ToList();
     }
 
-    public async Task<IReadOnlyList<VerificationResult>> VerifyAsync(string outputRoot, bool deep = false,
+    public Task<IReadOnlyList<VerificationResult>> VerifyAsync(string outputRoot, bool deep = false,
+        bool fix = false, string search = "", CancellationToken ct = default, GameOs? platform = null) =>
+        VerifyAsync(new ArchiveOptions { OutputRoot = outputRoot }, deep, fix, search, ct, platform);
+
+    public async Task<IReadOnlyList<VerificationResult>> VerifyAsync(ArchiveOptions options, bool deep = false,
         bool fix = false, string search = "", CancellationToken ct = default, GameOs? platform = null)
     {
         var results = new List<VerificationResult>();
-        foreach (var found in await ArchiveCatalog.ScanAsync(outputRoot, ct, _stores.Keys.ToHashSet()))
+        foreach (var found in await ScanAsync(options, ct))
         {
             var location = found;
             if (!_stores.ContainsKey(location.Metadata.Source) || search.Length > 0

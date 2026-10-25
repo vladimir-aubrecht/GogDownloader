@@ -10,6 +10,14 @@ see [third-party notices](../THIRD-PARTY-NOTICES.md).
 - Create `SteamClient`, `CallbackManager`, `SteamUser`, `SteamApps`, `SteamContent`.
 - Pump callbacks for the session lifetime, including while awaiting `AsyncJob` results.
 - Wait for `SteamClient.ConnectedCallback` before authentication.
+- Select the HTTP handler by `HttpClientPurpose`. `CMWebSocket` must use the underlying
+  transport directly: .NET's `ClientWebSocket` reads the upgraded response synchronously and
+  requires a duplex stream. The asynchronous, read-only CDN body wrapper breaks that handshake
+  before credentials or Steam Guard are reached. SteamKit reports it as a disconnect.
+- SteamKit's `Connect` does not retry automatically. A failed connection marks its CM endpoint
+  bad; reuse the client to try another. The adapter allows three initial attempts with bounded
+  backoff, sharing one `OperationTimeout`. Once connected, a disconnect terminates the session
+  and reports its phase; it never silently repeats credentials or Steam Guard interaction.
 - Credentials use `Authentication.BeginAuthSessionViaCredentialsAsync(AuthSessionDetails)`.
   Supply `IAuthenticator`; do not use SteamKit2's console authenticator in a library.
 - `IAuthenticator` supports email codes, device codes and mobile approval. Poll with
@@ -21,7 +29,8 @@ see [third-party notices](../THIRD-PARTY-NOTICES.md).
 - Wait for `LicenseListCallback`; disconnection must stop trusting a logged-on state.
 
 Primary sources: `Samples/000_Authentication/Program.cs`, `Steam/Authentication/IAuthenticator.cs`,
-`AuthSession.cs`, `AuthPollResult.cs`, and the `SteamUser` handlers.
+`AuthSession.cs`, `AuthPollResult.cs`, the `SteamUser` handlers, `Steam/CMClient.cs`,
+`Networking/Steam3/WebSocketContext.cs`, and `Steam/SteamClient/Configuration`.
 
 ## Library and appinfo
 
@@ -86,6 +95,9 @@ Primary sources: `Steam/Handlers/SteamContent/SteamContent.cs`, `Steam/CDN/Clien
 
 The tests validate application planning, reconstruction and recovery with an injected
 `ISteamSession` plus a controlled HTTP response stream for the real cancellation adapter.
-They also parse representative PICS KeyValues with SteamKit2. Compilation verifies the pinned
-library's API signatures. This does not establish that a specific user's account, title, network
+They also exercise a real .NET WebSocket upgrade and the SteamKit callback pump with a fake HTTP
+transport and server directory: the old wrapper fails, the CM transport can send, failed initial
+connections retry, and cancellation/timeouts terminate the attempt sequence. No account or
+external connection is needed. Tests also parse representative PICS KeyValues. Compilation
+verifies the pinned library's API signatures. This does not establish that a specific user's account, title, network
 or ARM64 device will authenticate and transfer successfully; that remains a live integration test.

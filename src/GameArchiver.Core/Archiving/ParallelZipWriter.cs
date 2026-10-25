@@ -40,7 +40,7 @@ public static class ParallelZipWriter
     /// </summary>
     private const long InMemoryPartLimit = 8L << 20;
 
-    private sealed record Entry(string FullPath, string Name, bool IsDirectory, long Size, DateTime Modified)
+    internal sealed record Entry(string FullPath, string Name, bool IsDirectory, long Size, DateTime Modified)
     {
         /// <summary>
         /// Written with no compression at all. A directory has no data, and an empty file must
@@ -59,6 +59,9 @@ public static class ParallelZipWriter
         public uint Crc { get; set; }
         public long CompressedSize { get; set; }
         public long LocalHeaderOffset { get; set; }
+        public ushort? OriginalMethod { get; init; }
+        public uint? ExternalAttributes { get; init; }
+        public ushort Method => OriginalMethod ?? (IsStored ? Stored : Deflated);
     }
 
     public static async Task CreateAsync(
@@ -229,7 +232,7 @@ public static class ParallelZipWriter
         entry.CompressedSize = entry.PartBuffer?.Length ?? new FileInfo(part!).Length;
     }
 
-    private static void WriteLocalHeader(Stream output, Entry entry, long threshold)
+    internal static void WriteLocalHeader(Stream output, Entry entry, long threshold)
     {
         var name = Encoding.UTF8.GetBytes(entry.Name);
         var zip64 = entry.Size >= threshold || entry.CompressedSize >= threshold;
@@ -238,7 +241,7 @@ public static class ParallelZipWriter
         writer.Write(LocalHeaderSignature);
         writer.Write((ushort)(zip64 ? 45 : 20));
         writer.Write(Utf8NameFlag);
-        writer.Write(entry.IsStored ? Stored : Deflated);
+        writer.Write(entry.Method);
         writer.Write(DosTime(entry.Modified));
         writer.Write(DosDate(entry.Modified));
         writer.Write(entry.Crc);
@@ -259,7 +262,7 @@ public static class ParallelZipWriter
         writer.Flush();
     }
 
-    private static void WriteCentralDirectory(Stream output, List<Entry> entries, long threshold)
+    internal static void WriteCentralDirectory(Stream output, List<Entry> entries, long threshold)
     {
         var writer = new BinaryWriter(output, Encoding.UTF8, leaveOpen: true);
         var start = output.Position;
@@ -278,7 +281,7 @@ public static class ParallelZipWriter
             writer.Write((ushort)45);                       // version made by
             writer.Write((ushort)(zip64 ? 45 : 20));        // version needed
             writer.Write(Utf8NameFlag);
-            writer.Write(entry.IsStored ? Stored : Deflated);
+            writer.Write(entry.Method);
             writer.Write(DosTime(entry.Modified));
             writer.Write(DosDate(entry.Modified));
             writer.Write(entry.Crc);
@@ -289,7 +292,7 @@ public static class ParallelZipWriter
             writer.Write((ushort)0);                        // comment length
             writer.Write((ushort)0);                        // disk number
             writer.Write((ushort)0);                        // internal attributes
-            writer.Write(entry.IsDirectory ? 0x10u : 0u);   // external attributes
+            writer.Write(entry.ExternalAttributes ?? (entry.IsDirectory ? 0x10u : 0u));
             writer.Write(bigOffset ? uint.MaxValue : (uint)entry.LocalHeaderOffset);
             writer.Write(name);
 

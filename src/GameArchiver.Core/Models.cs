@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 namespace GameArchiver.Core;
 
 public enum GameOs { Windows, Mac, Linux }
+public enum ArchiveLayout { Flat, Provider }
 
 public sealed record GameKey
 {
@@ -71,6 +72,8 @@ public record GameSelection
 public sealed record ArchiveOptions : GameSelection
 {
     public required string OutputRoot { get; init; }
+    public ArchiveLayout Layout { get; init; } = ArchiveLayout.Flat;
+    public Dictionary<string, string> ProviderDirectories { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public string? DirectoryName { get; init; }
     public string? StagingRoot { get; init; }
     public int MaxConnections { get; init; } = 5;
@@ -87,6 +90,19 @@ public sealed record ArchiveOptions : GameSelection
     {
         base.Validate();
         ArgumentException.ThrowIfNullOrWhiteSpace(OutputRoot);
+        if (!Enum.IsDefined(Layout) || ProviderDirectories is null)
+            throw new ArgumentException("Invalid archive layout.");
+        if (Layout == ArchiveLayout.Flat && ProviderDirectories.Count > 0)
+            throw new ArgumentException("Provider directories require the provider layout.");
+        foreach (var (provider, directory) in ProviderDirectories)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(provider);
+            ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+            ArchivePaths.ValidateName(provider);
+            ArchivePaths.ValidateName(directory);
+        }
+        if (ProviderDirectories.Keys.Distinct(StringComparer.OrdinalIgnoreCase).Count() != ProviderDirectories.Count)
+            throw new ArgumentException("Duplicate provider directory settings.");
         if (MaxConnections <= 0 || CompressionThreads <= 0 || MaxBytesPerSecond < 0)
             throw new ArgumentOutOfRangeException(nameof(MaxConnections), "Invalid platform, concurrency or bandwidth setting.");
         if (DirectoryName is not null) ArchivePaths.ValidateName(DirectoryName);

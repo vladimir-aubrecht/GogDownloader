@@ -159,3 +159,27 @@ failed=0
 result=$(sh scripts/gamevault-sync.sh 2>&1) || failed=$?
 check "conflicting metadata owners fail without a GameVault update" test "$failed" -eq 1
 check "conflicting owners make no update request" test ! -s "$SYNC_FIXTURE/requests.jsonl"
+
+# Provider folders add one level; identical basenames still match the full relative path.
+rm "$BACKUP_DIR/game/.gamebackup.json"
+mkdir -p "$BACKUP_DIR/gog"
+mv "$BACKUP_DIR/game" "$BACKUP_DIR/gog/game"
+write_game 'old.exe' '--old'
+jq '.data = [(.data[0] + {id: 2, file_path: "/files/steam/game/Game.zip"}),
+    (.data[0] + {file_path: "/files/gog/game/Game.zip"})]' \
+    "$SYNC_FIXTURE/games.json" > "$SYNC_FIXTURE/matches.json"
+mv "$SYNC_FIXTURE/matches.json" "$SYNC_FIXTURE/games.json"
+run_sync
+check "provider layout finds GOG metadata and disambiguates the provider folder" \
+    test "$(wc -l < "$SYNC_FIXTURE/requests.jsonl")" -eq 1
+jq '. + {SchemaVersion: 2, Source: "steam", ProductId: "1"}' "$BACKUP_DIR/gog/game/.gogdl.json" \
+    > "$BACKUP_DIR/gog/game/.gamebackup.json"
+rm "$BACKUP_DIR/gog/game/.gogdl.json"
+mkdir -p "$BACKUP_DIR/steam_library"
+mv "$BACKUP_DIR/gog/game" "$BACKUP_DIR/steam_library/game"
+jq '.data[0].file_path = "/files/gog/game/Game.zip" | .data[1].file_path = "/files/steam_library/game/Game.zip"' \
+    "$SYNC_FIXTURE/games.json" > "$SYNC_FIXTURE/matches.json"
+mv "$SYNC_FIXTURE/matches.json" "$SYNC_FIXTURE/games.json"
+run_sync
+check "custom provider folders support native Steam launch metadata" \
+    test "$(wc -l < "$SYNC_FIXTURE/requests.jsonl")" -eq 1

@@ -104,7 +104,8 @@ sync_once() {
 
     # GOG keeps its legacy metadata; native Steam archives use the shared version-2 format.
     # Other producers may use .gogdl.json with another schema, which must stay untouched.
-    find "$BACKUP_DIR" -maxdepth 2 \( -name '.gogdl.json' -o -name '.gamebackup.json' \) -type f 2>/dev/null | while IFS= read -r manifest; do
+    # Support both root/game and root/provider/game layouts without following links.
+    find "$BACKUP_DIR" -maxdepth 3 \( -name '.gogdl.json' -o -name '.gamebackup.json' \) -type f 2>/dev/null | while IFS= read -r manifest; do
         format=${manifest##*/}
         directory=${manifest%/*}
         legacy="$directory/.gogdl.json"

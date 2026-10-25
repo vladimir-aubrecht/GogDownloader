@@ -115,8 +115,10 @@ The example's UI callback and account variables belong to the host application. 
 `"approve"` for device confirmation permits mobile approval; return another value to request
 code entry instead. Email/device-code challenges include the previous-code rejection state.
 `SteamClientOptions.TokenPath` selects the remembered session file and `OperationTimeout` bounds
-connection/authentication/protocol requests. Refresh and guard tokens are persisted atomically
-with private Unix creation permissions. `GetAuthenticationAsync` reads saved credentials without
+connection/authentication/protocol requests. Up to three initial connection attempts and their
+retry delays share one timeout budget; authentication itself is not automatically retried.
+Disconnection errors identify the phase of the operation. Refresh and guard tokens are persisted
+atomically with private Unix creation permissions. `GetAuthenticationAsync` reads saved credentials without
 contacting Steam; it does not prove they are still valid. `LogoutAsync` disconnects and removes
 them. A disconnected session is recreated on the next operation.
 
@@ -141,16 +143,35 @@ ArchiveLibrary? previous = File.Exists(ArchiveLibrary.DefaultPath)
 var library = await archive.SyncLibraryAsync(previous, cancellationToken);
 await library.SaveAsync(ArchiveLibrary.DefaultPath, cancellationToken);
 
-var options = new ArchiveOptions { OutputRoot = "/backups", Platform = GameOs.Windows };
+var options = new ArchiveOptions
+{
+    OutputRoot = "/backups", Platform = GameOs.Windows, Layout = ArchiveLayout.Provider,
+    ProviderDirectories = new() { ["gog"] = "drm_free", ["steam"] = "steam" },
+};
 var result = await archive.DownloadAsync(new GameKey("steam", "427520"), options,
     new InlineProgress<ArchiveProgress>(p => UpdateYourUi(p)), cancellationToken);
 var differences = await archive.DiffAsync(library, options, ct: cancellationToken);
-var checks = await archive.VerifyAsync("/backups", deep: true, ct: cancellationToken);
+var checks = await archive.VerifyAsync(options, deep: true, ct: cancellationToken);
+var orphans = await archive.FindOrphansAsync(library, options, cancellationToken);
 ```
 
 The aggregator owns its stores by default. Use the constructor accepting `ownsStores: false`
 when the host owns their lifetime. Methods do not authenticate by reading console input:
 establish credentials through the individual clients before calling common operations.
+
+Register only the providers an operation should use, for example
+`new GameArchiverClient(new GogClient())` for GOG. Additional `IGameStore` implementations use
+the same output routing; provider names are not hard-coded in the shared API.
+
+`ArchiveLayout.Flat` is the default. `ArchiveLayout.Provider` places game folders under
+`OutputRoot/{source}/`, with optional single-folder overrides in `ProviderDirectories`.
+The same options work with standalone `GogClient` and `SteamClient` downloads. Pass those
+options to `DiffAsync`, `VerifyAsync` and `FindOrphansAsync` to inspect the same destinations.
+The string-root overloads of verification and orphan discovery retain flat-layout behavior.
+Routing leaves local staging settings unchanged, rejects ambiguous names, files, links and
+game backups occupying a provider directory, and reserves provider folders before allocating
+games. Changing the layout does not migrate existing archives; complete game folders can be
+moved manually while downloads are stopped and will be rediscovered by metadata identity.
 
 `GameKey("gog", "1")` and `GameKey("steam", "1")` identify different products. Slugs/titles never
 establish identity. The source is case-normalized; the product ID remains a string. Duplicate
@@ -174,6 +195,57 @@ reported as `Unknown` offline. GOG installer versions set
 filter limits checks to one OS, and repair takes the output lease before modifying anything.
 Verification does not prove a title can run without Steam/DRM. `FindOrphansAsync` reports known
 supported-source backups outside the supplied library and never deletes them.
+
+## Bulk archive file operations
+
+`GameArchiverClient.ProcessArchiveFilesAsync` operates on completed ZIPs discovered by metadata
+under the configured output/layout. It uses registered stores only to select sources; no store
+method is called and no library snapshot is needed. Both GOG legacy and native metadata are
+supported, including archives no longer listed in the online library.
+
+```csharp
+var options = new ArchiveOptions { OutputRoot = "/backups", Layout = ArchiveLayout.Provider };
+var request = new ArchiveFileRequest
+{
+    Operation = ArchiveFileOperation.Replace,
+    FilePath = "/home/user/replacement.txt",
+    Match = "readme.txt",
+    MatchBy = ArchiveFileMatch.Name, // Path matches the full relative entry path instead
+    IgnoreCase = true,
+    DryRun = true,
+    Platform = GameOs.Windows,      // null includes every archived platform
+};
+var preview = await archive.ProcessArchiveFilesAsync(options, request, ct: cancellationToken);
+var results = await archive.ProcessArchiveFilesAsync(options, request with { DryRun = false }, ct: cancellationToken);
+```
+
+Use `Operation = Find` without `FilePath` to list matches. Use `Operation = Add` with `FilePath`
+and optional `EntryPath` to insert the same file into each ZIP (default: source basename at root).
+`Search` filters game title/slug. Match strings are literal, case-sensitive by default.
+Results carry the game key, platform, ZIP path, status, per-entry destination/backup paths and
+any error or cleanup warning. Failures are reported per archive and the batch continues;
+cancellation throws `OperationCanceledException`. `DryRun` does not create locks or staging.
+
+An existing entry is renamed with a `.backup` suffix, repeated until unoccupied. Old backups
+remain intact. Unsafe paths, case-colliding entries, directory/file conflicts, encrypted ZIPs,
+unsupported compression and inconsistent headers are refused. ZIP64 and streaming data descriptors
+are supported. Unchanged compressed payloads are copied with bounded buffers; newly inserted
+content is verified. `verify --deep` remains the way to check every existing payload.
+
+Edits take the same archive lease as downloads. They publish to a unique `(local-<id>).zip` name,
+then atomically update the authoritative metadata, and only then delete the previous ZIP.
+Failure before the metadata commit preserves the previous backup. Crashes can leave unreferenced
+files; the next operation scans only metadata-referenced ZIPs. Both size fields and modified file
+hashes are updated (MD5 for GOG legacy, SHA1 for native metadata); original hashes follow their
+backup entries. Provider fields, download version and `CompletedAt` are retained, and `ModifiedAt`
+records the edit. A recognized GOG legacy document takes precedence when both metadata files
+exist; an explicitly foreign `.gogdl.json` is left untouched.
+`ArchiveMetadata.LoadedFileName` records the reader's authoritative selection
+in memory and is never serialized. Edits compare normalized archive paths across platforms and
+refuse shared ZIPs before writing. Local-edit filenames fit 255 UTF-8 bytes without splitting
+Unicode characters or dropping GameVault type tags; long title/version text may be shortened.
+Temporary files use independent short names. Preview validates the same naming constraints.
+Custom edits are not reapplied automatically when a later download rebuilds an archive.
 
 ## Metadata, folders and recovery
 

@@ -144,6 +144,10 @@ When multiple GameVault entries share an archive filename, the script also match
 relative folder against GameVault's file path. If that still leaves an ambiguous match, it
 reports an error and updates none of those entries.
 
+The script scans both `{root}/{slug}/` and `{root}/{provider}/{slug}/` layouts, including
+custom provider folder names. Its path comparison includes the provider folder when present,
+so equal archive names from different providers remain distinct. Directory links are not followed.
+
 ## API used by the sync script
 
 | Purpose | Endpoint |

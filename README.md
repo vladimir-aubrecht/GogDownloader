@@ -95,6 +95,19 @@ Disconnection errors identify whether the connection failed before authenticatio
 credentials/Steam Guard, or after logon. After updating the code, rebuild before using
 `--no-build` (for example, `dotnet build -c Release`); otherwise the CLI runs the old binary.
 
+If Steam reports missing access tokens for individual apps, sync retries each affected app
+once with a fresh individual token request. Persistent failures include the token response
+states and owning package IDs, with no token values. They remain recorded failures; a name
+alone does not make an app downloadable. Failures show a title from Steam or an earlier snapshot
+when available, otherwise `Name unavailable (steam:ID)`.
+
+Inspect the saved failures without logging in or repeating sync:
+
+```sh
+dotnet run --project src/GameArchiver.Cli -- library failures --source steam
+dotnet run --project src/GameArchiver.Cli -- library failures "title or AppID" --source steam
+```
+
 The rename changes project, assembly and namespace names, plus the unified tool command to
 `gamearchiver`. Existing configuration/staging directories (`gogdownloader` and `gamearchive`),
 environment variables (`GOGDL_SNAPSHOT` and `GAMEARCHIVE_STEAM_*`), metadata filenames and

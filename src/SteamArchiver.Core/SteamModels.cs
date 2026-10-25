@@ -67,6 +67,9 @@ public interface ISteamSession : IAsyncDisposable
     Task<IReadOnlySet<uint>> GetOwnedAppIdsAsync(CancellationToken ct);
     Task<SteamApp> GetAppAsync(uint appId, CancellationToken ct);
     Task PreloadAppsAsync(IReadOnlySet<uint> appIds, CancellationToken ct) => Task.CompletedTask;
+    /// <summary>Optional labels for diagnostics only; names do not establish ownership or downloadable content.</summary>
+    Task<IReadOnlyDictionary<uint, string>> GetAppNamesAsync(IReadOnlySet<uint> appIds, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyDictionary<uint, string>>(new Dictionary<uint, string>());
     Task<ISteamContentSession> OpenContentAsync(long maxBytesPerSecond, CancellationToken ct);
 }
 

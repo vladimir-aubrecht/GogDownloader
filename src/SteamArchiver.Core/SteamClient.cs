@@ -61,12 +61,14 @@ public sealed class SteamClient : IGameStore
             await _session.PreloadAppsAsync(owned, ct);
             var games = new List<GameInfo>();
             var failures = new Dictionary<string, string>();
+            var names = new Dictionary<string, string>();
             foreach (var id in owned.Order())
             {
                 ct.ThrowIfCancellationRequested();
                 try
                 {
                     var app = await _session.GetAppAsync(id, ct);
+                    names[id.ToString()] = app.Title;
                     var dlcs = app.Dlcs.Concat(app.Depots.Select(d => d.DlcAppId).Where(d => d > 0))
                         .Where(owned.Contains).Distinct().Order().Select(d => d.ToString()).ToList();
                     var game = new GameInfo(new(Source, id.ToString()), app.Title, ArchivePaths.Slug(app.Title))
@@ -95,7 +97,17 @@ public sealed class SteamClient : IGameStore
                 }
                 catch (Exception e) when (e is not OperationCanceledException) { failures[id.ToString()] = e.Message; }
             }
-            return new(games) { Failures = failures };
+            var missingNames = failures.Keys.Where(id => !names.ContainsKey(id)).Select(uint.Parse).ToHashSet();
+            if (missingNames.Count > 0)
+            {
+                try
+                {
+                    foreach (var (id, name) in await _session.GetAppNamesAsync(missingNames, ct))
+                        if (missingNames.Contains(id) && !string.IsNullOrWhiteSpace(name)) names[id.ToString()] = name;
+                }
+                catch (Exception e) when (e is not OperationCanceledException) { /* Optional labels must not discard a successful sync. */ }
+            }
+            return new(games) { Failures = failures, FailureNames = names.Where(p => failures.ContainsKey(p.Key)).ToDictionary() };
         }
         finally { _gate.Release(); }
     }

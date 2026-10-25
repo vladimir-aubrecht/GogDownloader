@@ -43,6 +43,14 @@ Request app access tokens with `PICSGetAccessTokens`, then app info with `PICSGe
 complete library. Large appinfo can carry `UseHttp` and `HttpUri`; that body must be read and
 parsed instead of silently accepting empty KeyValues. Per-app failures are recorded separately.
 
+`PICSTokensCallback.AppTokensDenied` is an explicit denial; an absent dictionary entry is not
+the same response. A returned zero token is valid for public appinfo, while a nonzero token
+must be passed through unchanged. If product info reports `MissingToken`, re-request the token
+and product info once for that AppID alone. Cache the final result for the current sync so
+references from several games cannot trigger repeated retries. A fresh sync clears that cache.
+Persistent failures include the initial and retry token states and the package IDs that supplied
+the AppID. Never include token values or infer that an app was retired from `MissingToken` alone.
+
 Appinfo fields used by this provider:
 
 | Path | Meaning |
@@ -85,6 +93,19 @@ Do not suppress actual PICS access failures or treat empty appinfo as a game. `m
 describes access to an individual application's metadata. The unavailable application remains
 a per-app sync failure and an older snapshot entry is retained when present. It must not make
 other games fail when their own appinfo already contains the required shared manifests.
+
+For diagnostic display names, keep any name present in PICS even if protected appinfo is
+unavailable. For failures without names, try `Player.GetOwnedGames#1` through SteamKit2 unified
+messages with `include_appinfo`, the current account's SteamID and an AppID filter. This optional
+lookup is bounded to ten seconds (or the smaller operation timeout), and its failure must not
+discard the sync. Only use returned names as labels, never as ownership, depot or manifest data.
+The aggregate snapshot records `FailureNames`; an older game title or failure name is retained
+when no fresh name is available. Source outages and source-filtered sync preserve known names.
+Unknown names are displayed explicitly instead of guessed. This lookup is best effort and does
+not establish that every private application will return a name.
+
+Primary sources for labels: `Samples/013_UnifiedMessages/Program.cs` and
+`Base/Generated/SteamMsgPlayer.cs` (`CPlayer_GetOwnedGames_Request`, response and `Player` service).
 
 ## SteamPipe downloads
 

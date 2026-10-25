@@ -3,6 +3,7 @@ using System.IO.Compression;
 using GameArchiver.Core;
 using SteamKit2;
 using SteamKit2.Authentication;
+using SteamKit2.Internal;
 using CdnClient = SteamKit2.CDN.Client;
 using CdnServer = SteamKit2.CDN.Server;
 using KitClient = SteamKit2.SteamClient;
@@ -24,8 +25,8 @@ internal sealed class SteamKitSession : ISteamSession
     private TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<SteamUser.LoggedOnCallback> _loggedOn = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<SteamApps.LicenseListCallback> _licenses = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly ConcurrentDictionary<uint, SteamApp> _appCache = new();
-    private readonly ConcurrentDictionary<uint, Exception> _appFailures = new();
+    private readonly SteamAppInfoCache _appInfo;
+    private readonly ConcurrentDictionary<uint, string> _appNames = new();
     private readonly AsyncLocal<ContentHttpContext?> _httpContext = new();
     private volatile bool _connectionEstablished;
     private volatile string _phase = "connecting to Steam";
@@ -47,6 +48,7 @@ internal sealed class SteamKitSession : ISteamSession
         _user = _client.GetHandler<SteamUser>()!;
         _apps = _client.GetHandler<SteamApps>()!;
         _content = _client.GetHandler<SteamContent>()!;
+        _appInfo = new(FetchAppInfoAsync);
         _callbacks = new(_client);
         _callbacks.Subscribe<KitClient.ConnectedCallback>(_ =>
         {
@@ -211,6 +213,7 @@ internal sealed class SteamKitSession : ISteamSession
         var requests = licenses.LicenseList.Where(l => l.PackageID > 0 && (l.LicenseFlags & invalid) == 0)
             .Select(l => new SteamApps.PICSRequest(l.PackageID, l.AccessToken)).ToList();
         var owned = new HashSet<uint>();
+        var packages = new Dictionary<uint, HashSet<uint>>();
         foreach (var batch in requests.Chunk(100))
         {
             var result = await WaitAsync(_apps.PICSGetProductInfo([], batch).ToTask(), ct);
@@ -222,53 +225,81 @@ internal sealed class SteamKitSession : ISteamSession
             {
                 received.Add(id);
                 foreach (var app in package.KeyValues["appids"].Children)
-                    if (app.AsUnsignedInteger() is > 0 and var appId) owned.Add(appId);
+                    if (app.AsUnsignedInteger() is > 0 and var appId)
+                    {
+                        owned.Add(appId);
+                        if (!packages.TryGetValue(appId, out var ids)) packages[appId] = ids = [];
+                        ids.Add(id);
+                    }
             }
             if (batch.Any(r => !received.Contains(r.ID))) throw new IOException("Steam omitted an owned package; library sync was not saved.");
         }
-        _appCache.Clear();
-        _appFailures.Clear();
+        _appInfo.Reset(packages.ToDictionary(p => p.Key, p => p.Value.Order().ToArray()));
+        _appNames.Clear();
         return owned;
     }
 
-    public async Task PreloadAppsAsync(IReadOnlySet<uint> appIds, CancellationToken ct)
-    {
-        foreach (var batch in appIds.Chunk(100))
-        {
-            var tokens = await WaitAsync(_apps.PICSGetAccessTokens(batch, []).ToTask(), ct);
-            var requests = batch.Select(id => new SteamApps.PICSRequest(id, tokens.AppTokens.GetValueOrDefault(id)));
-            var result = await WaitAsync(_apps.PICSGetProductInfo(requests, []).ToTask(), ct);
-            if (!result.Complete || result.Failed || result.Results is null)
-                throw new IOException("Steam returned incomplete bulk appinfo.");
-            foreach (var (id, product) in result.Results.SelectMany(r => r.Apps))
-            {
-                try { _appCache[id] = await DecodeProductAsync(id, product, ct); }
-                catch (Exception e) when (e is not OperationCanceledException) { _appFailures[id] = e; }
-            }
-            foreach (var id in batch)
-                if (!_appCache.ContainsKey(id) && !_appFailures.ContainsKey(id))
-                    _appFailures[id] = new IOException($"Steam did not return appinfo for {id}.");
-        }
-    }
+    public Task PreloadAppsAsync(IReadOnlySet<uint> appIds, CancellationToken ct) => _appInfo.PreloadAsync(appIds, ct);
 
     public async Task<SteamApp> GetAppAsync(uint appId, CancellationToken ct)
     {
         await LoginAsync(null, ct);
-        if (_appCache.TryGetValue(appId, out var cached)) return cached;
-        if (_appFailures.TryGetValue(appId, out var failure)) throw new IOException($"Cannot read Steam app {appId}: {failure.Message}", failure);
-        var tokens = await WaitAsync(_apps.PICSGetAccessTokens(appId, null).ToTask(), ct);
-        var request = new SteamApps.PICSRequest(appId, tokens.AppTokens.GetValueOrDefault(appId));
-        var result = await WaitAsync(_apps.PICSGetProductInfo(request, null).ToTask(), ct);
-        if (!result.Complete || result.Failed || result.Results is null) throw new IOException($"Incomplete Steam appinfo for {appId}.");
-        var product = result.Results.SelectMany(r => r.Apps).Where(p => p.Key == appId).Select(p => p.Value).SingleOrDefault()
-            ?? throw new IOException($"Steam did not return appinfo for {appId}.");
-        return _appCache[appId] = await DecodeProductAsync(appId, product, ct);
+        return await _appInfo.GetAsync(appId, ct);
+    }
+
+    private async Task<IReadOnlyDictionary<uint, SteamAppInfoResult>> FetchAppInfoAsync(IReadOnlyCollection<uint> appIds, CancellationToken ct)
+    {
+        var tokens = await WaitAsync(_apps.PICSGetAccessTokens(appIds, []).ToTask(), ct);
+        var requests = appIds.Select(id => new SteamApps.PICSRequest(id, tokens.AppTokens.GetValueOrDefault(id)));
+        var result = await WaitAsync(_apps.PICSGetProductInfo(requests, []).ToTask(), ct);
+        if (!result.Complete || result.Failed || result.Results is null)
+            throw new IOException("Steam returned incomplete appinfo.");
+        var entries = new Dictionary<uint, SteamAppInfoResult>();
+        foreach (var (id, product) in result.Results.SelectMany(r => r.Apps).Where(p => appIds.Contains(p.Key)))
+        {
+            if (product.KeyValues["common"]["name"].Value is { } name && !string.IsNullOrWhiteSpace(name)) _appNames[id] = name;
+            try
+            {
+                if (product.MissingToken) throw new SteamAppInfoAccessException(id,
+                    SteamAppInfoAccessException.Status(id, tokens.AppTokens, tokens.AppTokensDenied));
+                var app = await DecodeProductAsync(id, product, ct);
+                _appNames[id] = app.Title;
+                entries[id] = new(app);
+            }
+            catch (Exception e) when (e is not OperationCanceledException) { entries[id] = new(Error: e); }
+        }
+        return entries;
+    }
+
+    public async Task<IReadOnlyDictionary<uint, string>> GetAppNamesAsync(IReadOnlySet<uint> appIds, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var names = _appNames.Where(p => appIds.Contains(p.Key)).ToDictionary();
+        var missing = appIds.Except(names.Keys).ToArray();
+        if (missing.Length == 0 || Disconnected || _client.SteamID is not { } account) return names;
+        try
+        {
+            // This service may provide display names even when PICS appinfo is protected.
+            // It never supplies ownership or manifests to the archive planner.
+            var request = new CPlayer_GetOwnedGames_Request { steamid = account.ConvertToUInt64(), include_appinfo = true,
+                include_played_free_games = true, include_free_sub = true, skip_unvetted_apps = false };
+            request.appids_filter.AddRange(missing);
+            var service = _client.GetHandler<SteamUnifiedMessages>()!.CreateService<Player>();
+            var timeout = _options.OperationTimeout > TimeSpan.Zero && _options.OperationTimeout < TimeSpan.FromSeconds(10)
+                ? _options.OperationTimeout : TimeSpan.FromSeconds(10);
+            var result = await service.GetOwnedGames(request).ToTask().WaitAsync(timeout, ct);
+            if (result.Result == EResult.OK)
+                foreach (var game in result.Body.games)
+                    if (game.appid > 0 && appIds.Contains((uint)game.appid) && !string.IsNullOrWhiteSpace(game.name))
+                        names.TryAdd((uint)game.appid, game.name);
+        }
+        catch (Exception e) when (e is AsyncJobFailedException or TimeoutException or IOException
+            || e is OperationCanceledException && !ct.IsCancellationRequested) { /* Display names are best effort. */ }
+        return names;
     }
 
     private async Task<SteamApp> DecodeProductAsync(uint appId, SteamApps.PICSProductInfoCallback.PICSProductInfo product, CancellationToken ct)
     {
-        if (product.MissingToken) throw new SteamAuthenticationException(
-            $"Steam did not grant access to appinfo for {appId} (PICS missing_token). The app may be private or retired.");
         var info = product.KeyValues;
         if (product.UseHttp && product.HttpUri is { } uri)
         {

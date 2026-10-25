@@ -126,6 +126,13 @@ An injected `ISteamSession` supplies a controlled protocol boundary for embeddin
 owned by `SteamClient`. It returns licensed AppIDs, parsed appinfo and a content session. The
 default implementation is `SteamKitSession`; it uses CM callbacks, license/package tokens, PICS,
 Steam Guard and SteamPipe through SteamKit2. Library metadata is requested in batches.
+Missing-token appinfo responses receive one individual token/product-info retry. Persistent
+errors include token states and licensing package IDs without exposing token values.
+`ISteamSession.GetAppNamesAsync` is an optional label lookup with an empty default implementation.
+The native session uses PICS names and, for missing labels, a bounded `Player.GetOwnedGames`
+request. Names never supply ownership or downloadable content. `StoreLibraryResult.FailureNames`
+and `ArchiveLibrary.FailureNames` carry optional display names for failed IDs; older snapshots
+remain readable. The aggregator also retains names from previous snapshots during failures.
 
 ## Aggregate API
 

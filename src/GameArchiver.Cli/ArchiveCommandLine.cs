@@ -144,7 +144,7 @@ public static class ArchiveCommandLine
             await library.SaveAsync(snapshotPath, ct);
             Console.WriteLine($"Saved {library.Games.Count} games to {snapshotPath}.");
             var currentFailures = library.Failures.Where(f => archive.Sources.Contains(f.Key.Split(':', 2)[0])).ToList();
-            foreach (var failure in currentFailures) Console.Error.WriteLine($"Failed {failure.Key}: {failure.Value}");
+            foreach (var failure in currentFailures) Console.Error.WriteLine($"Failed {FailureLabel(library, failure.Key)}: {failure.Value}");
             return currentFailures.Count == 0 ? 0 : 1;
         }
         var search = string.Join(' ', positionals.Skip(command is "library" or "archive" ? 2 : 1));
@@ -152,10 +152,20 @@ public static class ArchiveCommandLine
         if (command == "library")
         {
             if (library is null) throw new FileNotFoundException("No aggregate library snapshot. Run library sync first.");
+            if (subcommand == "failures")
+            {
+                var failures = library.Failures.Where(f => (source == "all" || f.Key.Split(':', 2)[0] == source)
+                    && (search.Length == 0 || f.Key.Contains(search, StringComparison.OrdinalIgnoreCase)
+                        || FailureLabel(library, f.Key).Contains(search, StringComparison.OrdinalIgnoreCase)
+                        || f.Value.Contains(search, StringComparison.OrdinalIgnoreCase))).OrderBy(f => f.Key).ToList();
+                foreach (var failure in failures) Console.WriteLine($"{FailureLabel(library, failure.Key)}: {failure.Value}");
+                Console.WriteLine($"{failures.Count} recorded sync failures.");
+                return 0;
+            }
             games = games.Where(g => Search(g, search)).ToList();
             if (subcommand == "stats")
             { foreach (var group in games.GroupBy(g => g.Key.Source)) Console.WriteLine($"{group.Key}: {group.Count()} products, {group.Count(g => g.Versions.Keys.Any(g.CanBackUp))} archivable"); return 0; }
-            if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats");
+            if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats|failures");
             foreach (var game in games)
                 Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}");
             return games.Count == 0 ? 1 : 0;
@@ -272,6 +282,14 @@ public static class ArchiveCommandLine
         throw new ArgumentException($"Unknown command '{command}'. Use --help.");
     }
 
+    private static string FailureLabel(ArchiveLibrary library, string key)
+    {
+        if (!key.Contains(':')) return key;
+        var name = library.FailureNames.GetValueOrDefault(key);
+        if (string.IsNullOrWhiteSpace(name)) name = library.Games.FirstOrDefault(g => g.Key.ToString() == key)?.Title;
+        return $"{(string.IsNullOrWhiteSpace(name) ? "Name unavailable" : name)} ({key})";
+    }
+
     private static bool Search(GameInfo game, string search) => search.Length == 0
         || game.Title.Contains(search, StringComparison.OrdinalIgnoreCase) || game.Slug.Contains(search, StringComparison.OrdinalIgnoreCase);
     private static int Integer(Dictionary<string, string> flags, string name, int fallback)
@@ -332,7 +350,7 @@ public static class ArchiveCommandLine
     private static void Usage() => Console.WriteLine("""
         gamearchiver — archive owned GOG and Steam games
           auth login|status|logout --source gog|steam
-          library sync|list|stats [search] [--source gog|steam|all]
+          library sync|list|stats|failures [search] [--source gog|steam|all]
           download <source:ID|slug> [--source gog|steam] | download --all [search]
           diff [search] [--refresh] [--keys]
           verify [search] [--deep] [--fix] [--keys]

@@ -318,6 +318,7 @@ public static class ArchiveFileProbes
         var dir = await FixtureAsync(options, "gog");
         var legacyPath = Path.Combine(dir, ArchiveMetadata.LegacyFileName);
         var nativePath = Path.Combine(dir, ArchiveMetadata.FileName);
+        File.Move(nativePath, legacyPath);
         var owner = (await ArchiveMetadata.LoadAsync(dir))!;
         await owner.SaveAsync(dir);
         var foreign = JsonNode.Parse(await File.ReadAllTextAsync(legacyPath))!;
@@ -346,18 +347,18 @@ public static class ArchiveFileProbes
 
         // A genuine legacy GOG manifest still takes precedence, including mixed-case Source.
         var legacyDir = await FixtureAsync(options, "gog", "legacy");
-        await (await ArchiveMetadata.LoadAsync(legacyDir))!.SaveAsync(legacyDir);
-        var shadowPath = Path.Combine(legacyDir, ArchiveMetadata.FileName);
-        var shadow = await File.ReadAllBytesAsync(shadowPath);
         var legacyFile = Path.Combine(legacyDir, ArchiveMetadata.LegacyFileName);
+        File.Move(Path.Combine(legacyDir, ArchiveMetadata.FileName), legacyFile);
+        var shadowPath = Path.Combine(legacyDir, ArchiveMetadata.LegacyUnifiedFileName);
+        await ArchiveJson.SaveAsync(shadowPath, (await ArchiveMetadata.LoadAsync(legacyDir))!);
         var legacy = JsonNode.Parse(await File.ReadAllTextAsync(legacyFile))!;
         legacy["Source"] = "GoG";
         await File.WriteAllTextAsync(legacyFile, legacy.ToJsonString());
         result = (await client.ProcessArchiveFilesAsync(options, Add(input) with { Search = "legacy" })).Single();
-        Probe.Check("recognized legacy GOG metadata remains authoritative over native metadata", result.Status == ArchiveFileStatus.Updated
-            && (await ArchiveMetadata.LoadAsync(legacyDir))!.LoadedFileName == ArchiveMetadata.LegacyFileName
+        Probe.Check("legacy GOG precedence survives migration before ZIP editing", result.Status == ArchiveFileStatus.Updated
+            && (await ArchiveMetadata.LoadAsync(legacyDir))!.LoadedFileName == ArchiveMetadata.FileName
             && (await BackupManifest.LoadAsync(legacyDir))!.Platforms[GamePlatform.Windows].Files["readme.txt"].Md5 == Hash("review replacement", true)
-            && shadow.SequenceEqual(await File.ReadAllBytesAsync(shadowPath)));
+            && !File.Exists(shadowPath) && !File.Exists(legacyFile));
     }
 
     private static async Task SharedArchiveAsync(string root, string input)

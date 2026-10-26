@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace GameArchiver.Core;
 
@@ -14,6 +15,7 @@ public sealed record PlatformArchive
     public bool NeedsRefresh { get; init; }
     public string RuntimeRequirement { get; init; } = "unknown";
     public DrmInfo Drm { get; init; } = new();
+    public List<string> SkippedDependencies { get; init; } = [];
     public string? LaunchExecutable { get; init; }
     public string? LaunchParameters { get; init; }
     public Dictionary<string, ArchivedFile> Files { get; init; } = [];
@@ -26,8 +28,10 @@ public sealed record PlatformArchive
 
 public sealed record ArchiveMetadata
 {
-    public const string FileName = ".gamebackup.json";
+    public const string FileName = "gamearchiver.json";
+    public const string LegacyUnifiedFileName = ".gamebackup.json";
     public const string LegacyFileName = ".gogdl.json";
+    public static IReadOnlyList<string> FileNames { get; } = Array.AsReadOnly(new[] { FileName, LegacyFileName, LegacyUnifiedFileName });
     public int SchemaVersion { get; init; } = 2;
     public required string Source { get; init; }
     public required string ProductId { get; init; }
@@ -40,29 +44,51 @@ public sealed record ArchiveMetadata
     /// <summary>The authoritative file selected by LoadAsync; null for newly constructed metadata.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public string? LoadedFileName { get; private init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool LoadedGogFormat { get; private init; }
 
     public Task SaveAsync(string directory, CancellationToken ct = default) =>
         ArchiveJson.SaveAsync(Path.Combine(directory, FileName), this, ct);
 
+    public async Task<bool> NeedsMigrationAsync(string directory, CancellationToken ct = default)
+    {
+        var canonical = Path.Combine(directory, FileName);
+        if (LoadedFileName != FileName)
+        {
+            if (File.Exists(canonical)) throw new ArchiveConflictException($"Unidentified metadata occupies '{canonical}'.");
+            return true;
+        }
+        if ((File.GetAttributes(canonical) & FileAttributes.Hidden) != 0) return true;
+        foreach (var name in new[] { LegacyFileName, LegacyUnifiedFileName })
+            if (await ReadAsync(Path.Combine(directory, name), name == LegacyFileName, null, ct) is { } old)
+            {
+                if (old.Key != Key) throw new ArchiveConflictException($"Conflicting metadata owners in '{directory}'.");
+                return true;
+            }
+        return false;
+    }
+
     public static async Task<ArchiveMetadata?> LoadAsync(string directory, CancellationToken ct = default,
         IReadOnlySet<string>? sources = null)
     {
-        if (File.Exists(Path.Combine(directory, FileName)) && File.Exists(Path.Combine(directory, LegacyFileName)))
+        if (FileNames.Count(name => File.Exists(Path.Combine(directory, name))) > 1)
             _ = await LoadIdentityAsync(directory, ct); // Check ownership before applying a source filter.
         var modern = await ReadAsync(Path.Combine(directory, FileName), false, sources, ct);
         var legacy = await ReadAsync(Path.Combine(directory, LegacyFileName), true, sources, ct);
-        if (modern is not null && legacy is not null && modern.Key != legacy.Key)
+        var oldUnified = await ReadAsync(Path.Combine(directory, LegacyUnifiedFileName), false, sources, ct);
+        if (new[] { modern, legacy, oldUnified }.Where(m => m is not null).Select(m => m!.Key).Distinct().Count() > 1)
             throw new ArchiveConflictException($"Conflicting metadata owners in '{directory}'.");
-        // The original GOG CLI may update its manifest independently of the aggregator.
+        if (modern is not null) return modern with { LoadedFileName = FileName };
+        // Preserve pre-migration precedence for an old GOG/native pair.
         if (legacy is not null) return legacy with { LoadedFileName = LegacyFileName };
-        return modern is null ? null : modern with { LoadedFileName = FileName };
+        return oldUnified is null ? null : oldUnified with { LoadedFileName = LegacyUnifiedFileName };
     }
 
     /// <summary>Ownership lookup does not interpret another provider's platform schema.</summary>
     internal static async Task<ArchiveMetadata?> LoadIdentityAsync(string directory, CancellationToken ct)
     {
         ArchiveMetadata? owner = null;
-        foreach (var file in new[] { FileName, LegacyFileName })
+        foreach (var file in FileNames)
         {
             var path = Path.Combine(directory, file);
             if (!File.Exists(path)) continue;
@@ -74,7 +100,7 @@ public sealed record ArchiveMetadata
             var source = values.TryGetValue("Source", out var s) ? s.ValueKind == JsonValueKind.String ? s.GetString()?.ToLowerInvariant() : null
                 : legacy ? "gog" : null;
             if (string.IsNullOrEmpty(source) || legacy && source != "gog") continue;
-            var id = legacy && values.TryGetValue("GameId", out var gameId) && gameId.TryGetInt64(out var number) ? number.ToString()
+            var id = source == "gog" && values.TryGetValue("GameId", out var gameId) && gameId.TryGetInt64(out var number) ? number.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 : !legacy && values.TryGetValue("ProductId", out var product) && product.ValueKind == JsonValueKind.String ? product.GetString() : null;
             if (string.IsNullOrWhiteSpace(id)) continue;
             var candidate = new ArchiveMetadata { Source = source, ProductId = id, Slug = Path.GetFileName(directory), Title = Path.GetFileName(directory) };
@@ -107,7 +133,8 @@ public sealed record ArchiveMetadata
         // .gogdl.json with a different source belongs to an external producer, not this schema.
         if (legacy && source != "gog" || !legacy && string.IsNullOrWhiteSpace(source)) return null;
         if (sources is not null && !sources.Contains(source!)) return null;
-        if (!legacy)
+        var gogFormat = source == "gog" && (legacy || properties.ContainsKey("GameId"));
+        if (!gogFormat)
         {
             var result = root.Deserialize<ArchiveMetadata>(ArchiveJson.Options)!;
             if (result.SchemaVersion != 2) throw new InvalidDataException($"Unsupported archive schema in {path}");
@@ -127,7 +154,9 @@ public sealed record ArchiveMetadata
         string Text(JsonElement obj, string name, string fallback = "") =>
             obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString()! : fallback;
         var id = properties["GameId"].GetInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var metadata = new ArchiveMetadata { Source = "gog", ProductId = id,
+        if (properties.TryGetValue("SchemaVersion", out var gogSchema) && gogSchema.GetInt32() != 1)
+            throw new InvalidDataException($"Unsupported GOG archive schema in {path}");
+        var metadata = new ArchiveMetadata { Source = "gog", ProductId = id, LoadedGogFormat = true,
             Slug = properties["Slug"].GetString()!, Title = properties["Title"].GetString()! };
         if (!properties.TryGetValue("Platforms", out var platforms)) return metadata;
         foreach (var p in platforms.EnumerateObject())
@@ -152,11 +181,51 @@ public sealed record ArchiveMetadata
                 NeedsRefresh = platform != GameOs.Windows && contentRevision < 2 || oldContent && (dlcs.Count > 0 || platform == GameOs.Windows && build.StartsWith("installer-")),
                 RuntimeRequirement = "drm-free", LaunchExecutable = Text(v, "LaunchExecutable"), LaunchParameters = Text(v, "LaunchParameters"),
                 Drm = reportedDrm,
+                SkippedDependencies = v.TryGetProperty("SkippedDependencies", out var skipped) ? skipped.EnumerateArray().Select(d => d.GetString()!).ToList() : [],
                 Files = v.TryGetProperty("Files", out var files) ? files.EnumerateObject().ToDictionary(f => f.Name,
                     f => new ArchivedFile(Text(f.Value, "Md5"), f.Value.GetProperty("Size").GetInt64(), "md5")) : [],
             };
         }
         return metadata;
+    }
+
+    // Called through ArchiveLease while holding the same lock as downloads and ZIP edits.
+    internal static async Task<(ArchiveMetadata Metadata, bool Changed)> MigrateOwnedAsync(string directory, GameKey expected, CancellationToken ct)
+    {
+        await AssertOwnerAsync(directory, expected, ct);
+        var metadata = await LoadAsync(directory, ct) ?? throw new InvalidDataException("Missing archive metadata.");
+        var target = Path.Combine(directory, FileName);
+        var changed = false;
+        if (metadata.LoadedFileName != FileName)
+        {
+            if (File.Exists(target)) throw new ArchiveConflictException($"Unidentified metadata occupies '{target}'.");
+            var json = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(directory, metadata.LoadedFileName!), ct))!.AsObject();
+            var sourceKey = json.Select(p => p.Key).FirstOrDefault(k => k.Equals("Source", StringComparison.OrdinalIgnoreCase));
+            if (sourceKey is not null) json.Remove(sourceKey);
+            json["Source"] = metadata.Source;
+            if (metadata.LoadedGogFormat && !json.Any(p => p.Key.Equals("SchemaVersion", StringComparison.OrdinalIgnoreCase))) json["SchemaVersion"] = 1;
+            await ArchiveJson.SaveAsync(target, json, ct);
+            changed = true;
+        }
+        // Commit the canonical file first. After interrupted cleanup it remains authoritative.
+        foreach (var name in new[] { LegacyFileName, LegacyUnifiedFileName })
+        {
+            var path = Path.Combine(directory, name);
+            var old = await ReadAsync(path, name == LegacyFileName, null, ct);
+            if (old is null) continue;
+            if (old.Key != expected) throw new ArchiveConflictException($"Conflicting metadata owner in '{path}'.");
+            ct.ThrowIfCancellationRequested(); File.Delete(path); changed = true;
+        }
+        changed |= EnsureVisible(target);
+        return ((await LoadAsync(directory, ct))!, changed);
+    }
+
+    public static bool EnsureVisible(string path)
+    {
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.Hidden) == 0) return false;
+        File.SetAttributes(path, attributes & ~FileAttributes.Hidden);
+        return true;
     }
 }
 
@@ -268,6 +337,12 @@ public sealed class ArchiveLease : IDisposable
 {
     private readonly FileStream _stream;
     internal ArchiveLease(FileStream stream, ArchiveLocation location) { _stream = stream; Location = location; }
-    public ArchiveLocation Location { get; }
+    public ArchiveLocation Location { get; private set; }
+    public async Task<bool> MigrateMetadataAsync(CancellationToken ct = default)
+    {
+        var (metadata, changed) = await ArchiveMetadata.MigrateOwnedAsync(Location.Directory, Location.Metadata.Key, ct);
+        Location = new(Location.Directory, metadata);
+        return changed;
+    }
     public void Dispose() => _stream.Dispose();
 }

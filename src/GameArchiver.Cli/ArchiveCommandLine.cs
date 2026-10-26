@@ -12,7 +12,7 @@ namespace GameArchiver.Cli;
 public static partial class ArchiveCommandLine
 {
     private static readonly HashSet<string> Switches = ["all", "dry-run", "force", "clean", "no-reuse", "no-verify", "no-launcher",
-        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory"];
+        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory", "include-non-games"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
         "file", "entry", "name", "path", "max-size", "drm", "note"];
@@ -28,6 +28,8 @@ public static partial class ArchiveCommandLine
                 ? "Interrupted. DRM metadata changes were not committed."
                 : args.Length >= 2 && args[0] == "library" && args[1] == "compare"
                 ? "Interrupted. Library comparison was not completed."
+                : args.Length >= 2 && args[0] == "archive" && args[1] == "migrate"
+                ? "Interrupted. Completed metadata migrations were kept; rerun to finish."
                 : args.Contains("archive")
                 ? "Interrupted. Completed archive edits were kept; unfinished edits were not committed."
                 : "Interrupted. Downloaded files were kept; rerun to resume.");
@@ -74,6 +76,8 @@ public static partial class ArchiveCommandLine
         var snapshotPath = flags.GetValueOrDefault("snapshot", ArchiveLibrary.DefaultPath);
         var command = positionals[0];
         var subcommand = positionals.ElementAtOrDefault(1);
+        if (flags.ContainsKey("include-non-games") && (command != "download" || !flags.ContainsKey("all")))
+            throw new ArgumentException("--include-non-games requires download --all; an explicit product ID can always select an application.");
         var drmFilter = flags.GetValueOrDefault("drm")?.ToLowerInvariant();
         if (drmFilter is not null)
         {
@@ -261,6 +265,18 @@ public static partial class ArchiveCommandLine
         ProviderOutput.Validate(options, knownProviders);
         if (command == "archive")
         {
+            if (subcommand == "migrate")
+            {
+                if (flags.Keys.Any(k => k is "file" or "entry" or "name" or "path" or "platform" or "ignore-case"))
+                    throw new ArgumentException("archive migrate changes metadata filenames for all platforms; it does not accept file-edit or platform options.");
+                var dryRun = flags.ContainsKey("dry-run");
+                var migrations = await archive.MigrateMetadataAsync(options, dryRun, search, ct);
+                foreach (var result in migrations)
+                    Console.WriteLine($"{(result.Error is not null ? "Failed" : result.Changed ? dryRun ? "Would migrate" : "Migrated" : "Current")}: {result.Key} {result.Directory}"
+                        + (result.Error is null ? "" : $" — {result.Error}"));
+                Console.WriteLine($"{migrations.Count(r => r.Changed)} {(dryRun ? "would migrate" : "migrated")}, {migrations.Count(r => r.Error is not null)} failed.");
+                return migrations.Count == 0 || migrations.Any(r => r.Error is not null) ? 1 : 0;
+            }
             var operation = subcommand switch
             {
                 "find" => ArchiveFileOperation.Find, "add" => ArchiveFileOperation.Add, "replace" => ArchiveFileOperation.Replace,
@@ -324,14 +340,33 @@ public static partial class ArchiveCommandLine
             {
                 if (library is null) throw new FileNotFoundException("No aggregate library snapshot. Run library sync first.");
                 var candidates = library.SelectDownloads(games.Where(g => Search(g, search)), options.Platform);
+                if (!flags.ContainsKey("include-non-games"))
+                {
+                    var onlyGames = candidates.Where(g => string.Equals(g.Kind, "game", StringComparison.OrdinalIgnoreCase)
+                        || g.Key.Source == "gog" && string.Equals(g.Kind, "pack", StringComparison.OrdinalIgnoreCase)).ToList();
+                    if (onlyGames.Count != candidates.Count) Console.Error.WriteLine($"Product filter: {candidates.Count - onlyGames.Count} non-game products skipped. Use --include-non-games to include supported applications, demos and other products.");
+                    candidates = onlyGames;
+                }
                 var tooLarge = 0; var drmExcluded = 0;
+                var drmCounts = new int[3];
+                var unknownSteamDrm = false;
                 var failedSync = 0; var incompatible = 0; var missing = 0; var outdated = 0;
                 var downloadEstimates = 0; var installedEstimates = 0;
                 foreach (var game in candidates)
                 {
-                    if (drmFilter is not null && drmFilter != "any"
-                        && DrmCatalog.Get(library, game.Key, options.Platform, options.Branch).Status != DrmCatalog.Parse(drmFilter))
-                    { drmExcluded++; continue; }
+                    if (drmFilter is not null)
+                    {
+                        var drm = DrmCatalog.Get(library, game.Key, options.Platform, options.Branch);
+                        drmCounts[(int)drm.Status]++;
+                        unknownSteamDrm |= game.Key.Source == "steam" && drm.Status == DrmStatus.Unknown;
+                        if (drmFilter != "any" && drm.Status != DrmCatalog.Parse(drmFilter))
+                        {
+                            drmExcluded++;
+                            if (flags.ContainsKey("details")) Console.Error.WriteLine($"{game.Key} ({game.Title}): DRM excluded; "
+                                + $"{drm.Status.ToString().ToLowerInvariant()} (source: {drm.Source}){(string.IsNullOrEmpty(drm.Notes) ? "" : "; " + drm.Notes)}");
+                            continue;
+                        }
+                    }
                     if (maxSize is null) { keys.Add(game.Key); continue; }
                     var version = game.Versions[options.Platform];
                     void Explain(string reason)
@@ -361,7 +396,20 @@ public static partial class ArchiveCommandLine
                     if (estimate >= maxSize.Value) { tooLarge++; continue; }
                     keys.Add(game.Key);
                 }
-                if (drmFilter is not null) Console.Error.WriteLine($"DRM filter ({drmFilter}): {drmExcluded} excluded. Uses reported status for {options.Platform}/{options.Branch}; unknown is not DRM-free.");
+                if (drmFilter is not null)
+                {
+                    Console.Error.WriteLine($"DRM filter ({drmFilter}): {drmExcluded} excluded. Reported status for {options.Platform}/{options.Branch} before size filtering: "
+                        + $"{drmCounts[(int)DrmStatus.Free]} free, {drmCounts[(int)DrmStatus.Protected]} protected, {drmCounts[(int)DrmStatus.Unknown]} unknown.");
+                    if (unknownSteamDrm && drmFilter != "any")
+                    {
+                        Console.Error.WriteLine("Unknown means unclassified, not confirmed DRM. Community DRM reports require library drm sync --source steam; regular library sync does not fetch them.");
+                        if (options.Branch != "public") Console.Error.WriteLine("Community reports currently cover the public branch. Other branches need a manual classification for that branch.");
+                        Console.Error.WriteLine("Reports may remain unknown. Use --details for exclusion reasons or library drm set steam:APPID --platform "
+                            + options.Platform.ToString().ToLowerInvariant()
+                            + $" --branch {options.Branch} --drm free --note \"Tested without Steam\" for a manually verified game.");
+                        Console.Error.WriteLine("Inside a downloaded game's folder, omit steam:APPID to read its identity and selection from archive metadata.");
+                    }
+                }
                 if (maxSize is not null)
                 {
                     var unknown = failedSync + incompatible + missing + outdated;
@@ -633,11 +681,16 @@ public static partial class ArchiveCommandLine
           --platform windows|linux|mac --language en --arch 32|64|arm64 --branch public
           --directory NAME --connections N --compression-threads N --limit-rate 5M
           --max-size 100MB (download --all: download estimate, falling back to Steam installed size; unknown sizes skipped)
+          --include-non-games (download --all: also select supported applications/demos; default selects games)
           --drm free|protected|unknown|any (library list or download --all; reported status for the selected OS/branch)
-        DRM: library drm sync [--source steam|gog|all] [--refresh]
-          library drm set SOURCE:ID --platform windows|linux|mac --drm free|protected|unknown --note TEXT
-          library drm clear SOURCE:ID --platform windows|linux|mac
           --force --clean --no-reuse --no-verify --no-launcher --dry-run
+        Metadata: archive migrate [search] [--source gog|steam|all] --out DIR [--layout provider] [--dry-run]
+          Legacy .gogdl.json/.gamebackup.json become visible gamearchiver.json; ZIPs are unchanged.
+        DRM: library drm sync [--source steam|gog|all] [--refresh]
+          library drm set [SOURCE:ID] [--platform windows|linux|mac] --drm free|protected|unknown --note TEXT
+          library drm clear [SOURCE:ID] [--platform windows|linux|mac]
+          Without SOURCE:ID, use current-folder metadata; infer platform only when unique and use its saved branch.
+          Explicit platform/branch override metadata. Changes are saved in the library snapshot.
         Auth: --gog-tokens FILE --steam-tokens FILE --username NAME --code URL
           Steam password: interactive prompt or GAMEARCHIVE_STEAM_PASSWORD
           Steam Guard: interactive prompt/mobile approval or GAMEARCHIVE_STEAM_GUARD_CODE

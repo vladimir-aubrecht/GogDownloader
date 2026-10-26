@@ -23,8 +23,10 @@ public static class BackupSourceProbes
             var json = (await JsonNodeAsync(legacy))!;
             Probe.Check("new manifests persist their GOG origin", json["Source"]?.GetValue<string>() == "gog");
             json.Remove("Source");
-            await File.WriteAllTextAsync(BackupManifest.PathFor(legacy), json.ToJsonString());
-            var oldMetadata = await File.ReadAllBytesAsync(BackupManifest.PathFor(legacy));
+            var oldPath = Path.Combine(legacy, GameArchiver.Core.ArchiveMetadata.LegacyFileName);
+            await File.WriteAllTextAsync(oldPath, json.ToJsonString());
+            File.Delete(BackupManifest.PathFor(legacy));
+            var oldMetadata = await File.ReadAllBytesAsync(oldPath);
             var oldArchive = await File.ReadAllBytesAsync(Path.Combine(legacy, "game.zip"));
             Probe.Check("legacy manifests without Source still identify GOG backups",
                 (await BackupManifest.LoadAsync(legacy)) is { Source: "gog", GameId: 1 });
@@ -58,7 +60,7 @@ public static class BackupSourceProbes
                 && await File.ReadAllTextAsync(Path.Combine(foreign, "foreign.zip")) == "do not repair this archive"
                 && await File.ReadAllTextAsync(BackupManifest.PathFor(foreign)) == foreignJson);
             Probe.Check("diff and verify do not backfill or rename legacy metadata",
-                (await File.ReadAllBytesAsync(BackupManifest.PathFor(legacy))).SequenceEqual(oldMetadata));
+                (await File.ReadAllBytesAsync(oldPath)).SequenceEqual(oldMetadata));
 
             using var requests = new NoRequests();
             using var http = new HttpClient(requests);

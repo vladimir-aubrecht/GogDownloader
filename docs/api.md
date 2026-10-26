@@ -2,8 +2,9 @@
 
 Projects, assemblies and namespaces use `GameArchiver`, `GogArchiver` and `SteamArchiver`.
 Update consumer references and `using` directives after the rename; the aggregate client is
-`GameArchiverClient`. Persistent configuration/staging paths, environment variables and metadata
-formats retain their previous names, so existing credentials and backups remain usable.
+`GameArchiverClient`. Persistent configuration/staging paths and environment variables retain
+their previous names. Archive metadata now uses the visible `gamearchiver.json` filename for
+both providers; old names remain readable and migrate on download or an explicit migration.
 
 All projects target .NET 9. A store client can be used independently, without a CLI or the
 aggregator. Libraries do not read from or write to the console. They accept cancellation and
@@ -276,10 +277,11 @@ Failure before the metadata commit preserves the previous backup. Crashes can le
 files; the next operation scans only metadata-referenced ZIPs. Both size fields and modified file
 hashes are updated (MD5 for GOG legacy, SHA1 for native metadata); original hashes follow their
 backup entries. Provider fields, download version and `CompletedAt` are retained, and `ModifiedAt`
-records the edit. A recognized GOG legacy document takes precedence when both metadata files
-exist; an explicitly foreign `.gogdl.json` is left untouched.
-`ArchiveMetadata.LoadedFileName` records the reader's authoritative selection
-in memory and is never serialized. Edits compare normalized archive paths across platforms and
+records the edit. Edits migrate metadata before publication. The canonical file takes precedence
+over old names; without it, recognized `.gogdl.json` wins over `.gamebackup.json` for the same GOG
+owner. An explicitly foreign `.gogdl.json` is left untouched. `ArchiveMetadata.LoadedFileName`
+and `LoadedGogFormat` record the authoritative file and payload format in memory only.
+Edits compare normalized archive paths across platforms and
 refuse shared ZIPs before writing. Local-edit filenames fit 255 UTF-8 bytes without splitting
 Unicode characters or dropping GameVault type tags; long title/version text may be shortened.
 Temporary files use independent short names. Preview validates the same naming constraints.
@@ -311,16 +313,31 @@ stops further lookups; stale reports pending refresh become unknown. User overri
 archives. Existing completed backups are not rewritten just to update a classification.
 See [PCGamingWiki behavior and limitations](pcgamingwiki.md).
 
-Native Steam archives use `.gamebackup.json` schema 2 with `Source`, string `ProductId`, `Slug`,
+Native Steam archives use `gamearchiver.json` schema 2 with `Source`, string `ProductId`, `Slug`,
 `Title` and per-OS `Platforms`. Each completion records the build, branch, language, architecture,
 depot manifest IDs, owned DLC selection, measured installed/archive sizes, file hashes, launch
 metadata and runtime requirement. There is no temporary signed CDN URL in permanent metadata.
 
-Existing GOG archives keep `.gogdl.json` so the original CLI can continue updating them. The
-common reader maps `GameId` to a string `ProductId` and missing `Source` to `gog`. Foreign-source
-legacy metadata is ignored before parsing GOG-specific fields. If both metadata files identify
-different owners, operations fail. A GOG legacy manifest is authoritative when both describe
-the same product, since the original CLI may have updated it independently.
+GOG also writes `gamearchiver.json`, retaining its schema-1 payload. The common reader identifies
+GOG payloads from `Source` and `GameId`, maps the ID to a string `ProductId`, and defaults a missing
+`Source` to `gog` only in legacy `.gogdl.json`. Both `.gogdl.json` and `.gamebackup.json` remain
+readable. Foreign-source legacy metadata is ignored before parsing GOG-specific fields.
+Different recognized owners in the same folder are a conflict. The canonical file is authoritative;
+before migration a same-owner GOG legacy manifest takes precedence over the old unified name.
+
+```csharp
+var preview = await archive.MigrateMetadataAsync(options, dryRun: true, ct: ct);
+var migrations = await archive.MigrateMetadataAsync(options, ct: ct);
+```
+
+Migration uses the configured source/layout and an archive lease, preserves the original JSON
+fields and payload schema, adds missing GOG origin metadata, commits the canonical file, then
+removes recognized old names. Results include the key, folder, change flag and per-folder error.
+Discovery conflicts abort before writes; cancellation throws and completed migrations remain.
+The filename has no leading dot; writes and migration clear the Hidden attribute. ZIP bytes
+are untouched. Downloads (including `AlreadyDone`) and ZIP edits also migrate automatically.
+`ArchiveLease.MigrateMetadataAsync` exposes the same operation to individual providers.
+Read-only operations do not migrate. Rebuild both CLIs before using migrated backups with them.
 
 Existing folders are found by metadata identity. The second store's copy may use a readable
 `{slug}_{source}` alias. Same-store, unidentified or occupied alias collisions require an explicit

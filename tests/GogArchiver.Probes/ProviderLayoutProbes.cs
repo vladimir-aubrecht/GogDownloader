@@ -119,6 +119,13 @@ public static class ProviderLayoutProbes
         var folder = Path.Combine(options.OutputRoot, "gog");
         await new ArchiveMetadata { Source = "steam", ProductId = "1", Slug = "gog", Title = "GOG" }.SaveAsync(folder);
         Probe.Check("a game backup cannot become a provider container", await RejectsAsync(() => ProviderOutput.PrepareAsync(options, "gog")));
+        foreach (var name in new[] { ArchiveMetadata.LegacyUnifiedFileName, ArchiveMetadata.LegacyFileName })
+        {
+            File.Move(Path.Combine(folder, ArchiveMetadata.FileName), Path.Combine(folder, name));
+            Probe.Check($"legacy metadata {name} also prevents adopting a game folder as a provider container",
+                await RejectsAsync(() => ProviderOutput.PrepareAsync(options, "gog")));
+            File.Move(Path.Combine(folder, name), Path.Combine(folder, ArchiveMetadata.FileName));
+        }
         File.Delete(Path.Combine(folder, ArchiveMetadata.FileName));
         Directory.Delete(folder);
         await File.WriteAllTextAsync(folder, "existing file");

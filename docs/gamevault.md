@@ -38,7 +38,7 @@ type**, so macOS archives stay "undetected".
 defaults to `true` in `configuration.ts`. So a `{slug}/` directory per game is fine.
 
 **Non-game files are ignored, not errors.** `isValidFilePath()` rejects anything whose
-extension is not in `SUPPORTED_FILE_FORMATS`, logging at debug level. `.gogdl.json` next to
+extension is not in `SUPPORTED_FILE_FORMATS`, logging at debug level. `gamearchiver.json` next to
 the archive is therefore invisible to the indexer.
 
 ## How the title is derived — the part that bites
@@ -122,7 +122,7 @@ So the game's own executable is what GameVault surfaces; the user chooses among 
 ## Setting launch_executable without coupling the tool
 
 The tool stays free of GameVault. It records the launcher GOG declares — the primary play task
-from `goggame-{id}.info` — into each backup's `.gogdl.json` (`Platforms.{os}.LaunchExecutable`
+from `goggame-{id}.info` — into each backup's `gamearchiver.json` (`Platforms.{os}.LaunchExecutable`
 and `LaunchParameters`; Linux gets `start.sh`). That is neutral metadata, useful to anyone.
 
 `scripts/gamevault-sync.sh` is the optional glue: it reads those manifests and, matching by the
@@ -134,11 +134,14 @@ dependency lives entirely in that script, on the operator's side.
 Sync compares both the executable and its arguments. An argument-only change is an update,
 including removing arguments (sent as `null`). Missing, null and empty arguments compare equally.
 Paths and arguments remain JSON strings throughout the sync so backslashes and whitespace survive.
-Legacy `.gogdl.json` manifests require `Source` to be `gog` (case-insensitive), or absent.
-Native `.gamebackup.json` schema 2 manifests support `gog` and `steam`; the launch fields
-have the same names. Explicit foreign sources are skipped before reading platform data.
-If both manifests exist, they must agree on ownership; a matching GOG legacy manifest takes
-precedence. Conflicting identities stop synchronization for that folder.
+The visible `gamearchiver.json` is canonical for both providers: GOG schema 1 uses `Source: gog`
+and `GameId`; schema 2 uses `Source` (`gog` or `steam`) and `ProductId`. Launch fields have the
+same names. Legacy `.gogdl.json` requires `Source` to be `gog` (case-insensitive), or absent;
+old `.gamebackup.json` schema 2 is also supported. Explicit foreign legacy sources are skipped
+before reading platform data. If multiple recognized manifests exist, they must agree on
+ownership. Canonical metadata wins; without it a matching GOG legacy manifest takes precedence
+over the old unified file. Each folder is synchronized once. Conflicting identities stop
+synchronization for that folder. The script only reads metadata; migration belongs to the CLI.
 
 When multiple GameVault entries share an archive filename, the script also matches the backup's
 relative folder against GameVault's file path. If that still leaves an ambiguous match, it

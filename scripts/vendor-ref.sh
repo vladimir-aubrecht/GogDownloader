@@ -56,7 +56,7 @@ gamevault() {
     section "Is indexing recursive? (decides whether our per-game directory is allowed)"
     grep -nHE 'SEARCH_RECURSIVE' "$out/src/configuration.ts" "$files" | show "$out"
 
-    section "Which files are indexed at all? (decides whether .gogdl.json is safe)"
+    section "Which files are indexed at all? (decides whether gamearchiver.json is safe)"
     grep -nHE 'isValidFilePath|supportedFormatsSet|invalidCharacters' "$files" | show "$out"
 
     section "Filename parsing (title, version, year, early access)"

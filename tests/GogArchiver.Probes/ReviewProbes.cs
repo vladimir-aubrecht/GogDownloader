@@ -75,6 +75,7 @@ public static class ReviewProbes
             (await BackupDirectory.FindAsync(options.OutputRoot, game)).Directory == renamed);
         var fresh = await BackupDirectory.PrepareAsync(Path.Combine(root, "fresh-alias"), game, "other", default);
         Probe.Check("a GOG directory alias does not change the product slug in metadata", fresh.Manifest?.Slug == game.Slug);
+        File.Move(BackupManifest.PathFor(renamed), Path.Combine(renamed, ArchiveMetadata.LegacyFileName));
         await new ArchiveMetadata { Source = "steam", ProductId = "1", Slug = "game", Title = "Other" }.SaveAsync(renamed);
         Probe.Check("the original GOG reader refuses conflicting native and legacy owners",
             await RejectsAsync<ArchiveConflictException>(() => BackupManifest.LoadAsync(renamed)));

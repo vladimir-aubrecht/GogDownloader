@@ -92,8 +92,13 @@ public static class MultiStoreProbes
                 && zip.GetEntry("unused/") is not null && zip.GetEntry("arch32.txt") is null);
         }
         var calls = session.ChunkCalls;
+        var steamDirectory = Path.GetDirectoryName(steamResult.ArchivePath!)!;
+        File.Move(Path.Combine(steamDirectory, ArchiveMetadata.FileName), Path.Combine(steamDirectory, ArchiveMetadata.LegacyUnifiedFileName));
         Probe.Check("a current Steam backup skips without reading manifests or chunks",
             (await archive.DownloadAsync(new("steam", "1"), options)).Outcome == ArchiveOutcome.AlreadyDone && session.ChunkCalls == calls);
+        Probe.Check("a current Steam backup migrates its metadata without downloading again",
+            File.Exists(Path.Combine(steamDirectory, ArchiveMetadata.FileName)) && !File.Exists(Path.Combine(steamDirectory, ArchiveMetadata.LegacyUnifiedFileName))
+            && (await ArchiveMetadata.LoadAsync(steamDirectory))!.Platforms[GameOs.Windows].Drm == drm);
         session.Owned.Add(2);
         var dlc = await archive.DownloadAsync(new("steam", "2"), options);
         using (var zip = ZipFile.OpenRead(dlc.ArchivePath!))

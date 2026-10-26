@@ -101,12 +101,11 @@ public static class BackupDirectory
             await claim.CreateAsync(target, ct);
             owner = await ReadOwnerAsync(target, game, ct);
         }
-        // A completed legacy backup still gets its origin recorded without fetching its ZIP.
-        if (owner is { NeedsSourceUpgrade: true })
-        {
-            owner = owner with { NeedsSourceUpgrade = false };
-            await owner.SaveAsync(target, ct);
-        }
+        // Migrate metadata even when the existing ZIP is current, under the archive lock.
+        var common = (await GameArchiver.Core.ArchiveMetadata.LoadAsync(target, ct))!;
+        using var lease = await GameArchiver.Core.ArchiveCatalog.AcquireOwnedAsync(new(target, common), common.Key, ct);
+        await lease.MigrateMetadataAsync(ct);
+        owner = await BackupManifest.LoadAsync(target, ct);
         return (target, owner);
     }
 
@@ -115,13 +114,13 @@ public static class BackupDirectory
         BackupManifest? manifest;
         string? source;
         try { (source, manifest) = await BackupManifest.InspectAsync(path, ct); }
-        catch (JsonException) { throw Conflict(path, "its .gogdl.json is invalid"); }
+        catch (JsonException) { throw Conflict(path, "its archive metadata is invalid"); }
         if (source is not null && manifest is null)
             throw Conflict(path, $"its source is '{(source.Length == 0 ? "unknown" : source)}', not '{BackupManifest.GogSource}'");
         if (manifest is not null && manifest.GameId != game.Id)
             throw Conflict(path, $"it belongs to GOG {manifest.GameId}, not GOG {game.Id}");
         if (manifest is null && Directory.EnumerateFileSystemEntries(path).Any())
-            throw Conflict(path, "it contains files but has no valid .gogdl.json to identify their owner");
+            throw Conflict(path, "it contains files but has no valid archive metadata to identify their owner");
         return manifest;
     }
 

@@ -51,6 +51,12 @@ format. `diff` is offline by default; `--refresh` asks the stores for the select
 `--keys` prints unambiguous `source:ID` identifiers for scripts. A bare ID or slug matching more
 than one product is rejected.
 
+`download --all` selects games by default. Applications such as GizmoVR, demos and other
+non-game products are skipped. Add `--include-non-games` to include supported non-game products,
+or use an explicit `download steam:APPID`. Owned DLC still belongs in its base game's archive;
+standalone GOG packs containing games remain eligible. The override does not make unsupported
+products downloadable.
+
 A GOG and Steam copy can share one backup root: an existing `factorio/` stays in place and the
 second store gets `factorio_steam/` (or `factorio_gog/`, depending on which was first). No numeric
 ID is appended. Further collisions require an explicit `--directory NAME`; unidentified folders
@@ -208,10 +214,11 @@ Neither provider's comparison changes the selected download targets or resolves 
 
 The rename changes project, assembly and namespace names, plus the unified tool command to
 `gamearchiver`. Existing configuration/staging directories (`gogdownloader` and `gamearchive`),
-environment variables (`GOGDL_SNAPSHOT` and `GAMEARCHIVE_STEAM_*`), metadata filenames and
-shared lock filenames keep their original names. Existing logins, snapshots and interrupted
+environment variables (`GOGDL_SNAPSHOT` and `GAMEARCHIVE_STEAM_*`) and shared lock filenames
+keep their original names. Existing logins, snapshots and interrupted
 downloads therefore remain usable without migration. C# consumers must update project/package
 references and `using` directives, and use `GameArchiverClient` for the aggregate API.
+Archive metadata filenames have a separate, backward-compatible migration to `gamearchiver.json`.
 
 The native Steam path is exercised with controlled session/CDN fixtures. A live login, licensed
 depot download and execution on ARM64 still need verification on a real account/device. No
@@ -239,7 +246,10 @@ Missing, conditional, conflicting or unrecognized evidence stays unknown. Unscop
 are applied only to Windows; native Linux/macOS ports need explicit OS evidence or an override.
 If PCGamingWiki is unavailable (including HTTP 403), enrichment reports one failure, stops
 querying and leaves unrefreshed classifications unknown. Normal library sync/download remains
-independent. Filters use saved metadata without network access.
+independent. Filters use saved metadata without network access. The download summary separates
+free, protected and unknown counts before applying the size filter; `--details` shows excluded
+products and their evidence. Unknown does not mean DRM was detected. Downloading or testing a
+game does not automatically classify it; record a successful manual test with the command below.
 
 Manual corrections take precedence and survive subsequent store and DRM syncs. They apply to
 the selected store, AppID, OS and branch (public by default); `--note` records the evidence:
@@ -256,6 +266,26 @@ passes the free filter. A filter applies to the resolved base game, not a DLC's 
 or DRM label. New archives record the selected report in `Platforms.{OS}.Drm`, including GOG's
 legacy metadata. Existing completed archives are not rewritten by DRM enrichment or overrides.
 These annotations do not affect archive freshness or remove DRM.
+
+Inside a downloaded game's folder, omit `SOURCE:ID` to read its identity from `gamearchiver.json`
+or either legacy metadata filename. A single archived platform and its branch are inferred too:
+
+```sh
+# Run from the game's folder; use an absolute project path outside the checkout.
+dotnet run --project /path/to/GameArchiver/src/GameArchiver.Cli -- library drm set --drm free --note "Tested without Steam"
+dotnet run --project /path/to/GameArchiver/src/GameArchiver.Cli -- library drm clear
+```
+
+Multiple archived platforms require `--platform`. Explicit `--platform` and `--branch` override
+the local selection; a conflicting `--source` is rejected. Providing `SOURCE:ID` uses explicit
+selection without reading the current folder. Corrections are saved in the library snapshot
+(`--snapshot` can override its path); local metadata and ZIPs are only read, not rewritten.
+The selected product and platform must already exist in that snapshot.
+
+DRM status is separate from a verified requirement to run the Steam client. A `Free` report
+describes an edition reported as DRM-free, not a test of this archived build. `Protected` can
+refer to Steam DRM or another system. Steam login/ownership is still required to obtain Steam
+downloads, and online features may depend on Steam even if the game itself runs without it.
 
 See [the PCGamingWiki adapter and its limits](docs/pcgamingwiki.md).
 
@@ -299,7 +329,8 @@ Fractional units such as `0.1GiB` are accepted and rounded down to whole bytes.
 ## Add, find or replace files in existing ZIPs
 
 The unified CLI can edit all completed archives in a backup directory without logging into a
-store or loading a library snapshot. It discovers ZIPs through `.gogdl.json` / `.gamebackup.json`;
+store or loading a library snapshot. It discovers ZIPs through `gamearchiver.json` and the old
+`.gogdl.json` / `.gamebackup.json` names;
 unmanaged ZIPs and unreferenced leftover archives are not touched. Source selection and output
 layout work exactly as for `verify`. All platforms are included unless `--platform` is supplied.
 
@@ -346,6 +377,31 @@ already completed edits remain after cancellation. Successive edits replace the 
 These are local edits, not persistent download rules: a future update or forced download rebuilds
 the game from store content, so custom additions/replacements need to be applied again.
 
+## Visible archive metadata
+
+Both providers write **`gamearchiver.json`** beside each game's ZIP, with `Source` identifying
+`gog` or `steam`. The filename has no leading dot, and writes/migration clear the Windows Hidden
+attribute. GOG retains its schema-1 payload (`GameId`, build IDs and MD5 inventory); Steam uses
+schema 2 (`ProductId`, depot selection and SHA1 inventory).
+
+Existing `.gogdl.json` and `.gamebackup.json` files remain readable. The next download migrates
+them even if the archive is already current; ZIP edits migrate them too. No game content is
+downloaded or rewritten just to rename metadata. `library sync`, `diff`, `verify` and previews
+do not rename these files. To migrate an existing library without downloading:
+
+```sh
+dotnet run --project src/GameArchiver.Cli -- archive migrate --source steam --out /backups/steam --dry-run
+dotnet run --project src/GameArchiver.Cli -- archive migrate --source steam --out /backups/steam
+# Or both providers in /backups/gog and /backups/steam:
+dotnet run --project src/GameArchiver.Cli -- archive migrate --out /backups --layout provider
+```
+
+Use the output/layout settings matching your existing folders. Migration preserves metadata
+fields, adds the missing GOG `Source`, and removes recognized old files after committing the new
+one. It can be retried after interruption. Conflicting ownership fails without merging games.
+The canonical file wins if a same-owner legacy copy remains. Use updated CLIs and the updated
+GameVault sync script with migrated backups; old binaries do not recognize the new filename.
+
 ## C# API
 
 Use `GogArchiver.Core` or `SteamArchiver.Core` independently; use `GameArchiver` to combine
@@ -376,7 +432,7 @@ Add `--dry-run` to `download --all` to see the selection and total size without 
 anything.
 
 Backups live in `{slug}/` folders (lowercase), with the GOG ID stored as `GameId` in
-`.gogdl.json`. On the next `download`, existing `{slug}__{id}/` folders are renamed after
+`gamearchiver.json`. On the next `download`, existing `{slug}__{id}/` folders are renamed after
 checking their metadata; completed archives are reused. `diff` recognizes both layouts
 without renaming anything. Interrupted downloads keep using their existing staging data.
 
@@ -385,15 +441,15 @@ An existing folder must belong to the same `GameId`; unidentified nonempty folde
 multiple populated folders for one game are reported as conflicts and left untouched.
 Resolve the reported conflict before retrying; `--force` does not bypass these checks.
 
-Each legacy `.gogdl.json` also records `"Source": "gog"` at the top level, alongside `GameId`.
+Each GOG `gamearchiver.json` records `"Source": "gog"` at the top level, alongside `GameId`.
 The source identifies the store/origin, not the temporary URL of a download. Older manifests
-without `Source` are treated as GOG; the next `download` adds it even when the backup is
+named `.gogdl.json` without `Source` are treated as GOG; the next `download` migrates them even when the backup is
 already current, without fetching the archive again.
 
-The same `--out` root can contain games from other sources. Folders without `.gogdl.json`
+The same `--out` root can contain games from other sources. Folders without recognized metadata
 and manifests explicitly marked with another source (for example `"Source": "steam"`)
-are ignored by the original GOG `diff` and `verify`. The shared CLI also recognizes native
-version-2 `.gamebackup.json` archives from supported sources, as does the GameVault sync script.
+are ignored by the GOG `diff` and `verify`. The shared CLI and GameVault sync script recognize
+both providers under the canonical name and the old names.
 Foreign metadata does not need to follow the GOG schema. A foreign or unidentified
 folder occupying a GOG game's slug remains a conflict: it is never adopted, renamed or
 overwritten, even with `--force`. Keep those copies in distinct folders.
@@ -411,7 +467,7 @@ Old standalone DLC archives are left untouched; check the completed base backup 
 them. `verify --deep` checks ZIP integrity, not whether a standalone DLC contains the full game.
 
 DLC files override base-game files at the same path (including the executable in Factorio:
-Space Age). Per-platform `ContentRevision` in `.gogdl.json` records these content validation
+Space Age). Per-platform `ContentRevision` in `gamearchiver.json` records these content validation
 rules. Older backups containing DLC, and older Windows installer-based backups, are reported as outdated
 by `diff` and rebuilt once on the next download, even at the same build. Depot backups reuse
 unchanged verified files from the previous ZIP.
@@ -491,7 +547,7 @@ Linux backups already carry a `start.sh`.
 ## Keeping GameVault's launch executables in sync
 
 GogArchiver does not talk to GameVault. When it backs up a game it records the launcher GOG
-declares — from the game's own `goggame-{id}.info` — into that backup's `.gogdl.json`, as neutral
+declares — from the game's own `goggame-{id}.info` — into that backup's `gamearchiver.json`, as neutral
 metadata. GameVault stores the launch executable in its own database and cannot read it from an
 archive, so without help you would set it by hand in the client for every game.
 
@@ -515,7 +571,7 @@ services:
       GAMEVAULT_URL: http://gamevault-backend:8080   # the backend service, over the compose network
       GAMEVAULT_USER: ${GAMEVAULT_USER}
       GAMEVAULT_PASSWORD: ${GAMEVAULT_PASSWORD}
-      BACKUP_DIR: /files                             # where the .gogdl.json files are
+      BACKUP_DIR: /files                             # where the gamearchiver.json files are
       SYNC_INTERVAL: "3600"                          # seconds between passes; unset = one pass
     volumes:
       - ./gamevault-sync.sh:/gamevault-sync.sh:ro
@@ -528,7 +584,7 @@ Three things to line up with your own setup:
 1. **`GAMEVAULT_URL`** is the backend as seen from inside the compose network — usually
    `http://<backend-service-name>:<port>`, not `localhost`.
 2. **The games volume** (`gamevault-files` above) must be the one GameVault reads. Because the
-   `.gogdl.json` sits next to each zip in that same tree, mounting it read-only gives the script
+   `gamearchiver.json` sits next to each zip in that same tree, mounting it read-only gives the script
    everything it needs. Adjust the name, or reference it as `external`, to match your setup.
 3. **`gamevault-sync.sh`** is bind-mounted from this repo; copy it next to your compose file.
 
@@ -592,10 +648,10 @@ pass (leave `SYNC_INTERVAL` unset):
 ## Reliability
 
 Work happens in a staging directory; only an atomic move puts the zip into place, and the
-`.gogdl.json` manifest records platform completion last — until that entry exists, the platform
+`gamearchiver.json` manifest records platform completion last — until that entry exists, the platform
 counts as not downloaded. An initial manifest with no platforms only reserves the folder for
 its `GameId`, so an interruption cannot leave a corrupt "done" state. Native Steam backups use
-the same completion rule in `.gamebackup.json`, with `(Source, ProductId)` ownership. The
+the same completion rule and filename, with `(Source, ProductId)` ownership. The
 original GOG CLI asks what to do after Ctrl+C; the shared CLI keeps partial downloads for a
 rerun, with `--clean` available to start over. Free space is checked before downloading.
 

@@ -226,6 +226,7 @@ public static class ArchiveJson
             await using (var stream = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 await JsonSerializer.SerializeAsync(stream, value, Options, ct);
             ct.ThrowIfCancellationRequested();
+            if (Path.GetFileName(path) == ArchiveMetadata.FileName) ArchiveMetadata.EnsureVisible(tmp);
             File.Move(tmp, path, overwrite: true);
         }
         finally { File.Delete(tmp); }

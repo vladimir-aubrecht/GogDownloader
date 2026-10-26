@@ -379,6 +379,7 @@ public sealed class SteamClient : IGameStore
         options = await ProviderOutput.PrepareAsync(options, Source, ct);
         var reservation = await ArchiveCatalog.ReserveAsync(selection.Game, options, ct);
         using var lease = await ArchiveCatalog.AcquireOwnedAsync(reservation, selection.Game.Key, ct);
+        await lease.MigrateMetadataAsync(ct);
         var location = lease.Location;
         var previous = location.Metadata.Platforms.GetValueOrDefault(options.Platform);
         if (!options.Force && previous is not null && !previous.NeedsRefresh

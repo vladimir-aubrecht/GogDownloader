@@ -40,6 +40,13 @@ the underlying report, and refreshing ownership does not lose a user's correctio
 sync does not perform community HTTP calls. `library drm sync` explicitly refreshes reports;
 the seven-day cache can be bypassed with `--refresh`.
 
+`library drm set|clear` can infer the product from archive metadata in the current directory
+when no `SOURCE:ID` is supplied. It inherits the only archived platform and that platform's branch;
+multiple platforms require `--platform`, and explicit platform/branch flags take precedence.
+It accepts canonical and legacy filenames, uses the same ownership-conflict checks as archive
+operations, and writes the correction only to the selected library snapshot. Explicit product
+keys do not use local context. Neither operation needs store or community network access.
+
 DRM does not participate in content/version equality. A new download records its selected
 classification with the archive. `AlreadyDone`, enrichment and manual overrides leave existing
 archive metadata unchanged; the library remains the current annotation source for filtering.

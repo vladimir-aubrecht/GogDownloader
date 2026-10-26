@@ -29,7 +29,7 @@ public static class ProviderOutput
         var path = ArchivePaths.Within(options.OutputRoot, matches.Count == 1 ? Path.GetFileName(matches[0]) : name);
         if (matches.Count == 1 && (!Directory.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0))
             throw new ArchiveConflictException($"Provider directory is occupied by a file or link: {path}");
-        if (File.Exists(Path.Combine(path, ArchiveMetadata.FileName)) || File.Exists(Path.Combine(path, ArchiveMetadata.LegacyFileName)))
+        if (ArchiveMetadata.FileNames.Any(name => File.Exists(Path.Combine(path, name))))
             throw new ArchiveConflictException($"Provider directory is already a game backup: {path}");
         return options with { OutputRoot = path, Layout = ArchiveLayout.Flat, ProviderDirectories = [] };
     }

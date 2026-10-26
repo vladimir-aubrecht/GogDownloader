@@ -9,6 +9,7 @@ await StartScriptProbes.RunAsync();
 await DownloadProbes.RunAsync();
 await BackupDirectoryProbes.RunAsync();
 await BackupSourceProbes.RunAsync();
+await MetadataMigrationProbes.RunAsync();
 await MultiStoreProbes.RunAsync();
 await SteamConnectionProbes.RunAsync();
 await SteamSharedDepotProbes.RunAsync();

@@ -31,7 +31,7 @@ public static class VerifyCommands
         var archives = await FindArchivesAsync(outputRoot, search, ct);
         if (archives.Count == 0)
         {
-            Console.Error.WriteLine("Nothing to check: no GOG archives recorded in .gogdl.json in that directory.");
+            Console.Error.WriteLine("Nothing to check: no GOG archives recorded in gamearchiver.json or legacy metadata in that directory.");
             return 1;
         }
 

@@ -69,21 +69,18 @@ public sealed record PlatformBackup
 }
 
 /// <summary>
-/// `.gogdl.json` in the game directory. Initially reserves the directory for GameId; a
+/// `gamearchiver.json` in the game directory. Initially reserves the directory for GameId; a
 /// platform entry is committed only after its archive is published and counts as downloaded.
 /// </summary>
 public sealed record BackupManifest
 {
-    public const string FileName = ".gogdl.json";
+    public const string FileName = GameArchiver.Core.ArchiveMetadata.FileName;
     public const string GogSource = "gog";
 
     public int SchemaVersion { get; init; } = 1;
 
     /// <summary>Store/origin, not a temporary CDN URL. Missing in legacy GOG manifests.</summary>
     public string Source { get; init; } = GogSource;
-
-    [JsonIgnore]
-    internal bool NeedsSourceUpgrade { get; init; }
 
     public required long GameId { get; init; }
     public required string Slug { get; init; }
@@ -116,32 +113,43 @@ public sealed record BackupManifest
     internal static async Task<(string? Source, BackupManifest? Manifest)> InspectAsync(
         string gameDirectory, CancellationToken ct)
     {
-        var path = PathFor(gameDirectory);
-        if (!File.Exists(path)) return (null, null);
-        await using var stream = File.OpenRead(path);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-        if (document.RootElement.ValueKind != JsonValueKind.Object)
-            throw new JsonException("Backup metadata must be a JSON object.");
-
-        // Inspect the origin before interpreting any GOG-specific fields. Another store can
-        // use a string ID or a different platform format, neither of which is ours to parse.
-        var source = GogSource;
-        var explicitSource = false;
-        foreach (var property in document.RootElement.EnumerateObject())
-            if (string.Equals(property.Name, nameof(Source), StringComparison.OrdinalIgnoreCase))
+        var common = await GameArchiver.Core.ArchiveMetadata.LoadAsync(gameDirectory, ct, new HashSet<string> { GogSource });
+        if (common is null)
+        {
+            foreach (var name in GameArchiver.Core.ArchiveMetadata.FileNames)
             {
-                explicitSource = true;
-                source = property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString()! : "";
+                var candidate = Path.Combine(gameDirectory, name);
+                if (!File.Exists(candidate)) continue;
+                using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(candidate, ct));
+                if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException("Backup metadata must be a JSON object.");
+                var source = doc.RootElement.EnumerateObject().FirstOrDefault(p => p.Name.Equals(nameof(Source), StringComparison.OrdinalIgnoreCase)).Value;
+                return (source.ValueKind == JsonValueKind.String ? source.GetString() : "", null);
             }
-        if (!string.Equals(source, GogSource, StringComparison.OrdinalIgnoreCase)) return (source, null);
-
-        var manifest = document.RootElement.Deserialize<BackupManifest>(Json)!;
-        if (File.Exists(System.IO.Path.Combine(gameDirectory, GameArchiver.Core.ArchiveMetadata.FileName)))
-            await GameArchiver.Core.ArchiveMetadata.AssertOwnerAsync(gameDirectory, new("gog", manifest.GameId.ToString()), ct);
+            return (null, null);
+        }
+        var path = Path.Combine(gameDirectory, common.LoadedFileName!);
+        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path, ct));
+        var manifest = common.LoadedGogFormat ? document.RootElement.Deserialize<BackupManifest>(Json)! : FromCommon(common);
         if (manifest.Platforms is null || manifest.Platforms.Values.Any(b => b is null))
             throw new InvalidDataException("Invalid backup platform metadata.");
         foreach (var backup in manifest.Platforms.Values)
             _ = GameArchiver.Core.ArchivePaths.Within(gameDirectory, backup.ArchiveName);
-        return (source, manifest with { NeedsSourceUpgrade = !explicitSource });
+        return (GogSource, manifest);
     }
+
+    private static BackupManifest FromCommon(GameArchiver.Core.ArchiveMetadata metadata) => new()
+    {
+        GameId = long.Parse(metadata.ProductId, System.Globalization.CultureInfo.InvariantCulture), Slug = metadata.Slug, Title = metadata.Title,
+        Platforms = metadata.Platforms.ToDictionary(p => (GamePlatform)p.Key, p => new PlatformBackup
+        {
+            BuildId = p.Value.Version.BuildId, VersionName = p.Value.Version.Name, Language = p.Value.Version.Language,
+            ContentRevision = p.Value.NeedsRefresh ? 0 : p.Value.Version.ContentRevision,
+            ArchiveName = p.Value.ArchiveName, ArchiveSize = p.Value.ArchiveSize, InstalledSize = p.Value.InstalledSize,
+            CompletedAt = p.Value.CompletedAt, ModifiedAt = p.Value.ModifiedAt, Dlcs = p.Value.Version.Dlcs,
+            SkippedDependencies = p.Value.SkippedDependencies, Drm = p.Value.Drm,
+            LaunchExecutable = p.Value.LaunchExecutable, LaunchParameters = p.Value.LaunchParameters,
+            Files = p.Value.Files.Where(f => f.Value.Algorithm.Equals("md5", StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(f => f.Key, f => new BackedUpFile(f.Value.Hash, f.Value.Size)),
+        }),
+    };
 }

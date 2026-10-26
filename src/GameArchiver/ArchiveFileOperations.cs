@@ -36,6 +36,7 @@ public sealed partial class GameArchiverClient
                     {
                         var mutating = !request.DryRun && request.Operation != ArchiveFileOperation.Find;
                         using var lease = mutating ? await ArchiveCatalog.AcquireOwnedAsync(found, found.Metadata.Key, ct) : null;
+                        if (lease is not null) await lease.MigrateMetadataAsync(ct);
                         var location = lease?.Location ?? found;
                         if (!location.Metadata.Platforms.TryGetValue(os, out var backup))
                             throw new ArchiveConflictException("Archive platform changed while waiting for its lock.");
@@ -147,11 +148,11 @@ public sealed partial class GameArchiverClient
         string archiveName, long archiveSize, long installedSize, IReadOnlyList<ArchiveFileChange> changes,
         ZipFileEditor.PreparedFile prepared, CancellationToken ct)
     {
-        // Legacy GOG metadata remains authoritative when both manifests are present, exactly
-        // as in the standalone GOG downloader. Patch JSON so provider-specific/unknown fields survive.
+        // Use the reader's authoritative file and payload format, independently of its name.
+        // Patch JSON so provider-specific and unknown fields survive.
         var fileName = location.Metadata.LoadedFileName
             ?? throw new InvalidDataException("Archive metadata has no authoritative source file.");
-        var legacy = fileName == ArchiveMetadata.LegacyFileName;
+        var legacy = location.Metadata.LoadedGogFormat;
         var path = ArchivePaths.Within(location.Directory, fileName);
         var json = JsonNode.Parse(await File.ReadAllTextAsync(path, ct))?.AsObject()
             ?? throw new InvalidDataException("Missing archive metadata.");

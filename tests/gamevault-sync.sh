@@ -183,3 +183,28 @@ mv "$SYNC_FIXTURE/matches.json" "$SYNC_FIXTURE/games.json"
 run_sync
 check "custom provider folders support native Steam launch metadata" \
     test "$(wc -l < "$SYNC_FIXTURE/requests.jsonl")" -eq 1
+
+# The visible filename works for both provider schemas and wins over matching old files.
+cp "$BACKUP_DIR/steam_library/game/.gamebackup.json" "$BACKUP_DIR/steam_library/game/gamearchiver.json"
+run_sync
+check "canonical Steam metadata is processed once alongside its old filename" \
+    test "$(wc -l < "$SYNC_FIXTURE/requests.jsonl")" -eq 1
+rm "$BACKUP_DIR/steam_library/game/.gamebackup.json"
+jq '.Source = "gog" | .SchemaVersion = 1 | .GameId = 1 | del(.ProductId)' \
+    "$BACKUP_DIR/steam_library/game/gamearchiver.json" > "$SYNC_FIXTURE/canonical.json"
+mv "$SYNC_FIXTURE/canonical.json" "$BACKUP_DIR/steam_library/game/gamearchiver.json"
+run_sync
+check "canonical GOG metadata supports the same launch synchronization" \
+    test "$(wc -l < "$SYNC_FIXTURE/requests.jsonl")" -eq 1
+jq '.Platforms.Windows.LaunchExecutable = "stale.exe"' \
+    "$BACKUP_DIR/steam_library/game/gamearchiver.json" > "$BACKUP_DIR/steam_library/game/.gogdl.json"
+run_sync
+check "canonical GOG launch metadata wins over a stale legacy copy" \
+    jq -e '.user_metadata.launch_executable != "stale.exe"' "$SYNC_FIXTURE/requests.jsonl"
+jq '.GameId = 999' "$BACKUP_DIR/steam_library/game/.gogdl.json" > "$SYNC_FIXTURE/conflict.json"
+mv "$SYNC_FIXTURE/conflict.json" "$BACKUP_DIR/steam_library/game/.gogdl.json"
+: > "$SYNC_FIXTURE/requests.jsonl"
+failed=0
+result=$(sh scripts/gamevault-sync.sh 2>&1) || failed=$?
+check "canonical/legacy ownership conflicts still prevent GameVault writes" test "$failed" -eq 1
+check "canonical/legacy conflict sends no update" test ! -s "$SYNC_FIXTURE/requests.jsonl"

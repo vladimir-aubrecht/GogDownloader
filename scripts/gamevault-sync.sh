@@ -2,7 +2,7 @@
 # Push the launch executable of each backup into GameVault.
 #
 # GogArchiver deliberately knows nothing about GameVault. It records what GOG says the launcher
-# is into each backup's .gogdl.json; this script is the glue that turns that into GameVault API
+# is into each backup's gamearchiver.json; this script is the glue that turns that into GameVault API
 # calls. It lives here, not in the tool, so the dependency stays on your side.
 #
 # Meant to run beside GameVault — a cron job, or a compose sidecar with SYNC_INTERVAL set. Needs
@@ -102,15 +102,34 @@ sync_once() {
     # cleanly here instead of mislabelling every archive as "not in GameVault yet".
     games=$(list_games) || { rm -f "$tally"; return 1; }
 
-    # GOG keeps its legacy metadata; native Steam archives use the shared version-2 format.
+    # All stores use visible gamearchiver.json; read both historical filenames too.
     # Other producers may use .gogdl.json with another schema, which must stay untouched.
     # Support both root/game and root/provider/game layouts without following links.
-    find "$BACKUP_DIR" -maxdepth 3 \( -name '.gogdl.json' -o -name '.gamebackup.json' \) -type f 2>/dev/null | while IFS= read -r manifest; do
+    find "$BACKUP_DIR" -maxdepth 3 \( -name 'gamearchiver.json' -o -name '.gogdl.json' -o -name '.gamebackup.json' \) -type f 2>/dev/null | while IFS= read -r manifest; do
         format=${manifest##*/}
         directory=${manifest%/*}
         legacy="$directory/.gogdl.json"
         modern="$directory/.gamebackup.json"
-        if [ -f "$legacy" ] && [ -f "$modern" ] && jq -e '
+        canonical="$directory/gamearchiver.json"
+        if [ -f "$canonical" ]; then
+            [ "$format" = 'gamearchiver.json' ] || continue
+            conflict=false
+            for previous in "$legacy" "$modern"; do
+                [ -f "$previous" ] || continue
+                if ! jq -se --arg previous "${previous##*/}" '
+                    map(with_entries(.key |= ascii_downcase))
+                    | .[0] as $new | .[1] as $old
+                    | ($old.source // (if $previous == ".gogdl.json" then "gog" else "" end) | ascii_downcase) as $source
+                    | if $previous == ".gogdl.json" and $source != "gog" then true
+                      else ($new.source | ascii_downcase) == $source
+                        and (($new.productid // $new.gameid) | tostring) == (($old.productid // $old.gameid) | tostring)
+                      end' "$canonical" "$previous" >/dev/null; then conflict=true; fi
+            done
+            if [ "$conflict" = true ]; then
+                echo "FAILED    conflicting metadata owners in $directory" >&2
+                echo failed >>"$tally"; continue
+            fi
+        elif [ -f "$legacy" ] && [ -f "$modern" ] && jq -e '
             with_entries(.key |= ascii_downcase)
             | if has("source") then (.source | strings | ascii_downcase) == "gog" else true end' "$legacy" >/dev/null; then
             # The original CLI can update its metadata independently. Use it only when both
@@ -125,7 +144,10 @@ sync_once() {
         fi
         jq -c --arg format "$format" '
             select(with_entries(.key |= ascii_downcase)
-                | if $format == ".gamebackup.json" then
+                | if $format == "gamearchiver.json" then
+                    ((.source | strings | ascii_downcase) == "gog" and .schemaversion == 1 and .gameid != null)
+                    or (.schemaversion == 2 and ((.source | strings | ascii_downcase) | . == "gog" or . == "steam"))
+                  elif $format == ".gamebackup.json" then
                     .schemaversion == 2 and ((.source | strings | ascii_downcase) | . == "gog" or . == "steam")
                   elif has("source") then (.source | strings | ascii_downcase) == "gog"
                   else true end)

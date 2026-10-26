@@ -13,7 +13,7 @@ public static class DrmProbes
         Probe.Group("Reported DRM metadata, manual corrections and filtering");
         Parsing();
         var root = Probe.ScratchDirectory();
-        try { await RefreshAsync(); await CommandsAsync(root); await HttpAsync(); await ArchivesAsync(root); }
+        try { await RefreshAsync(); await CommandsAsync(root); await LocalCommandsAsync(root); await HttpAsync(); await ArchivesAsync(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -88,11 +88,19 @@ public static class DrmProbes
         var library = new ArchiveLibrary { Games = [Game("steam", "10", DrmStatus.Free), Game("steam", "20", DrmStatus.Protected), Game("steam", "30")] };
         await library.SaveAsync(path);
         var calls = new List<ArchiveOptions>();
-        Task<(int Exit, string Output)> Run(params string[] args) => CaptureAsync(() => ArchiveCommandLine.RunAsync(
+        Task<(int Exit, string Output, string Error)> Run(params string[] args) => CaptureAsync(() => ArchiveCommandLine.RunAsync(
             [..args, "--source", "steam", "--snapshot", path], storeFactory: _ => [new Store(library.Games, calls)]));
         var result = await Run("download", "--all", "--drm", "free", "--max-size", "10MB", "--dry-run");
         Probe.Check("DRM and size filters compose offline and unknown is excluded", result.Exit == 0 && result.Output.Contains("steam:10")
             && !result.Output.Contains("steam:20") && !result.Output.Contains("steam:30") && calls.Count == 0);
+        Probe.Check("DRM diagnostics distinguish unknown from protected and explain the separate refresh",
+            result.Error.Contains("1 free, 1 protected, 1 unknown") && result.Error.Contains("library drm sync --source steam")
+            && result.Error.Contains("regular library sync does not fetch them"));
+        result = await Run("download", "--all", "--drm", "free", "--branch", "beta", "--dry-run", "--details");
+        Probe.Check("an entirely unclassified selection reports unknowns and branch scope instead of implying protection",
+            result.Exit == 1 && result.Error.Contains("0 free, 0 protected, 3 unknown")
+            && result.Error.Contains("No DRM classification for this branch") && result.Error.Contains("--branch beta")
+            && result.Error.Contains("Community reports currently cover the public branch") && calls.Count == 0);
         result = await Run("library", "list", "--drm", "unknown", "--keys");
         Probe.Check("library DRM filtering identifies unclassified products", result.Output.Trim() == "steam:30");
         result = await Run("library", "drm", "set", "steam:30", "--platform", "windows", "--drm", "free", "--note", "Tested without Steam");
@@ -112,6 +120,84 @@ public static class DrmProbes
         Probe.Check("manual classification requires an evidence note", result.Exit == 1 && before == await File.ReadAllTextAsync(path));
         result = await Run("download", "steam:30", "--drm", "free");
         Probe.Check("unsupported filter contexts fail instead of silently ignoring DRM", result.Exit == 1);
+    }
+
+    private static async Task LocalCommandsAsync(string root)
+    {
+        var path = Path.Combine(root, "local-drm-library.json");
+        var library = new ArchiveLibrary { Games = [Game("steam", "30") with { Versions = new()
+            { [GameOs.Windows] = new("1"), [GameOs.Linux] = new("1") } }, Game("steam", "20"), Game("gog", "30")] };
+        await library.SaveAsync(path);
+        var folder = Path.Combine(root, "local-drm"); Directory.CreateDirectory(folder);
+        var metadata = new ArchiveMetadata { Source = "steam", ProductId = "30", Slug = "game", Title = "Game 30", Platforms = new()
+        { [GameOs.Windows] = new() { Version = new("1") { Branch = "beta" }, ArchiveName = "game.zip", ArchiveSize = 1 } } };
+        await metadata.SaveAsync(folder);
+        var canonical = Path.Combine(folder, ArchiveMetadata.FileName);
+        var metadataBefore = await File.ReadAllTextAsync(canonical);
+        Task<(int Exit, string Output, string Error)> Run(params string[] args) => CaptureAsync(() => ArchiveCommandLine.RunAsync(
+            [..args, "--snapshot", path], storeFactory: _ => [new Store(library.Games), new Store(library.Games, source: "gog")]));
+        var cwd = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(folder);
+            var result = await Run("library", "drm", "set", "--drm", "free", "--note", "Verified without Steam");
+            library = await ArchiveLibrary.LoadAsync(path);
+            Probe.Check("local DRM corrections infer source, ID, sole platform and saved branch from metadata",
+                result.Exit == 0 && result.Output.Contains("Game 30 (steam:30) Windows/beta")
+                && DrmCatalog.Get(library, new("steam", "30"), GameOs.Windows, "beta").Status == DrmStatus.Free
+                && metadataBefore == await File.ReadAllTextAsync(canonical));
+            result = await Run("download", "--all", "--source", "steam", "--drm", "free", "--branch", "beta", "--dry-run");
+            Probe.Check("a local correction reaches batch filters through the saved library", result.Exit == 0 && result.Output.Trim() == "steam:30");
+            result = await Run("library", "drm", "clear");
+            Probe.Check("local DRM clear uses the same metadata selection", result.Exit == 0
+                && !(await ArchiveLibrary.LoadAsync(path)).DrmOverrides.ContainsKey("steam:30"));
+            result = await Run("library", "drm", "set", "--branch", "public", "--drm", "free", "--note", "Verified public release");
+            Probe.Check("an explicit branch overrides the archived branch", result.Exit == 0
+                && (await ArchiveLibrary.LoadAsync(path)).DrmOverrides["steam:30"][GameOs.Windows].Branch == "public");
+            result = await Run("library", "drm", "set", "steam:20", "--platform", "windows", "--drm", "free", "--note", "Another game");
+            Probe.Check("an explicit product does not inherit the current folder's identity or branch", result.Exit == 0
+                && (await ArchiveLibrary.LoadAsync(path)).DrmOverrides["steam:20"][GameOs.Windows].Branch == "public");
+            metadata.Platforms[GameOs.Linux] = new() { Version = new("2"), ArchiveName = "linux.zip", ArchiveSize = 1 };
+            await metadata.SaveAsync(folder);
+            var before = await File.ReadAllTextAsync(path);
+            result = await Run("library", "drm", "set", "--drm", "free", "--note", "Ambiguous platform");
+            Probe.Check("multiple archived platforms require a choice before saving a correction", result.Exit == 1
+                && result.Error.Contains("Specify --platform") && before == await File.ReadAllTextAsync(path));
+            result = await Run("library", "drm", "set", "--platform", "linux", "--drm", "free", "--note", "Verified Linux release");
+            Probe.Check("explicit platform selects its own archived branch", result.Exit == 0
+                && (await ArchiveLibrary.LoadAsync(path)).DrmOverrides["steam:30"][GameOs.Linux].Branch == "public");
+            before = await File.ReadAllTextAsync(path);
+            result = await Run("library", "drm", "clear", "--platform", "linux", "--source", "gog");
+            Probe.Check("a conflicting explicit source never applies a correction to another store", result.Exit == 1
+                && result.Error.Contains("outside --source") && before == await File.ReadAllTextAsync(path));
+            var oldSteam = Path.Combine(folder, ArchiveMetadata.LegacyUnifiedFileName);
+            File.Move(canonical, oldSteam);
+            result = await Run("library", "drm", "clear", "--platform", "linux");
+            Probe.Check("local context also reads legacy Steam metadata without renaming it", result.Exit == 0
+                && File.Exists(oldSteam) && !File.Exists(canonical));
+            File.Delete(oldSteam);
+            await new GogArchiver.Core.Download.BackupManifest { GameId = 30, Slug = "gog", Title = "GOG", Platforms = new()
+            { [GogArchiver.Core.GamePlatform.Windows] = new() { BuildId = "1", Language = "en", ArchiveName = "gog.zip", ArchiveSize = 1, InstalledSize = 1 } } }.SaveAsync(folder);
+            result = await Run("library", "drm", "set", "--drm", "protected", "--note", "Manual GOG correction");
+            Probe.Check("local GOG context resolves GameId with its own provider despite an equal Steam ID", result.Exit == 0
+                && (await ArchiveLibrary.LoadAsync(path)).DrmOverrides["gog:30"][GameOs.Windows].Status == DrmStatus.Protected);
+            var oldGog = Path.Combine(folder, ArchiveMetadata.LegacyFileName);
+            var json = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(canonical))!.AsObject();
+            json.Remove("Source"); File.Delete(canonical); await File.WriteAllTextAsync(oldGog, json.ToJsonString());
+            result = await Run("library", "drm", "clear");
+            Probe.Check("local legacy GOG context accepts a missing Source", result.Exit == 0
+                && !(await ArchiveLibrary.LoadAsync(path)).DrmOverrides.ContainsKey("gog:30"));
+            await metadata.SaveAsync(folder);
+            before = await File.ReadAllTextAsync(path);
+            result = await Run("library", "drm", "clear", "--platform", "windows");
+            Probe.Check("conflicting local metadata refuses inference without changing the snapshot", result.Exit == 1
+                && result.Error.Contains("Conflicting metadata owners") && before == await File.ReadAllTextAsync(path));
+            File.Delete(canonical); File.Delete(oldGog);
+            result = await Run("library", "drm", "clear");
+            Probe.Check("missing local metadata explains how to select a game without changing anything", result.Exit == 1
+                && result.Error.Contains("No game metadata") && before == await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.SetCurrentDirectory(cwd); }
     }
 
     private static async Task HttpAsync()
@@ -164,19 +250,19 @@ public static class DrmProbes
             { parse = new { wikitext = new Dictionary<string, string> { ["*"] = "{{Availability/row|Steam|10|DRM-free}}" } } })) });
         }
     }
-    private sealed class Store(IReadOnlyList<GameInfo> games, List<ArchiveOptions>? calls = null) : IGameStore
+    private sealed class Store(IReadOnlyList<GameInfo> games, List<ArchiveOptions>? calls = null, string source = "steam") : IGameStore
     {
-        public string Source => "steam";
+        public string Source => source;
         public Task<StoreLibraryResult> SyncLibraryAsync(CancellationToken ct = default) => Task.FromResult(new StoreLibraryResult(games));
         public Task<GameVersion> GetVersionAsync(string productId, GameSelection options, CancellationToken ct = default) => throw new Exception("No online planning for DRM filters");
         public Task<ArchiveResult> DownloadAsync(string productId, ArchiveOptions options, IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default)
         { calls?.Add(options); return Task.FromResult(new ArchiveResult(new(Source, productId), ArchiveOutcome.Completed)); }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
-    private static async Task<(int Exit, string Output)> CaptureAsync(Func<Task<int>> action)
+    private static async Task<(int Exit, string Output, string Error)> CaptureAsync(Func<Task<int>> action)
     {
         var stdout = Console.Out; var stderr = Console.Error; using var output = new StringWriter(); using var error = new StringWriter();
-        try { Console.SetOut(output); Console.SetError(error); var exit = await action(); return (exit, output.ToString()); }
+        try { Console.SetOut(output); Console.SetError(error); var exit = await action(); return (exit, output.ToString(), error.ToString()); }
         finally { Console.SetOut(stdout); Console.SetError(stderr); }
     }
 }

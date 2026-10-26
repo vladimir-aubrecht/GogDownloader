@@ -16,7 +16,7 @@ public static class DownloadSizeProbes
         await SteamSizesAsync();
         GogSizes();
         var root = Probe.ScratchDirectory();
-        try { await CliAsync(root); await FallbackAsync(root); await ManifestLimitAsync(root); }
+        try { await CliAsync(root); await FallbackAsync(root); await ManifestLimitAsync(root); await ProductTypesAsync(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -238,6 +238,29 @@ public static class DownloadSizeProbes
             storeFactory: _ => [new Store("steam", calls)]));
         Probe.Check("a whole old snapshot no longer collapses to zero matches when installed sizes are present",
             result.Exit == 0 && result.Output.Trim() == "steam:11" && result.Error.Contains("0 with unknown or incompatible size"));
+    }
+
+    private static async Task ProductTypesAsync(string root)
+    {
+        var library = new ArchiveLibrary { Games = [Game("steam", "1", 1), Game("steam", "768100", 1, kind: "application"),
+            Game("steam", "3", 1, kind: "demo"), Game("steam", "4", 1, kind: "tool"),
+            Game("gog", "5", 1, kind: "pack")] };
+        var snapshot = Path.Combine(root, "types.json"); await library.SaveAsync(snapshot);
+        var calls = new List<GameKey>();
+        IEnumerable<IGameStore> Stores(string source) => (source == "all" ? new[] { "gog", "steam" } : new[] { source }).Select(s => new Store(s, calls));
+        var common = new[] { "--snapshot", snapshot, "--out", Path.Combine(root, "types-output") };
+        var result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(["download", "--all", "--max-size", "500MB", ..common], storeFactory: Stores));
+        Probe.Check("batch downloads default to games and standalone GOG game packs, excluding GizmoVR and demos",
+            result.Exit == 0 && calls.SequenceEqual([new GameKey("steam", "1"), new GameKey("gog", "5")]) && result.Error.Contains("2 non-game products skipped"));
+        calls.Clear();
+        result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(["download", "--all", "--include-non-games", ..common], storeFactory: Stores));
+        Probe.Check("the explicit batch override includes supported applications and demos but not unsupported tools",
+            result.Exit == 0 && calls.Contains(new("steam", "768100")) && calls.Contains(new("steam", "3")) && !calls.Contains(new("steam", "4")));
+        calls.Clear();
+        result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(["download", "steam:768100", ..common], storeFactory: Stores));
+        Probe.Check("an explicit app ID remains downloadable without the batch override", result.Exit == 0 && calls.SequenceEqual([new GameKey("steam", "768100")]));
+        result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(["library", "list", "--include-non-games", ..common], storeFactory: Stores));
+        Probe.Check("the non-game override is not silently ignored outside batch downloads", result.Exit == 1);
     }
 
     private sealed class OversizedContent : ISteamContentSession

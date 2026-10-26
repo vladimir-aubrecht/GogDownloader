@@ -1,5 +1,6 @@
 using SteamKit2;
 using SteamKit2.Internal;
+using ProtoBuf;
 
 namespace SteamArchiver.Core;
 
@@ -10,6 +11,9 @@ internal static class SteamOwnedGames
     {
         var request = new CPlayer_GetOwnedGames_Request { steamid = steamId, include_appinfo = true,
             include_played_free_games = true, include_free_sub = true, skip_unvetted_apps = false };
+        // SteamKit2 3.4.0 predates include_all_free_games (protobuf field 10).
+        // Request unplayed free titles too; see the verified schema in docs/steamkit2.md.
+        Extensible.AppendValue(request, 10, true);
         if (appIds is not null) request.appids_filter.AddRange(appIds);
         return request;
     }

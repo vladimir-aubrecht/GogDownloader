@@ -3,6 +3,7 @@ using GameArchiver.Core;
 using SteamArchiver.Core;
 using SteamKit2;
 using SteamKit2.Internal;
+using ProtoBuf;
 using SteamStore = SteamArchiver.Core.SteamClient;
 
 namespace GogArchiver.Probes;
@@ -25,8 +26,19 @@ public static class SteamComparisonProbes
             request.steamid == 76561198000000001 && request.appids_filter.Count == 0 && request.include_appinfo);
         Probe.Check("diagnostic list explicitly includes played free games, free subscriptions and unvetted apps",
             request.include_played_free_games && request.include_free_sub && !request.skip_unvetted_apps);
+        var decoded = DecodeCurrentRequest(request);
+        Probe.Check("the serialized full list request includes unplayed free games in field 10",
+            decoded.IncludeAllFreeGames && decoded.SteamId == 76561198000000001 && decoded.AppIds.Count == 0);
+        Probe.Check("including free games does not enable family-shared licenses in field 9", !decoded.IncludeFamilyLicenses);
+        // A generated message from the pinned SDK must preserve the newer field when
+        // reserialized, even though that SDK has no named property for it.
+        decoded = DecodeCurrentRequest(Serializer.DeepClone(request));
+        Probe.Check("SteamKit's older generated request retains the new field across a protobuf round trip", decoded.IncludeAllFreeGames);
         request = SteamOwnedGames.Request(76561198000000001, [7, 9]);
         Probe.Check("best-effort name lookup retains its restricted AppID filter", request.appids_filter.SequenceEqual([7u, 9u]));
+        decoded = DecodeCurrentRequest(request);
+        Probe.Check("filtered name lookup includes unplayed free titles without widening its AppID filter",
+            decoded.IncludeAllFreeGames && decoded.AppIds.SequenceEqual([7u, 9u]) && !decoded.IncludeFamilyLicenses);
 
         var response = new CPlayer_GetOwnedGames_Response { game_count = 2 };
         response.games.Add(new() { appid = 1, name = "Game" });
@@ -43,6 +55,25 @@ public static class SteamComparisonProbes
         Probe.Check("duplicate AppIDs are rejected instead of reducing the reported count", Rejects<InvalidDataException>(() => SteamOwnedGames.Parse(EResult.OK, response)));
         response.games[1].appid = 0;
         Probe.Check("invalid GetOwnedGames AppIDs are rejected", Rejects<InvalidDataException>(() => SteamOwnedGames.Parse(EResult.OK, response)));
+    }
+
+    private static CurrentOwnedGamesRequest DecodeCurrentRequest(CPlayer_GetOwnedGames_Request request)
+    {
+        using var stream = new MemoryStream();
+        Serializer.Serialize(stream, request);
+        stream.Position = 0;
+        return Serializer.Deserialize<CurrentOwnedGamesRequest>(stream);
+    }
+
+    // Subset of Valve's current webui/service_player.proto. Read the wire output
+    // with the newer schema rather than asserting the local extension buffer.
+    [ProtoContract]
+    private sealed class CurrentOwnedGamesRequest
+    {
+        [ProtoMember(1)] public ulong SteamId { get; set; }
+        [ProtoMember(4)] public List<uint> AppIds { get; } = [];
+        [ProtoMember(9)] public bool IncludeFamilyLicenses { get; set; }
+        [ProtoMember(10)] public bool IncludeAllFreeGames { get; set; }
     }
 
     private static async Task ComparisonAsync(string root)
@@ -64,6 +95,7 @@ public static class SteamComparisonProbes
         Probe.Check("comparison makes one list request and no PICS, sync or content calls", output.Exit == 0 && fixture.ListRequests == 1);
         Probe.Check("comparison separates product types and the API list from snapshot game counts",
             output.Text.Contains("Steam snapshot: 7 products, 4 tagged as game.") && output.Text.Contains("GetOwnedGames: 6 entries")
+            && output.Text.Contains("requests free games including unplayed titles")
             && output.Text.Contains("Snapshot games present in GetOwnedGames: 2 of 4.")
             && output.Text.Contains("2 snapshot games absent") && output.Text.Contains("2 GetOwnedGames entries absent")
             && output.Text.Contains("2 listed products with another snapshot type"));

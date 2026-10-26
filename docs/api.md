@@ -151,8 +151,10 @@ unresolved appinfo failure. The aggregate snapshot can also retain old entries f
 products and unselected providers; its total is not the number of newly refreshed games.
 
 `SteamClient.GetOwnedGamesAsync(ct)` reads the full diagnostic list through the existing
-SteamKit2 session and returns AppID/name pairs. It includes played free games, free packages
-and unvetted apps, without an AppID filter. This is separate from PICS-derived ownership and
+SteamKit2 session and returns AppID/name pairs. It requests free games including unplayed
+titles, free packages and unvetted apps, without an AppID filter. A compatibility extension
+sends `include_all_free_games` as protobuf field 10 because SteamKit2 3.4.0 lacks that property.
+This is separate from PICS-derived ownership and
 does not provide download authorization. The method is serialized with other client operations;
 it does not sync or mutate archive metadata. `ISteamSession.GetOwnedGamesAsync` has a default
 implementation that throws `NotSupportedException` for transports without this diagnostic.

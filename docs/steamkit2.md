@@ -136,7 +136,7 @@ not establish that every private application will return a name.
 
 For explicit diagnostics, `library compare --source steam` calls the same service without
 `appids_filter`, using the existing authenticated session and current SteamID. Set
-`include_appinfo`, `include_played_free_games`, `include_free_sub` to true and
+`include_appinfo`, `include_played_free_games`, `include_all_free_games`, `include_free_sub` to true and
 `skip_unvetted_apps` to false for both full-list diagnostics and filtered name lookups.
 The full request uses the configured operation timeout and has no automatic retry. Unlike
 optional name lookup, diagnostic failures must propagate: require `EResult.OK`, an explicitly
@@ -149,6 +149,37 @@ and identify matching non-game types separately. Always retain unresolved sync f
 when the API supplies a name for that same AppID. Neither presence in `GetOwnedGames` nor a
 soundtrack-like title proves depot access or overrides the product type from PICS. The API's
 list and the client's displayed game counter can use different filters.
+
+### Unplayed free games and incomplete diagnostic lists
+
+The user's 2026-10-26 comparison returned 311 entries: 305 snapshot games, five applications
+and one demo. Two licensed snapshot games were absent, Burntime Remastered (3269080) and
+King's Quest (345390), despite both appearing in the Steam client. The client reported 306
+games, one soundtrack, eight software products and 141 tools; the snapshot had 307 games,
+one music product, eight applications and 32 tools. These counts do not identify the extra
+game or establish that any soundtrack is misclassified. Do not filter backup targets solely
+by presence in `GetOwnedGames` or reinterpret the tool-count difference as missing games.
+
+The Steam store lists [Burntime as free](https://store.steampowered.com/app/3269080/) and
+[King's Quest's first chapter as free](https://store.steampowered.com/app/345390/).
+`include_played_free_games` is not a request for all unplayed free titles. Valve's newer
+`GetOwnedGames` API description defines `include_all_free_games` for that purpose, subject
+to playtime visibility. The user confirmed that neither missing game had ever been launched,
+consistent with this filter excluding them. The corrected response on that account still
+needs to be verified; the flag's absence alone does not prove the server's reason for omission.
+
+Verified schema and API description snapshots:
+- [webui/service_player.proto, field 10](https://github.com/SteamDatabase/Protobufs/blob/94546e8057dc80a155d4c52f05f6b230a97919e4/webui/service_player.proto)
+- [IPlayerService/GetOwnedGames parameters](https://github.com/SteamDatabase/SteamTracking/blob/d3352acf40db92a2ac544d2221fd9ba3af4fb235/API/IPlayerService.json)
+
+SteamKit2 3.4.0's generated request ends at field 8; even the separately maintained
+steamclient schema may lag the web UI schema. Use protobuf-net's supported `IExtensible`
+mechanism to append bool field 10 to that request. Field 9 is `include_family_licenses` and
+must not be confused with field 10. Both full comparison and filtered name lookup share the
+builder, so both receive the flag. Wire-format probes decode the serialized request with a
+newer schema and check its survival through the older generated type. Live server behavior
+still requires confirmation on the user's account. This does not change download ownership,
+PICS retry policy, or the handling of incomplete/denied diagnostic responses.
 
 Primary sources for labels: `Samples/013_UnifiedMessages/Program.cs` and
 `Base/Generated/SteamMsgPlayer.cs` (`CPlayer_GetOwnedGames_Request`, response and `Player` service).

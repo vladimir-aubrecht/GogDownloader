@@ -135,8 +135,10 @@ shows listed products classified as software, music, DLC or other types in the s
 name when available; `--details` prints the full saved error. A soundtrack is not reclassified
 based on its title. The comparison matches AppIDs, never names.
 
-The command makes one `GetOwnedGames` request, including played free games, free packages
-and unvetted apps. This API list is not necessarily the Steam client's displayed count.
+The command makes one `GetOwnedGames` request, asking for free games including unplayed
+titles, free packages and unvetted apps. This API list is not necessarily the Steam client's
+displayed count or a complete inventory of licensed products. Absence here must not exclude
+a licensed game from backup; Steam can omit entries depending on service filters and visibility.
 It does not refresh PICS, download content or change the snapshot. Being listed does not
 establish depot access or clear a sync failure. Exit 0 means the comparison completed, even
 when it finds differences; inaccessible, incomplete or invalid responses cause exit 1.

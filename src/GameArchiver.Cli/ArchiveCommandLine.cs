@@ -361,7 +361,7 @@ public static class ArchiveCommandLine
         var otherListed = products.Values.Where(g => names.ContainsKey(g.Key.ProductId)
             && !string.Equals(g.Kind, "game", StringComparison.OrdinalIgnoreCase)).OrderBy(g => g.Title).ToList();
         Console.WriteLine($"Steam snapshot: {products.Count} products, {games.Count} tagged as game.");
-        Console.WriteLine($"GetOwnedGames: {listed.Count} entries (includes played free games, free packages and unvetted apps).");
+        Console.WriteLine($"GetOwnedGames: {listed.Count} entries (requests free games including unplayed titles, free packages and unvetted apps).");
         Console.WriteLine($"Snapshot games present in GetOwnedGames: {games.Count - onlySnapshot.Count} of {games.Count}.");
         Console.WriteLine($"Differences: {onlySnapshot.Count} snapshot games absent from GetOwnedGames; "
             + $"{onlyListed.Count} GetOwnedGames entries absent from the snapshot; {otherListed.Count} listed products with another snapshot type.");

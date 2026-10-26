@@ -9,22 +9,24 @@ using SteamArchiver.Core;
 
 namespace GameArchiver.Cli;
 
-public static class ArchiveCommandLine
+public static partial class ArchiveCommandLine
 {
     private static readonly HashSet<string> Switches = ["all", "dry-run", "force", "clean", "no-reuse", "no-verify", "no-launcher",
         "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
-        "file", "entry", "name", "path", "max-size"];
+        "file", "entry", "name", "path", "max-size", "drm", "note"];
 
     /// <summary>Run the same CLI with supplied stores for embedding or offline integration tests.</summary>
     public static async Task<int> RunAsync(string[] args, CancellationToken ct = default,
-        Func<string, IEnumerable<IGameStore>>? storeFactory = null)
+        Func<string, IEnumerable<IGameStore>>? storeFactory = null, Func<IDrmSource>? drmSourceFactory = null)
     {
-        try { return await RunCoreAsync(args, storeFactory, ct); }
+        try { return await RunCoreAsync(args, storeFactory, drmSourceFactory, ct); }
         catch (OperationCanceledException)
         {
-            Console.Error.WriteLine(args.Length >= 2 && args[0] == "library" && args[1] == "compare"
+            Console.Error.WriteLine(args.Length >= 2 && args[0] == "library" && args[1] == "drm"
+                ? "Interrupted. DRM metadata changes were not committed."
+                : args.Length >= 2 && args[0] == "library" && args[1] == "compare"
                 ? "Interrupted. Library comparison was not completed."
                 : args.Contains("archive")
                 ? "Interrupted. Completed archive edits were kept; unfinished edits were not committed."
@@ -36,7 +38,7 @@ public static class ArchiveCommandLine
         { Console.Error.WriteLine(e.Message); return 1; }
     }
 
-    private static async Task<int> RunCoreAsync(string[] args, Func<string, IEnumerable<IGameStore>>? factory, CancellationToken ct)
+    private static async Task<int> RunCoreAsync(string[] args, Func<string, IEnumerable<IGameStore>>? factory, Func<IDrmSource>? drmSourceFactory, CancellationToken ct)
     {
         var flags = new Dictionary<string, string>();
         var providerDirectories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -72,6 +74,16 @@ public static class ArchiveCommandLine
         var snapshotPath = flags.GetValueOrDefault("snapshot", ArchiveLibrary.DefaultPath);
         var command = positionals[0];
         var subcommand = positionals.ElementAtOrDefault(1);
+        var drmFilter = flags.GetValueOrDefault("drm")?.ToLowerInvariant();
+        if (drmFilter is not null)
+        {
+            if (command == "library" && subcommand == "drm") { /* Validated by the DRM command. */ }
+            else if (command == "library" && subcommand == "list" || command == "download" && flags.ContainsKey("all"))
+            { if (drmFilter != "any") _ = DrmCatalog.Parse(drmFilter); }
+            else throw new ArgumentException("--drm requires library list, library drm set, or download --all.");
+        }
+        if (flags.ContainsKey("note") && !(command == "library" && subcommand == "drm" && positionals.ElementAtOrDefault(2) == "set"))
+            throw new ArgumentException("--note requires library drm set.");
         if (flags.ContainsKey("inventory") && (command != "library" || subcommand is not "list" and not "stats"))
             throw new ArgumentException("--inventory requires library list or library stats.");
         long? maxSize = null;
@@ -125,6 +137,12 @@ public static class ArchiveCommandLine
         var stores = (factory ?? DefaultStores)(source).ToArray();
         await using var archive = new GameArchiverClient(stores);
         if (source != "all" && !archive.Sources.Contains(source)) throw new ArgumentException($"Unknown source '{source}'.");
+        if (command == "library" && subcommand == "drm")
+        {
+            if (legacy) throw new ArgumentException("DRM annotations require an aggregate snapshot. Run library sync first.");
+            return await RunDrmAsync(library ?? throw new FileNotFoundException("Run library sync first."), snapshotPath,
+                positionals, flags, source, drmSourceFactory, ct);
+        }
         if (command == "auth")
         {
             if (source == "all") throw new ArgumentException("Authentication requires --source gog or --source steam.");
@@ -216,11 +234,24 @@ public static class ArchiveCommandLine
                 return 0;
             }
             games = games.Where(g => Search(g, search) && (flags.ContainsKey("inventory") || library.IsCatalogEntry(g.Key))).ToList();
+            var drmSelection = Options(flags, providerDirectories);
+            if (drmFilter is not null && drmFilter != "any") games = games.Where(g =>
+                DrmCatalog.Get(library, g.Key, drmSelection.Platform, drmSelection.Branch).Status == DrmCatalog.Parse(drmFilter)).ToList();
             if (subcommand == "stats")
             { PrintLibraryStats(games); if (search.Length == 0) PrintCatalogStats(library, source); return 0; }
             if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats|failures|compare");
             foreach (var game in games)
-                Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}");
+            {
+                Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}"
+                    + (drmFilter is null ? "" : $" [DRM: {DrmCatalog.Get(library, game.Key, drmSelection.Platform, drmSelection.Branch).Status.ToString().ToLowerInvariant()}]"));
+                if (drmFilter is not null && flags.ContainsKey("details") && !flags.ContainsKey("keys"))
+                {
+                    var drm = DrmCatalog.Get(library, game.Key, drmSelection.Platform, drmSelection.Branch);
+                    Console.WriteLine($"  Source: {drm.Source}; branch: {drm.Branch}; checked: {drm.CheckedAt?.ToString("O") ?? "not verified"}");
+                    if (drm.Url is not null) Console.WriteLine($"  {drm.Url}");
+                    if (drm.Notes is not null) Console.WriteLine($"  {drm.Notes}");
+                }
+            }
             return games.Count == 0 ? 1 : 0;
         }
         var options = Options(flags, providerDirectories) with { MaxDownloadSize = maxSize };
@@ -293,9 +324,12 @@ public static class ArchiveCommandLine
             {
                 if (library is null) throw new FileNotFoundException("No aggregate library snapshot. Run library sync first.");
                 var candidates = library.SelectDownloads(games.Where(g => Search(g, search)), options.Platform);
-                var tooLarge = 0; var unknown = 0;
+                var tooLarge = 0; var unknown = 0; var drmExcluded = 0;
                 foreach (var game in candidates)
                 {
+                    if (drmFilter is not null && drmFilter != "any"
+                        && DrmCatalog.Get(library, game.Key, options.Platform, options.Branch).Status != DrmCatalog.Parse(drmFilter))
+                    { drmExcluded++; continue; }
                     if (maxSize is null) { keys.Add(game.Key); continue; }
                     var version = game.Versions[options.Platform];
                     if (library.Failures.ContainsKey(game.Key.Source) || library.Failures.ContainsKey(game.Key.ToString())
@@ -307,6 +341,7 @@ public static class ArchiveCommandLine
                     if (version.DownloadSize >= maxSize.Value) { tooLarge++; continue; }
                     keys.Add(game.Key);
                 }
+                if (drmFilter is not null) Console.Error.WriteLine($"DRM filter ({drmFilter}): {drmExcluded} excluded. Uses reported status for {options.Platform}/{options.Branch}; unknown is not DRM-free.");
                 if (maxSize is not null)
                 {
                     Console.Error.WriteLine($"Size filter: {keys.Count} selected below {maxSize.Value} bytes (download estimate); "
@@ -342,7 +377,8 @@ public static class ArchiveCommandLine
                 }
                 try
                 {
-                    var result = await archive.DownloadAsync(key, options, new InlineProgress<ArchiveProgress>(p =>
+                    var downloadOptions = options with { Drm = library is null ? DrmInfo.ForStore(key.Source) with { Branch = options.Branch } : DrmCatalog.Get(library, key, options.Platform, options.Branch) };
+                    var result = await archive.DownloadAsync(key, downloadOptions, new InlineProgress<ArchiveProgress>(p =>
                         Console.Error.Write($"\r{key} {p.Phase}: {p.Bytes}/{p.TotalBytes} bytes, {p.Files}/{p.TotalFiles} files       ")), ct);
                     Console.Error.WriteLine();
                     Console.WriteLine($"{result.Outcome}: {result.Key} {result.ArchivePath ?? result.Detail}");
@@ -572,6 +608,10 @@ public static class ArchiveCommandLine
           --platform windows|linux|mac --language en --arch 32|64|arm64 --branch public
           --directory NAME --connections N --compression-threads N --limit-rate 5M
           --max-size 100MB (download --all: below the recorded full download size; unknown sizes skipped)
+          --drm free|protected|unknown|any (library list or download --all; reported status for the selected OS/branch)
+        DRM: library drm sync [--source steam|gog|all] [--refresh]
+          library drm set SOURCE:ID --platform windows|linux|mac --drm free|protected|unknown --note TEXT
+          library drm clear SOURCE:ID --platform windows|linux|mac
           --force --clean --no-reuse --no-verify --no-launcher --dry-run
         Auth: --gog-tokens FILE --steam-tokens FILE --username NAME --code URL
           Steam password: interactive prompt or GAMEARCHIVE_STEAM_PASSWORD

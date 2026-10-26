@@ -87,6 +87,10 @@ public static class DownloadSizeProbes
         session.Apps[2] = session.Apps[2] with { Depots = [Depot(60, 0, null)] };
         Probe.Check("zero download size without an installed size is not proof of an empty depot",
             (await steam.GetVersionAsync("1", new())).DownloadSize == 0);
+        session.Apps[1] = game with { Depots = [Depot(50, 0, 0, 500), Depot(10, 5, 10)] };
+        session.Apps[2] = session.Apps[2] with { Depots = [Depot(50, 0, 100, 500)] };
+        Probe.Check("merging repeated manifests cannot turn conflicting nonempty evidence into a known zero",
+            (await steam.GetVersionAsync("1", new())).DownloadSize == 0);
         session.Owned = [1];
         session.Apps[1] = parsed;
         Probe.Check("Steam branch selection uses that branch's sizes", (await steam.GetVersionAsync("1", new() { Branch = "beta" })).DownloadSize == 0);

@@ -217,6 +217,7 @@ public sealed class GogClient : IGameStore
             OutputRoot = options.OutputRoot, Platform = (GamePlatform)options.Platform, Language = options.Language,
             StagingRoot = options.StagingRoot, StagingKey = game.LegacyDirectoryName, DirectoryName = name,
             MaxConnections = options.MaxConnections, Force = options.Force,
+            Drm = options.Drm,
             Clean = options.Clean, Reuse = options.Reuse, VerifyArchive = options.Verify,
             WriteLauncher = options.WriteLauncher, MaxCompressionThreads = options.CompressionThreads,
         }, new InlineProgress<DownloadProgress>(p => progress?.Report(new(p.Phase, p.Bytes, p.TotalBytes, p.Files, p.TotalFiles))), ct);

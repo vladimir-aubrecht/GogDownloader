@@ -287,6 +287,30 @@ Custom edits are not reapplied automatically when a later download rebuilds an a
 
 ## Metadata, folders and recovery
 
+`DrmInfo` represents a reported `Unknown`, `Free` or `Protected` status with `Source`, `Url`,
+`CheckedAt`, `Notes` and `Branch`. `GameInfo.Drm` is keyed by OS; `ArchiveLibrary.DrmOverrides`
+is keyed by `source:ID` and OS. `DrmCatalog.Get(library, key, os, branch)` resolves a manual
+override, the saved community report, then the GOG distribution-policy default or unknown.
+No report applies to another OS or branch, and unknown is never treated as free.
+
+```csharp
+using var source = new PcGamingWikiDrmSource();
+var refreshed = await LibraryDrm.RefreshAsync(library, source, selectedSource: "steam", ct: ct);
+library = refreshed.Library;
+await library.SaveAsync(snapshotPath, ct);
+// Check refreshed.Error; community unavailability does not change store sync failures.
+var drm = DrmCatalog.Get(library, key, GameOs.Windows);
+await archive.DownloadAsync(key, new ArchiveOptions { OutputRoot = "/backups", Drm = drm }, ct: ct);
+```
+
+`IDrmSource` is injectable, independent of store authentication and suitable for controlled
+HTTP fixtures or another community provider. Enrichment does not mutate its input library.
+Successful reports cache for seven days, with `force: true` for an explicit refresh. An outage
+stops further lookups; stale reports pending refresh become unknown. User overrides survive.
+`ArchiveOptions.Drm` records the selected report in newly created native and GOG legacy
+archives. Existing completed backups are not rewritten just to update a classification.
+See [PCGamingWiki behavior and limitations](pcgamingwiki.md).
+
 Native Steam archives use `.gamebackup.json` schema 2 with `Source`, string `ProductId`, `Slug`,
 `Title` and per-OS `Platforms`. Each completion records the build, branch, language, architecture,
 depot manifest IDs, owned DLC selection, measured installed/archive sizes, file hashes, launch

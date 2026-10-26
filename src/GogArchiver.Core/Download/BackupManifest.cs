@@ -47,6 +47,7 @@ public sealed record PlatformBackup
 
     public DateTimeOffset CompletedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? ModifiedAt { get; init; }
+    public GameArchiver.Core.DrmInfo Drm { get; init; } = GameArchiver.Core.DrmInfo.ForStore("gog");
 
     /// <summary>Owned DLC whose depots are in the zip.</summary>
     public List<string> Dlcs { get; init; } = [];

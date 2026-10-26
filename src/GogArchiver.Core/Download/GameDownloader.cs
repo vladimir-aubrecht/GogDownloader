@@ -14,6 +14,7 @@ public sealed record DownloadOptions
     public required string OutputRoot { get; init; }
     public required GamePlatform Platform { get; init; }
     public string Language { get; init; } = "en";
+    public DrmInfo? Drm { get; init; }
     public int MaxConnections { get; init; } = 8;
 
     /// <summary>
@@ -322,6 +323,7 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 manifest.Platforms[options.Platform] = new PlatformBackup
                 {
                     ContentRevision = PlatformBackup.CurrentContentRevision,
+                    Drm = options.Drm ?? DrmInfo.ForStore("gog"),
                     BuildId = buildId,
                     VersionName = versionName,
                     Language = options.Language,

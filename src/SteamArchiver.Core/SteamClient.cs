@@ -327,6 +327,7 @@ public sealed class SteamClient : IGameStore
                     downloadSize = MergeSize(downloadSize, existing.DownloadSize);
                     installedSize = MergeSize(installedSize, existing.InstalledSize);
                 }
+                if (downloadSize == 0 && installedSize != 0) downloadSize = null;
                 selected[depot.DepotId] = (request, isDlc || existing.Dlc, downloadSize, installedSize);
             }
         }
@@ -526,7 +527,13 @@ public sealed class SteamClient : IGameStore
                     finally { chunkSlots.Release(); }
                 });
             }
-            if (!await MatchesAsync(path, item.File, token)) throw new InvalidDataException($"Steam file hash mismatch: {item.File.Path}.");
+            if (!await MatchesAsync(path, item.File, token))
+            {
+                await using var input = File.OpenRead(path);
+                var actual = Convert.ToHexStringLower(await SHA1.HashDataAsync(input, token));
+                throw new InvalidDataException($"Steam file hash mismatch: {item.File.Path}. Expected SHA-1 {item.File.Sha1}, actual {actual}; "
+                    + $"expected {item.File.Size} bytes, actual {input.Length}. All requested chunks passed their hashes; completion was not recorded.");
+            }
             progress?.Report(new("download", Volatile.Read(ref downloaded), totalBytes, Interlocked.Increment(ref done), pending.Count));
         });
         foreach (var link in layout.Links)
@@ -561,6 +568,7 @@ public sealed class SteamClient : IGameStore
         {
             Version = selection.Version, ArchiveName = archiveName, ArchiveSize = new FileInfo(archivePath).Length,
             InstalledSize = totalSize, Files = backedFiles, RuntimeRequirement = "steam-or-game-specific-drm; portability-not-verified",
+            Drm = options.Drm ?? new(),
             LaunchExecutable = launch?.Executable.Replace('\\', '/'), LaunchParameters = launch?.Arguments,
         };
         await location.Metadata.SaveAsync(location.Directory, ct);

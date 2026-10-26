@@ -40,6 +40,12 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
                     || snapshot.Games.GroupBy(g => g.Key).Any(g => g.Count() > 1))
                     throw new InvalidDataException($"Store {source} returned invalid or duplicate identities.");
                 var games = snapshot.Games.ToList();
+                games = games.Select(g =>
+                {
+                    var drm = previous?.Games.FirstOrDefault(old => old.Key == g.Key)?.Drm.ToDictionary() ?? [];
+                    foreach (var entry in g.Drm) drm[entry.Key] = entry.Value;
+                    return g with { Drm = drm };
+                }).ToList();
                 var failures = snapshot.Failures.ToDictionary();
                 var summaries = snapshot.FailureSummaries.ToDictionary();
                 var impacts = snapshot.FailureImpacts.ToDictionary(f => f.Key, f => f.Value.ToList());
@@ -101,6 +107,7 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
         var unchanged = previous?.Games.Where(g => !_stores.ContainsKey(g.Key.Source)) ?? [];
         return new()
         {
+            DrmOverrides = previous?.DrmOverrides.ToDictionary(d => d.Key, d => d.Value.ToDictionary()) ?? [],
             PrimaryCatalogs = results.Where(r => r.Catalog is not null).ToDictionary(r => r.Source, r => r.Catalog!)
                 .Concat(previous?.PrimaryCatalogs.Where(c => !_stores.ContainsKey(c.Key)) ?? []).ToDictionary(),
             FailureImpacts = results.SelectMany(r => r.Impacts).Concat(previous?.FailureImpacts

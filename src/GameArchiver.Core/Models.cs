@@ -23,6 +23,7 @@ public sealed record GameKey
 
 public sealed record GameInfo(GameKey Key, string Title, string Slug)
 {
+    public Dictionary<GameOs, DrmInfo> Drm { get; init; } = [];
     public bool EarlyAccess { get; init; }
     public string Kind { get; init; } = "game";
     public Dictionary<GameOs, GameVersion> Versions { get; init; } = [];
@@ -93,6 +94,8 @@ public sealed record ArchiveOptions : GameSelection
     public long MaxBytesPerSecond { get; init; }
     /// <summary>Skip a full download whose size is unknown or at/above this limit. Not a network-byte cap.</summary>
     public long? MaxDownloadSize { get; init; }
+    /// <summary>Optional reported classification to record with a newly created archive.</summary>
+    public DrmInfo? Drm { get; init; }
     public bool Force { get; init; }
     public bool Clean { get; init; }
     public bool Reuse { get; init; } = true;
@@ -104,6 +107,7 @@ public sealed record ArchiveOptions : GameSelection
     {
         base.Validate();
         if (MaxDownloadSize is <= 0) throw new ArgumentOutOfRangeException(nameof(MaxDownloadSize));
+        if (Drm is not null && (!Drm.IsValid || Drm.Branch != Branch)) throw new ArgumentException("Invalid DRM annotation for this branch.");
         ArgumentException.ThrowIfNullOrWhiteSpace(OutputRoot);
         if (!Enum.IsDefined(Layout) || ProviderDirectories is null)
             throw new ArgumentException("Invalid archive layout.");
@@ -162,6 +166,7 @@ public sealed record ArchiveLibrary
     public Dictionary<string, string> FailureSummaries { get; init; } = [];
     public Dictionary<string, HashSet<string>> PrimaryCatalogs { get; init; } = [];
     public Dictionary<string, List<LibraryFailureImpact>> FailureImpacts { get; init; } = [];
+    public Dictionary<string, Dictionary<GameOs, DrmInfo>> DrmOverrides { get; init; } = [];
 
     public bool IsCatalogEntry(GameKey key) => !PrimaryCatalogs.TryGetValue(key.Source, out var catalog) || catalog.Contains(key.ProductId);
 
@@ -188,14 +193,17 @@ public sealed record ArchiveLibrary
         var library = await JsonSerializer.DeserializeAsync<ArchiveLibrary>(stream, ArchiveJson.Options, ct)
             ?? throw new InvalidDataException("Empty library snapshot.");
         if (library.SchemaVersion != 1) throw new InvalidDataException("Unsupported library snapshot schema.");
+        static bool InvalidDrm(Dictionary<GameOs, DrmInfo>? values) => values is null
+            || values.Any(v => !Enum.IsDefined(v.Key) || v.Value is null || !v.Value.IsValid);
         if (library.Games is null || library.Failures is null || library.FailureNames is null || library.FailureSummaries is null
+            || library.DrmOverrides is null || library.DrmOverrides.Any(d => string.IsNullOrWhiteSpace(d.Key) || InvalidDrm(d.Value))
             || library.PrimaryCatalogs is null || library.PrimaryCatalogs.Any(c => string.IsNullOrWhiteSpace(c.Key)
                 || c.Value is null || c.Value.Any(string.IsNullOrWhiteSpace))
             || library.FailureImpacts is null || library.FailureImpacts.Any(f => f.Value is null
                 || f.Value.Any(i => i is null || string.IsNullOrWhiteSpace(i.ProductId) || i.Platform is { } p && !Enum.IsDefined(p)))
             || library.Games.Any(g => g is null || g.Key is null
             || g.Versions is null || g.Versions.Any(v => !Enum.IsDefined(v.Key) || v.Value is null || !v.Value.IsValid)
-            || g.OwnedDlcs is null || g.Title is null || g.Slug is null)
+            || g.OwnedDlcs is null || g.Title is null || g.Slug is null || InvalidDrm(g.Drm))
             || library.Games.GroupBy(g => g.Key).Any(g => g.Count() > 1))
             throw new InvalidDataException("Library snapshot contains missing or duplicate identities.");
         return library;

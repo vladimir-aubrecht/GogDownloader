@@ -217,6 +217,48 @@ The native Steam path is exercised with controlled session/CDN fixtures. A live 
 depot download and execution on ARM64 still need verification on a real account/device. No
 Steam credentials are required to build or run the test suite.
 
+## Filter by reported DRM status
+
+The aggregate library records DRM per store and OS as `Free`, `Protected` or `Unknown`, with
+the source, evidence URL, check time and notes. GOG defaults to its DRM-free distribution policy;
+Steam defaults to unknown. Steam ownership, Steamworks DLLs and the absence of a store warning
+are not evidence that a game is DRM-free. The classification describes the reported DRM status,
+not verified portability, offline play or availability of multiplayer/services.
+
+Fetch community reports separately from the normal library sync (no Steam login required):
+
+```sh
+dotnet run --project src/GameArchiver.Cli -- library drm sync --source steam
+dotnet run --project src/GameArchiver.Cli -- library list --source steam --drm any --platform windows --details
+dotnet run --project src/GameArchiver.Cli -- download --all --source steam --drm free --max-size 100MB --dry-run
+```
+
+`library drm sync` uses PCGamingWiki's AppID resolver and explicit matching Steam availability
+rows. Reports are cached in `library.json` for seven days; `--refresh` bypasses that cache.
+Missing, conditional, conflicting or unrecognized evidence stays unknown. Unscoped reports
+are applied only to Windows; native Linux/macOS ports need explicit OS evidence or an override.
+If PCGamingWiki is unavailable (including HTTP 403), enrichment reports one failure, stops
+querying and leaves unrefreshed classifications unknown. Normal library sync/download remains
+independent. Filters use saved metadata without network access.
+
+Manual corrections take precedence and survive subsequent store and DRM syncs. They apply to
+the selected store, AppID, OS and branch (public by default); `--note` records the evidence:
+
+```sh
+dotnet run --project src/GameArchiver.Cli -- library drm set steam:12345 --platform windows --drm free --note "Tested this Windows release without Steam"
+dotnet run --project src/GameArchiver.Cli -- library drm clear steam:12345 --platform windows
+```
+
+Replace the example ID with a product in your snapshot. Setting `unknown` explicitly overrides
+a community claim. Clearing the override restores the community/default value. `--drm` accepts
+`free`, `protected`, `unknown` and `any` for `library list` and `download --all`; unknown never
+passes the free filter. A filter applies to the resolved base game, not a DLC's standalone size
+or DRM label. New archives record the selected report in `Platforms.{OS}.Drm`, including GOG's
+legacy metadata. Existing completed archives are not rewritten by DRM enrichment or overrides.
+These annotations do not affect archive freshness or remove DRM.
+
+See [the PCGamingWiki adapter and its limits](docs/pcgamingwiki.md).
+
 ## Download a subset by size
 
 Use `--max-size` with `download --all` to select games whose recorded full download estimate

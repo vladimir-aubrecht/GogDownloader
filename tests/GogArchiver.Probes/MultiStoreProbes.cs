@@ -73,7 +73,8 @@ public static class MultiStoreProbes
         Probe.Check("standalone GOG API migrates a completed backup without network or re-zipping",
             gogResult.Outcome == ArchiveOutcome.AlreadyDone && requests.Calls == 0 && !Directory.Exists(old)
             && (await File.ReadAllBytesAsync(gogResult.ArchivePath!)).SequenceEqual(originalBytes));
-        var steamResult = await archive.DownloadAsync(new("steam", "1"), options);
+        var drm = new DrmInfo { Status = DrmStatus.Free, Source = "manual", Notes = "Verified fixture", CheckedAt = DateTimeOffset.UtcNow };
+        var steamResult = await archive.DownloadAsync(new("steam", "1"), options with { Drm = drm });
         Probe.Check("same numeric product ID and slug coexist across stores without ID suffixes",
             steamResult.Outcome == ArchiveOutcome.Completed && Path.GetFileName(Path.GetDirectoryName(steamResult.ArchivePath)) == "the_game_steam"
             && (await File.ReadAllBytesAsync(gogResult.ArchivePath!)).SequenceEqual(originalBytes));
@@ -82,6 +83,7 @@ public static class MultiStoreProbes
             metadata.Key == new GameKey("steam", "1") && metadata.Platforms[GameOs.Windows].Version.Manifests.Count == 3
             && metadata.Platforms[GameOs.Windows].LaunchExecutable == "game.exe"
             && metadata.Platforms[GameOs.Windows].RuntimeRequirement.Contains("not-verified"));
+        Probe.Check("a completed Steam download records the selected DRM evidence", metadata.Platforms[GameOs.Windows].Drm == drm);
         using (var zip = ZipFile.OpenRead(steamResult.ArchivePath!))
         {
             Probe.Check("Steam selects Windows 64-bit English and dereferences directory links",

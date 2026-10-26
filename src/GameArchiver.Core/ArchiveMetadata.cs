@@ -13,6 +13,7 @@ public sealed record PlatformArchive
     public DateTimeOffset? ModifiedAt { get; init; }
     public bool NeedsRefresh { get; init; }
     public string RuntimeRequirement { get; init; } = "unknown";
+    public DrmInfo Drm { get; init; } = new();
     public string? LaunchExecutable { get; init; }
     public string? LaunchParameters { get; init; }
     public Dictionary<string, ArchivedFile> Files { get; init; } = [];
@@ -111,7 +112,7 @@ public sealed record ArchiveMetadata
             var result = root.Deserialize<ArchiveMetadata>(ArchiveJson.Options)!;
             if (result.SchemaVersion != 2) throw new InvalidDataException($"Unsupported archive schema in {path}");
             if (result.Platforms is null || result.Platforms.Any(p => !Enum.IsDefined(p.Key) || p.Value is null
-                || p.Value.Version is null || !p.Value.Version.IsValid || p.Value.Files is null
+                || p.Value.Version is null || !p.Value.Version.IsValid || p.Value.Files is null || p.Value.Drm is null || !p.Value.Drm.IsValid
                 || p.Value.Files.Values.Any(f => f is null || f.Hash is null || f.Algorithm is null)
                 || p.Value.ArchiveSize < 0 || string.IsNullOrWhiteSpace(p.Value.ArchiveName)))
                 throw new InvalidDataException($"Invalid platform metadata in {path}");
@@ -137,6 +138,8 @@ public sealed record ArchiveMetadata
             var build = Text(v, "BuildId");
             var contentRevision = v.TryGetProperty("ContentRevision", out var revision) ? revision.GetInt32() : 0;
             var oldContent = contentRevision < 1;
+            var reportedDrm = v.TryGetProperty("Drm", out var drm) ? drm.Deserialize<DrmInfo>(ArchiveJson.Options) ?? DrmInfo.ForStore("gog") : DrmInfo.ForStore("gog");
+            if (!reportedDrm.IsValid) throw new InvalidDataException($"Invalid DRM metadata in {path}");
             metadata.Platforms[platform] = new()
             {
                 Version = new(build) { Name = Text(v, "VersionName"), Language = Text(v, "Language", "en"), Architecture = "",
@@ -148,6 +151,7 @@ public sealed record ArchiveMetadata
                 ModifiedAt = v.TryGetProperty("ModifiedAt", out var modified) && modified.ValueKind != JsonValueKind.Null ? modified.GetDateTimeOffset() : null,
                 NeedsRefresh = platform != GameOs.Windows && contentRevision < 2 || oldContent && (dlcs.Count > 0 || platform == GameOs.Windows && build.StartsWith("installer-")),
                 RuntimeRequirement = "drm-free", LaunchExecutable = Text(v, "LaunchExecutable"), LaunchParameters = Text(v, "LaunchParameters"),
+                Drm = reportedDrm,
                 Files = v.TryGetProperty("Files", out var files) ? files.EnumerateObject().ToDictionary(f => f.Name,
                     f => new ArchivedFile(Text(f.Value, "Md5"), f.Value.GetProperty("Size").GetInt64(), "md5")) : [],
             };

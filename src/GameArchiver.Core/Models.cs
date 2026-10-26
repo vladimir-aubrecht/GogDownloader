@@ -59,9 +59,10 @@ public sealed record GameVersion(string BuildId)
 
 public sealed record GameDependency(string ProductId, string Kind, string? DepotId = null, bool MetadataRequired = true);
 
-/// <summary>A confirmed failed catalog selection, not a claim about every possible variant.</summary>
+/// <summary>A failed selection; IsStale marks retained evidence that this sync did not recheck.</summary>
 public sealed record LibraryFailureImpact(string ProductId, GameOs? Platform = null, string Language = "en",
-    string Architecture = "64", string Branch = "public", string? RequiredProductId = null, string? DepotId = null, string? Detail = null);
+    string Architecture = "64", string Branch = "public", string? RequiredProductId = null, string? DepotId = null, string? Detail = null,
+    bool IsStale = false);
 
 public record GameSelection
 {
@@ -126,6 +127,8 @@ public sealed record StoreLibraryResult(IReadOnlyList<GameInfo> Games)
 {
     /// <summary>Null leaves membership unchanged, or uses legacy selection if absent. Empty means an explicitly empty catalog.</summary>
     public IReadOnlySet<string>? PrimaryCatalog { get; init; }
+    /// <summary>Products processed only for metadata, without rechecking prior download selection failures.</summary>
+    public IReadOnlySet<string> MetadataOnlyProducts { get; init; } = new HashSet<string>();
     public IReadOnlyDictionary<string, List<LibraryFailureImpact>> FailureImpacts { get; init; } = new Dictionary<string, List<LibraryFailureImpact>>();
     public IReadOnlyDictionary<string, string> Failures { get; init; } = new Dictionary<string, string>();
     public IReadOnlyDictionary<string, string> FailureNames { get; init; } = new Dictionary<string, string>();

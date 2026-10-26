@@ -145,9 +145,15 @@ failures without a confirmed blocking link are labelled separately; that does **
 they are harmless for other selections. They remain saved failures and keep sync's exit status
 nonzero. Local shared manifests can make a parent's selection succeed without reading the
 source app's metadata, but they do not resolve the source app's own metadata failure.
+If a game leaves the primary catalog while remaining licensed, sync refreshes its inventory
+metadata without checking its download selection. A previous selection failure stays saved
+and is labelled `Previously blocked (not rechecked)` until a later selection check resolves it.
+Successful appinfo alone clears only the app's metadata failure, not its unchecked selection.
 
 The aggregate snapshot adds optional `PrimaryCatalogs` (provider to product-ID set) and
-`FailureImpacts` (failure key to affected selections). `GameVersion.Dependencies` records
+`FailureImpacts` (failure key to affected selections, with `IsStale` for unchecked evidence).
+Provider results identify metadata-only refreshes through `StoreLibraryResult.MetadataOnlyProducts`.
+`GameVersion.Dependencies` records
 required DLC metadata, inspected shared-app metadata and local shared-manifest references;
 `MetadataRequired: false` distinguishes a reference that needs no appinfo lookup. These
 fields also support C# consumers. Dependency provenance does not invalidate an otherwise

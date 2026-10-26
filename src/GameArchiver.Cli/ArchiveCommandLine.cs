@@ -399,7 +399,8 @@ public static class ArchiveCommandLine
         foreach (var impact in impacts)
         {
             var selection = impact.Platform is { } platform ? $"{platform}/{impact.Language}/{impact.Architecture}/{impact.Branch}" : "product metadata";
-            writer.WriteLine($"  Blocks {FailureLabel(library, parts[0] + ":" + impact.ProductId)} [{selection}]"
+            var stale = impact.IsStale || library.Failures.ContainsKey(parts[0]);
+            writer.WriteLine($"  {(stale ? "Previously blocked (not rechecked)" : "Blocks")} {FailureLabel(library, parts[0] + ":" + impact.ProductId)} [{selection}]"
                 + (impact.RequiredProductId is null ? "." : $"; requires {parts[0]}:{impact.RequiredProductId}"
                     + (impact.DepotId is null ? "." : $", depot {impact.DepotId}.")));
             if (details && impact.Detail is not null) writer.WriteLine($"    {impact.Detail}");

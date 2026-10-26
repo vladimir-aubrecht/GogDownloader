@@ -76,6 +76,7 @@ public sealed class SteamClient : IGameStore
             var owned = await _session.GetOwnedAppIdsAsync(ct);
             await _session.PreloadAppsAsync(owned, ct);
             var games = new List<GameInfo>();
+            var metadataOnly = new HashSet<string>();
             var failures = new Dictionary<string, string>();
             var summaries = new Dictionary<string, string>();
             var names = catalog.Where(p => !string.IsNullOrWhiteSpace(p.Value)).ToDictionary(p => p.Key.ToString(), p => p.Value);
@@ -101,6 +102,7 @@ public sealed class SteamClient : IGameStore
             foreach (var id in owned.Concat(catalog.Keys).Distinct().Order())
             {
                 ct.ThrowIfCancellationRequested();
+                if (!catalog.ContainsKey(id)) metadataOnly.Add(id.ToString());
                 try
                 {
                     if (!owned.Contains(id)) throw new SteamAuthenticationException($"Steam catalog app {id} has no active package license. Catalog membership does not authorize content access.");
@@ -160,7 +162,7 @@ public sealed class SteamClient : IGameStore
                 }
                 catch (Exception e) when (e is not OperationCanceledException) { /* Optional labels must not discard a successful sync. */ }
             }
-            return new(games) { PrimaryCatalog = catalog.Keys.Select(id => id.ToString()).ToHashSet(),
+            return new(games) { PrimaryCatalog = catalog.Keys.Select(id => id.ToString()).ToHashSet(), MetadataOnlyProducts = metadataOnly,
                 Failures = failures, FailureNames = names.Where(p => failures.ContainsKey(p.Key)).ToDictionary(),
                 FailureSummaries = summaries, FailureImpacts = impacts.Where(p => failures.ContainsKey(p.Key)).ToDictionary() };
         }
@@ -208,26 +210,17 @@ public sealed class SteamClient : IGameStore
         var selected = new Dictionary<uint, (SteamDepotRequest Request, bool Dlc, long? DownloadSize, long? InstalledSize)>();
         foreach (var parent in apps)
         {
-            var eligible = new List<SteamDepot>();
-            foreach (var original in parent.Depots)
+            bool Eligible(SteamDepot depot) => (depot.DlcAppId == 0 || owned.Contains(depot.DlcAppId))
+                && (depot.OsList.Length == 0 || depot.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase));
+            bool NeedsResolution(SteamDepot depot) => depot.SharedFromApp != 0 && !depot.Manifests.ContainsKey(options.Branch);
+            async Task<SteamDepot> ResolveAsync(SteamDepot depot, bool checkAvailability = false)
             {
-                // Public appinfo can advertise private/shared DLC we do not own, or another OS.
-                // Filter these before querying the source application's protected appinfo.
-                if (original.DlcAppId != 0 && !owned.Contains(original.DlcAppId)) continue;
-                if (original.OsList.Length > 0 && !original.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase)) continue;
-                var depot = original;
                 var visited = new HashSet<uint>();
-                // A shared depot can already publish its manifest in the licensed app's
-                // appinfo. Only look up its source when the selected branch is missing:
-                // source appinfo may be private even though this depot is accessible.
-                while (depot.SharedFromApp != 0 && !depot.Manifests.ContainsKey(options.Branch))
+                // Prefer a local manifest even when the source application's appinfo is private.
+                while (NeedsResolution(depot) && Eligible(depot))
                 {
-                    // Keep incompatible variants for availability checks below, but never
-                    // request protected metadata for a variant this selection will not use.
-                    if (depot.DlcAppId != 0 && !owned.Contains(depot.DlcAppId)
-                        || depot.OsList.Length > 0 && !depot.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase)
-                        || depot.Architecture.Length > 0 && depot.Architecture != options.Architecture
-                        || depot.Language.Length > 0 && !string.Equals(depot.Language, language, StringComparison.OrdinalIgnoreCase)) break;
+                    if (!checkAvailability && (depot.Architecture.Length > 0 && depot.Architecture != options.Architecture
+                        || depot.Language.Length > 0 && !string.Equals(depot.Language, language, StringComparison.OrdinalIgnoreCase))) break;
                     if (!visited.Add(depot.SharedFromApp))
                     {
                         dependencyFailure?.Invoke(depot.SharedFromApp, depot.DepotId);
@@ -244,20 +237,63 @@ public sealed class SteamClient : IGameStore
                         Architecture = depot.Architecture.Length > 0 ? depot.Architecture : shared.Architecture,
                         Language = depot.Language.Length > 0 ? depot.Language : shared.Language };
                 }
-                if (depot.DlcAppId != 0 && !owned.Contains(depot.DlcAppId)) continue;
-                if (depot.OsList.Length > 0 && !depot.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase)) continue;
-                eligible.Add(depot);
+                return depot;
             }
-            var compatible = new List<SteamDepot>();
-            foreach (var group in eligible.GroupBy(d => d.DlcAppId))
+            var eligible = new List<SteamDepot>();
+            foreach (var original in parent.Depots.Where(Eligible))
             {
-                var variants = group.ToList();
-                if (variants.Any(d => d.Architecture.Length > 0) && !variants.Any(d => d.Architecture == options.Architecture))
-                    throw new NotSupportedException($"Steam architecture '{options.Architecture}' is unavailable for app {parent.AppId}, depot group {group.Key}.");
-                variants = variants.Where(d => d.Architecture.Length == 0 || d.Architecture == options.Architecture).ToList();
-                if (variants.Any(d => d.Language.Length > 0) && !variants.Any(d => string.Equals(d.Language, language, StringComparison.OrdinalIgnoreCase)))
-                    throw new NotSupportedException($"Steam language '{language}' is unavailable for app {parent.AppId}, depot group {group.Key}.");
-                compatible.AddRange(variants.Where(d => d.Language.Length == 0 || string.Equals(d.Language, language, StringComparison.OrdinalIgnoreCase)));
+                var depot = await ResolveAsync(original);
+                if (Eligible(depot)) eligible.Add(depot);
+            }
+            (List<SteamDepot> Compatible, uint? MissingGroup, bool MissingArchitecture) CheckAvailability(IEnumerable<SteamDepot> depots)
+            {
+                var result = new List<SteamDepot>();
+                foreach (var group in depots.GroupBy(d => d.DlcAppId))
+                {
+                    var variants = group.ToList();
+                    if (variants.Any(d => d.Architecture.Length > 0) && !variants.Any(d => d.Architecture == options.Architecture))
+                        return ([], group.Key, true);
+                    variants = variants.Where(d => d.Architecture.Length == 0 || d.Architecture == options.Architecture).ToList();
+                    if (variants.Any(d => d.Language.Length > 0) && !variants.Any(d => string.Equals(d.Language, language, StringComparison.OrdinalIgnoreCase)))
+                        return ([], group.Key, false);
+                    result.AddRange(variants.Where(d => d.Language.Length == 0 || string.Equals(d.Language, language, StringComparison.OrdinalIgnoreCase)));
+                }
+                return (result, null, false);
+            }
+            List<SteamDepot> compatible;
+            while (true)
+            {
+                var known = CheckAvailability(eligible.Where(d => !NeedsResolution(d)));
+                var all = CheckAvailability(eligible);
+                if (known.MissingGroup is null && all.MissingGroup is null)
+                { compatible = all.Compatible; break; }
+
+                var missing = known.MissingGroup is not null ? known : all;
+                var unresolved = eligible.Where(NeedsResolution);
+                SteamDepot? pending;
+                if (known.MissingGroup is not null)
+                {
+                    // Deferred variants cannot supply selected content: each has an incompatible
+                    // language or architecture. They can still establish an architecture variant
+                    // via inherited architecture/DLC tags. Resolve that evidence before accepting
+                    // or rejecting the selection; its source may instead exclude it entirely.
+                    pending = known.MissingArchitecture ? unresolved.FirstOrDefault(d =>
+                        (d.DlcAppId == 0 || d.DlcAppId == known.MissingGroup)
+                        && (d.Architecture.Length == 0 || d.Architecture == options.Architecture)) : null;
+                }
+                else
+                {
+                    // An unresolved variant must not veto a selection: its source can reveal
+                    // OS/license/architecture restrictions that exclude it from the failing group.
+                    pending = unresolved.FirstOrDefault(d => d.DlcAppId == all.MissingGroup);
+                }
+                if (pending is null)
+                    throw new NotSupportedException(missing.MissingArchitecture
+                        ? $"Steam architecture '{options.Architecture}' is unavailable for app {parent.AppId}, depot group {missing.MissingGroup}."
+                        : $"Steam language '{language}' is unavailable for app {parent.AppId}, depot group {missing.MissingGroup}.");
+                eligible.Remove(pending);
+                var resolved = await ResolveAsync(pending, checkAvailability: true);
+                if (Eligible(resolved)) eligible.Add(resolved);
             }
             foreach (var depot in compatible)
             {

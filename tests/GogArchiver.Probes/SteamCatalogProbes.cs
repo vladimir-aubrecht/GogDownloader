@@ -11,8 +11,79 @@ public static class SteamCatalogProbes
     {
         Probe.Group("Steam primary catalog, inventory and confirmed dependency failures");
         var root = Probe.ScratchDirectory();
-        try { await CatalogAsync(root); }
+        try { await CatalogAsync(root); await CatalogDepartureAsync(root); }
         finally { Directory.Delete(root, true); }
+    }
+
+    private static async Task CatalogDepartureAsync(string root)
+    {
+        var session = new Session { Catalog = new() { [4] = "Root four" }, Owned = [4, 5] };
+        await using var steam = new SteamClient(session);
+        await using var archive = new GameArchiverClient([steam], ownsStores: false);
+        var failed = await archive.SyncLibraryAsync();
+        Probe.Check("departure fixture records the root selection and source metadata failures",
+            failed.Failures.ContainsKey("steam:4") && failed.Failures.ContainsKey("steam:5"));
+        session.Catalog.Clear();
+        session.AppRequests.Clear();
+        var departed = await archive.SyncLibraryAsync(failed);
+        Probe.Check("a metadata-only refresh retains the unverified selection failure outside the catalog",
+            departed.Failures["steam:4"] == failed.Failures["steam:4"] && departed.PrimaryCatalogs["steam"].Count == 0
+            && departed.Games.Single().Key.ProductId == "4" && session.AppRequests.SequenceEqual([4u, 5u])
+            && departed.FailureImpacts["steam:4"].Single().IsStale && departed.FailureImpacts["steam:5"].Single().IsStale);
+        var stillFails = false;
+        try { await steam.GetVersionAsync("4", new()); } catch (IOException) { stillFails = true; }
+        Probe.Check("catalog removal does not repair an explicitly requested download", stillFails);
+        var path = Path.Combine(root, "departed.json");
+        await departed.SaveAsync(path);
+        departed = await ArchiveLibrary.LoadAsync(path);
+        departed = await archive.SyncLibraryAsync(departed);
+        Probe.Check("unverified failure evidence survives serialization and repeated inventory refreshes",
+            departed.Failures["steam:4"] == failed.Failures["steam:4"] && departed.FailureImpacts["steam:4"].Single().IsStale
+            && departed.FailureSummaries["steam:4"] == "Previous download selection failure; not rechecked by this sync.");
+        session.RootMetadataError = true;
+        var metadataFailure = await archive.SyncLibraryAsync(departed);
+        Probe.Check("a later metadata outage retains the unchecked selection alongside its fresh error",
+            metadataFailure.Failures["steam:4"].Contains("Root metadata offline")
+            && metadataFailure.FailureImpacts["steam:4"].Single().IsStale);
+        session.RootMetadataError = false;
+        departed = await archive.SyncLibraryAsync(metadataFailure);
+        Probe.Check("metadata recovery retains the original selection diagnostic, not the resolved metadata error",
+            departed.Failures["steam:4"] == failed.Failures["steam:4"] && departed.FailureImpacts["steam:4"].Single().IsStale);
+        await departed.SaveAsync(path);
+        var output = await CliAsync(path, ["library", "failures", "--details"]);
+        Probe.Check("historical dependency impacts are not presented as newly confirmed catalog blockers",
+            output.Text.Contains("Previously blocked (not rechecked) Root four (steam:4) [Windows/en/64/public]")
+            && !output.Text.Contains("  Blocks ") && output.Text.Contains("Denied app 5"));
+        output = await CliAsync(path, ["library", "sync"], () => new SteamClient(new Session { Catalog = [], Owned = [4, 5] }));
+        Probe.Check("an unverified selection failure remains visible and keeps sync unsuccessful",
+            output.Exit == 1 && output.Text.Contains("Previous download selection failure; not rechecked by this sync.")
+            && output.Text.Contains("Previously blocked (not rechecked)"));
+        session.CatalogError = new IOException("Catalog offline");
+        var outage = await archive.SyncLibraryAsync(departed);
+        Probe.Check("a source outage also retains unverified selection evidence", outage.Failures.ContainsKey("steam:4")
+            && outage.FailureImpacts["steam:4"].Single().IsStale);
+        session.CatalogError = null;
+        session.Recover = true;
+        var metadataRecovered = await archive.SyncLibraryAsync(departed);
+        Probe.Check("successful appinfo clears its own metadata failure without claiming a skipped selection recovered",
+            !metadataRecovered.Failures.ContainsKey("steam:5") && !metadataRecovered.FailureImpacts.ContainsKey("steam:5")
+            && metadataRecovered.Failures.ContainsKey("steam:4") && metadataRecovered.FailureImpacts["steam:4"].Single().IsStale);
+        session.Catalog[4] = "Root four";
+        session.Recover = false;
+        var rechecked = await archive.SyncLibraryAsync(departed);
+        Probe.Check("rechecking a still-broken catalog selection replaces stale evidence",
+            rechecked.FailureImpacts["steam:4"].All(i => !i.IsStale)
+            && !rechecked.FailureSummaries.GetValueOrDefault("steam:4", "").Contains("not rechecked"));
+        session.Recover = true;
+        var recovered = await archive.SyncLibraryAsync(rechecked);
+        Probe.Check("a successful selection recheck clears its historical failure and impacts",
+            recovered.Failures.Count == 0 && recovered.FailureImpacts.Count == 0
+            && recovered.Games.Single(g => g.Key.ProductId == "4").Versions[GameOs.Windows].Manifests.ContainsKey("40"));
+        session.Catalog.Clear();
+        session.Owned.Clear();
+        var removed = await archive.SyncLibraryAsync(departed);
+        Probe.Check("removed ownership is not confused with a metadata-only refresh",
+            removed.Games.Count == 0 && removed.Failures.Count == 0 && removed.FailureImpacts.Count == 0);
     }
 
     private static async Task CatalogAsync(string root)
@@ -158,7 +229,9 @@ public static class SteamCatalogProbes
     {
         public Dictionary<uint, string> Catalog = new() { [1] = "Root one", [4] = "Root four", [8] = "Unlicensed listed game" };
         public Exception? CatalogError;
+        public HashSet<uint> Owned = [1, 2, 3, 4, 5, 6, 7];
         public bool Recover;
+        public bool RootMetadataError;
         public bool MultiPlatform;
         public bool MissingSourceDepot;
         public int CatalogCalls, OwnershipCalls;
@@ -166,7 +239,7 @@ public static class SteamCatalogProbes
         public Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct)
         { CatalogCalls++; if (CatalogError is not null) throw CatalogError; return Task.FromResult<IReadOnlyDictionary<uint, string>>(Catalog); }
         public Task<IReadOnlySet<uint>> GetOwnedAppIdsAsync(CancellationToken ct)
-        { OwnershipCalls++; return Task.FromResult<IReadOnlySet<uint>>(new HashSet<uint> { 1, 2, 3, 4, 5, 6, 7 }); }
+        { OwnershipCalls++; return Task.FromResult<IReadOnlySet<uint>>(Owned); }
         public Task<SteamApp> GetAppAsync(uint id, CancellationToken ct)
         {
             AppRequests.Add(id);
@@ -176,6 +249,7 @@ public static class SteamCatalogProbes
             {
                 1 => Game(1, "Root one", Local(10), Local(11) with { SharedFromApp = 3 }) with { Dlcs = [2] },
                 2 => Game(2, "Expansion", Local(20)) with { Type = "dlc", ParentAppId = 1 },
+                4 when RootMetadataError => throw new IOException("Root metadata offline"),
                 4 when MultiPlatform => Game(4, "Root four", new SteamDepot(40) { SharedFromApp = 5, OsList = "windows" },
                     new SteamDepot(41) { SharedFromApp = 3, OsList = "macos" }) with { Platforms = [GameOs.Windows, GameOs.Mac] },
                 4 => Game(4, "Root four", new SteamDepot(40) { SharedFromApp = 5 }),

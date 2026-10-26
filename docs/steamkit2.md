@@ -50,6 +50,11 @@ an active package license is recorded as a catalog failure, not granted content 
 Keep all successful inventory appinfo and retain old entries for failed products; do not trim
 the saved product collection to the API list. Only catalog roots receive default content
 planning during sync. Non-catalog inventory appinfo does not trigger unrelated depot planning.
+These products are marked in `StoreLibraryResult.MetadataOnlyProducts`, including failed metadata
+refreshes. The aggregator retains their previous selection failures with `IsStale` impacts,
+instead of interpreting successful appinfo as a successful content selection. Fresh metadata
+errors can coexist with this unchecked evidence; recovering appinfo clears its own error.
+Returning to the catalog and passing selection clears the retained selection failure.
 
 Request app access tokens with `PICSGetAccessTokens`, then app info with `PICSGetProductInfo`.
 `AsyncJobMultiple.ResultSet.Complete` and `Failed` must be checked; partial results are not a
@@ -104,6 +109,12 @@ metadata. A failed depot download must still prevent completion.
 Before each shared-app lookup, check the current depot's known OS, license, architecture and
 language constraints. Keep incompatible language/architecture variants in availability checks
 so an unavailable requested variant cannot silently produce a partial archive of common files.
+Defer their source lookups while the requested selection is already available. If a deferred
+variant affects availability, resolve the missing source constraints before rejecting the game:
+an inherited OS/license/architecture restriction can exclude it, or an inherited architecture
+and DLC group can establish the requested variant. A fully resolved set can prove unavailability
+without querying irrelevant variants. Failure to read a source needed for this decision remains
+a failure, never permission to archive just the common files.
 When walking multiple sources, carry the accumulated constraints forward instead of merging
 every hop against the original unconstrained entry. Retain cycle detection and the preference
 for local branch manifests.

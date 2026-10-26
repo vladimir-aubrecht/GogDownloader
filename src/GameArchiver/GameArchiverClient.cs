@@ -40,10 +40,37 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
                     || snapshot.Games.GroupBy(g => g.Key).Any(g => g.Count() > 1))
                     throw new InvalidDataException($"Store {source} returned invalid or duplicate identities.");
                 var games = snapshot.Games.ToList();
+                var failures = snapshot.Failures.ToDictionary();
+                var summaries = snapshot.FailureSummaries.ToDictionary();
+                var impacts = snapshot.FailureImpacts.ToDictionary(f => f.Key, f => f.Value.ToList());
+                foreach (var id in snapshot.MetadataOnlyProducts)
+                {
+                    var key = new GameKey(source, id).ToString();
+                    if (previous is null || !previous.Failures.TryGetValue(key, out var error)
+                        || !failures.ContainsKey(id) && !games.Any(g => g.Key.ProductId == id)) continue;
+                    var uncheckedSelections = previous.FailureImpacts.GetValueOrDefault(key, [])
+                        .Where(i => i.ProductId == id && i.Platform is not null).Select(i => i with { IsStale = true }).ToList();
+                    if (uncheckedSelections.Count == 0) continue;
+                    // Reading appinfo successfully does not establish that its formerly failing
+                    // download selection recovered. Keep that evidence until it is checked again.
+                    if (!failures.ContainsKey(id))
+                    {
+                        failures[id] = uncheckedSelections[0].Detail ?? error;
+                        summaries[id] = "Previous download selection failure; not rechecked by this sync.";
+                    }
+                    if (!impacts.TryGetValue(id, out var retained)) impacts[id] = retained = [];
+                    retained.AddRange(uncheckedSelections.Where(i => !retained.Contains(i)));
+                    foreach (var impact in uncheckedSelections)
+                        if (impact.RequiredProductId is { } dependency && dependency != id && snapshot.Failures.ContainsKey(dependency))
+                        {
+                            if (!impacts.TryGetValue(dependency, out var list)) impacts[dependency] = list = [];
+                            if (!list.Contains(impact)) list.Add(impact);
+                        }
+                }
                 foreach (var old in previous?.Games.Where(g => g.Key.Source == source) ?? [])
-                    if (snapshot.Failures.ContainsKey(old.Key.ProductId) && games.All(g => g.Key != old.Key)) games.Add(old);
+                    if (failures.ContainsKey(old.Key.ProductId) && games.All(g => g.Key != old.Key)) games.Add(old);
                 var names = new Dictionary<string, string>();
-                foreach (var id in snapshot.Failures.Keys)
+                foreach (var id in failures.Keys)
                 {
                     var key = new GameKey(source, id);
                     var name = snapshot.FailureNames.GetValueOrDefault(id);
@@ -52,10 +79,10 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
                     if (!string.IsNullOrWhiteSpace(name)) names[key.ToString()] = name;
                 }
                 return (Source: source, Catalog: snapshot.PrimaryCatalog?.ToHashSet() ?? previous?.PrimaryCatalogs.GetValueOrDefault(source),
-                    Impacts: snapshot.FailureImpacts.Where(f => snapshot.Failures.ContainsKey(f.Key))
+                    Impacts: impacts.Where(f => failures.ContainsKey(f.Key))
                         .ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value),
-                    Games: games, Failures: snapshot.Failures.ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value), Names: names,
-                    Summaries: snapshot.FailureSummaries.Where(f => snapshot.Failures.ContainsKey(f.Key) && !string.IsNullOrWhiteSpace(f.Value))
+                    Games: games, Failures: failures.ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value), Names: names,
+                    Summaries: summaries.Where(f => failures.ContainsKey(f.Key) && !string.IsNullOrWhiteSpace(f.Value))
                         .ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value));
             }
             catch (Exception e) when (e is not OperationCanceledException)

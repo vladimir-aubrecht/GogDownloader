@@ -149,6 +149,61 @@ public static class SteamSharedDepotProbes
         Probe.Check("a genuinely required source cannot be silently skipped",
             await RejectsAsync<SteamAuthenticationException>(() => steam.GetVersionAsync("1", new())));
 
+        // An irrelevant variant is not evidence of language/architecture availability
+        // until source-only OS and license constraints have been accounted for.
+        foreach (var foreign in new[] { new SteamDepot(20) { Language = "german" }, new SteamDepot(20) { Architecture = "32" } })
+        {
+            fixture.Apps[1] = game with { Depots = [Local(10), foreign with { SharedFromApp = 2 }] };
+            foreach (var excluded in new[] { Local(20) with { OsList = "linux" }, Local(20) with { DlcAppId = 5 } })
+            {
+                fixture.Apps[2] = new(2, "Restricted source") { Depots = [excluded] };
+                fixture.AppRequests.Clear();
+                version = await steam.GetVersionAsync("1", new());
+                Probe.Check("source-only OS/license restrictions cannot make a valid selection unavailable",
+                    version.Manifests.Keys.SequenceEqual(["10"]) && fixture.AppRequests.SequenceEqual([1u, 2u]));
+            }
+        }
+        fixture.Apps[1] = game with { Depots = [Local(10), new(20) { SharedFromApp = 2, Language = "german" }] };
+        fixture.Apps[2] = new(2, "Other architecture") { Depots = [Local(20) with { Architecture = "32" }] };
+        // Include a known 64-bit variant so architecture availability itself is unambiguous.
+        fixture.Apps[1] = fixture.Apps[1] with { Depots = [Local(10) with { Architecture = "64" }, fixture.Apps[1].Depots[1]] };
+        version = await steam.GetVersionAsync("1", new());
+        Probe.Check("source-only architecture restrictions cannot veto the selected language",
+            version.Manifests.Keys.SequenceEqual(["10"]));
+        fixture.Apps[2] = new(2, "Applicable language variant") { Depots = [Local(20) with { Architecture = "64" }] };
+        Probe.Check("a resolved applicable foreign language still prevents an incomplete common-files-only archive",
+            await RejectsAsync<NotSupportedException>(() => steam.GetVersionAsync("1", new())));
+        fixture.Apps.Remove(2);
+        Probe.Check("unresolved availability is reported as a metadata failure, not a partial success",
+            await RejectsAsync<SteamAuthenticationException>(() => steam.GetVersionAsync("1", new())));
+        fixture.Apps[2] = new(2, "Linux intermediate") { Depots = [new(20) { SharedFromApp = 3, OsList = "linux" }] };
+        fixture.AppRequests.Clear();
+        version = await steam.GetVersionAsync("1", new());
+        Probe.Check("availability resolution stops once an intermediate constraint excludes the variant",
+            version.Manifests.Keys.SequenceEqual(["10"]) && !fixture.AppRequests.Contains(3));
+
+        fixture.Apps[1] = game with { Depots = [Local(10) with { Language = "english" },
+            Local(11) with { Language = "german", Architecture = "32" }, new(20) { SharedFromApp = 2, Language = "german" }] };
+        fixture.Apps[2] = new(2, "64-bit source") { Depots = [Local(20) with { Architecture = "64" }] };
+        version = await steam.GetVersionAsync("1", new());
+        Probe.Check("an inherited architecture can establish availability alongside common English content",
+            version.Manifests.Keys.SequenceEqual(["10"]));
+        fixture.Apps[1] = fixture.Apps[1] with { Depots = [Local(10) with { Language = "english" },
+            Local(11) with { Language = "german", Architecture = "32" },
+            new(20) { SharedFromApp = 2, Language = "german", Architecture = "64" }] };
+        fixture.Apps[2] = new(2, "Linux source") { Depots = [Local(20) with { OsList = "linux" }] };
+        Probe.Check("an unresolved foreign-OS variant cannot falsely establish architecture availability",
+            await RejectsAsync<NotSupportedException>(() => steam.GetVersionAsync("1", new())));
+        fixture.Owned = [1, 4];
+        fixture.Apps[4] = new(4, "Owned expansion") { Type = "dlc", ParentAppId = 1 };
+        fixture.Apps[1] = game with { Depots = [Local(10) with { Language = "english", Architecture = "64" },
+            Local(11) with { DlcAppId = 4, Language = "english" }, Local(12) with { DlcAppId = 4, Language = "german", Architecture = "32" },
+            new(20) { SharedFromApp = 2, Language = "german", Architecture = "64" }] };
+        fixture.Apps[2] = new(2, "Expansion source") { Depots = [Local(20) with { DlcAppId = 4 }] };
+        version = await steam.GetVersionAsync("1", new());
+        Probe.Check("inherited DLC grouping can resolve architecture availability in another depot group",
+            version.Manifests.Keys.ToHashSet().SetEquals(["10", "11"]));
+
         fixture.Owned = [1, 4];
         fixture.Apps[1] = game with { Depots = [Local(10), new(20) { SharedFromApp = 2 },
             Local(21) with { DlcAppId = 4, Language = "german", Architecture = "32" }] };

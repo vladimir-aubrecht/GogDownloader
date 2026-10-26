@@ -5,7 +5,8 @@ namespace GameArchiver.Core;
 public static class ArchivePublisher
 {
     public static async Task PublishAsync(string staging, string archivePath, int compressionThreads,
-        bool verify = true, IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default)
+        bool verify = true, IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default,
+        IReadOnlyDictionary<string, UnixFileMode>? unixModes = null)
     {
         var zip = staging + ".zip";
         if (File.Exists(zip)) File.Delete(zip);
@@ -13,12 +14,13 @@ public static class ArchivePublisher
         {
             await ParallelZipWriter.CreateAsync(staging, zip, compressionThreads,
                 progress: new InlineProgress<ZipProgress>(p => progress?.Report(
-                    new("zip", p.BytesRead, p.BytesTotal, p.EntriesDone, p.EntriesTotal))), ct: ct);
+                    new("zip", p.BytesRead, p.BytesTotal, p.EntriesDone, p.EntriesTotal))), ct: ct, unixModes: unixModes);
             if (verify)
                 await ArchiveVerifier.VerifyAsync(zip, staging, new InlineProgress<ZipProgress>(p => progress?.Report(
                     new("check", p.BytesRead, p.BytesTotal, p.EntriesDone, p.EntriesTotal))), ct);
             ct.ThrowIfCancellationRequested();
             ArchiveStorage.PublishArchive(zip, archivePath, ArchiveStorage.SameVolume(zip, archivePath), progress, ct);
+            progress?.Report(new("publish", Files: 1, TotalFiles: 1));
         }
         finally
         {

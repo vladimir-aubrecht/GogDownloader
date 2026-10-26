@@ -15,7 +15,10 @@ public sealed record InstallerEntry(
     uint Crc32,
     bool Deflated,
     bool IsSymlink,
-    bool IsDirectory);
+    bool IsDirectory)
+{
+    public UnixFileMode? UnixMode { get; init; }
+}
 
 public sealed class InstallerFormatException(string message) : Exception(message);
 
@@ -57,35 +60,62 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
         if (_archiveStart < 0)
             throw new InstallerFormatException("No ZIP payload found in the first 2 MiB of the installer.");
 
-        // The end of central directory is at most 22 bytes plus a comment; 100 covers it and the
-        // zip64 locator that may sit in front of it.
-        var tail = await ReadRangeAsync(_fileSize - 100, 100, ct);
-
-        var eocd = IndexOfSignature(tail, EndOfCentralDirectory);
-        if (eocd < 0) throw new InstallerFormatException("No end-of-central-directory record.");
-
-        var records = BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan((int)eocd + 10));
+        // Include the maximum ZIP comment and the ZIP64 locator, not just a fixed 100 bytes.
+        var tailSize = (int)Math.Min(_fileSize, 66_000);
+        var tail = await ReadRangeAsync(_fileSize - tailSize, tailSize, ct);
+        var eocd = -1;
+        for (var at = tail.Length - 22; at >= 0; at--)
+            if (BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(at)) == EndOfCentralDirectory
+                && at + 22 + BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(at + 20)) == tail.Length)
+            { eocd = at; break; }
+        if (eocd < 0) throw new InstallerFormatException("No complete end-of-central-directory record.");
+        if (BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(eocd + 4)) != 0
+            || BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(eocd + 6)) != 0
+            || BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(eocd + 8)) != BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(eocd + 10)))
+            throw new InstallerFormatException("Split installer ZIPs are unsupported.");
+        var directoryEnd = _fileSize - tailSize + eocd - _archiveStart;
+        long records = BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(eocd + 10));
         long directorySize = BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan((int)eocd + 12));
         long directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan((int)eocd + 16));
 
-        if (directoryOffset == uint.MaxValue)
+        var locator = eocd - 20;
+        var hasLocator = locator >= 0 && BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator)) == Zip64Locator;
+        // Exactly 65,535 entries still fit in a classic ZIP; validate the full directory.
+        if (directoryOffset == uint.MaxValue || directorySize == uint.MaxValue || records == ushort.MaxValue && hasLocator)
         {
-            var locator = IndexOfSignature(tail, Zip64Locator);
-            if (locator < 0) throw new InstallerFormatException("Zip64 archive without a locator.");
+            if (locator < 0 || BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator)) != Zip64Locator
+                || BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator + 4)) != 0
+                || BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator + 16)) != 1)
+                throw new InstallerFormatException("Missing or invalid ZIP64 locator.");
 
             var zip64Offset = BinaryPrimitives.ReadInt64LittleEndian(tail.AsSpan((int)locator + 8));
+            if (zip64Offset < 0 || zip64Offset > directoryEnd - 20 - 56)
+                throw new InstallerFormatException("ZIP64 end record is outside the installer ZIP.");
             var zip64 = await ReadRangeAsync(_archiveStart + zip64Offset, 56, ct);
 
-            if (BinaryPrimitives.ReadUInt32LittleEndian(zip64) != Zip64EndOfCentralDirectory)
+            if (zip64.Length != 56 || BinaryPrimitives.ReadUInt32LittleEndian(zip64) != Zip64EndOfCentralDirectory
+                || BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(4)) < 44
+                || BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(4)) > directoryEnd - 20 - zip64Offset - 12
+                || BinaryPrimitives.ReadUInt32LittleEndian(zip64.AsSpan(16)) != 0
+                || BinaryPrimitives.ReadUInt32LittleEndian(zip64.AsSpan(20)) != 0
+                || BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(24)) != BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(32)))
                 throw new InstallerFormatException("Zip64 end-of-central-directory not where the locator says.");
 
-            records = (ushort)Math.Min(BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(32)), ushort.MaxValue);
-            directorySize = BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(40));
-            directoryOffset = BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(48));
+            var actualCount = BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(32));
+            var actualSize = BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(40));
+            var actualOffset = BinaryPrimitives.ReadInt64LittleEndian(zip64.AsSpan(48));
+            if (records != ushort.MaxValue && records != actualCount || directorySize != uint.MaxValue && directorySize != actualSize
+                || directoryOffset != uint.MaxValue && directoryOffset != actualOffset)
+                throw new InstallerFormatException("ZIP and ZIP64 end records disagree.");
+            records = actualCount; directorySize = actualSize; directoryOffset = actualOffset;
+            directoryEnd = zip64Offset;
         }
 
+        if (records < 0 || directorySize < 0 || directorySize > int.MaxValue || records > directorySize / 46
+            || directoryOffset < 0 || directoryOffset > directoryEnd || directorySize > directoryEnd - directoryOffset)
+            throw new InstallerFormatException("Invalid installer ZIP directory size, count or offset.");
         var directory = await ReadRangeAsync(_archiveStart + directoryOffset, (int)directorySize, ct);
-        Entries = ParseCentralDirectory(directory, records, directoryOffset);
+        Entries = ParseCentralDirectory(directory, (int)records, directoryOffset);
     }
 
     /// <summary>
@@ -95,12 +125,12 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
     /// </summary>
     private static List<InstallerEntry> ParseCentralDirectory(byte[] data, int records, long directoryOffset)
     {
-        var headers = new List<(string Name, long LocalOffset, long CompressedSize, long Size, uint Crc, bool Deflated, bool Symlink, bool Directory)>(records);
+        var headers = new List<(string Name, long LocalOffset, long CompressedSize, long Size, uint Crc, bool Deflated, bool Symlink, bool Directory, UnixFileMode? Mode)>(records);
 
         var position = 0;
-        for (var i = 0; i < records && position + 46 <= data.Length; i++)
+        for (var i = 0; i < records; i++)
         {
-            if (BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(position)) != CentralHeader)
+            if (data.Length - position < 46 || BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(position)) != CentralHeader)
                 throw new InstallerFormatException("Malformed central directory.");
 
             var method = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(position + 10));
@@ -113,6 +143,9 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
             var externalAttributes = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(position + 38));
             long localOffset = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(position + 42));
 
+            if (data.Length - position < 46 + nameLength + extraLength + commentLength
+                || method is not 0 and not 8 || BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(position + 34)) != 0)
+                throw new InstallerFormatException("Truncated or unsupported installer ZIP entry.");
             var name = Encoding.UTF8.GetString(data, position + 46, nameLength);
             var extra = data.AsSpan(position + 46 + nameLength, extraLength);
 
@@ -120,6 +153,8 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
             if (size == uint.MaxValue || compressed == uint.MaxValue || localOffset == uint.MaxValue)
             {
                 var zip64 = FindExtraField(extra, 0x0001);
+                var needed = (size == uint.MaxValue ? 8 : 0) + (compressed == uint.MaxValue ? 8 : 0) + (localOffset == uint.MaxValue ? 8 : 0);
+                if (zip64.Length < needed) throw new InstallerFormatException("Truncated ZIP64 entry fields.");
                 var cursor = 0;
                 if (size == uint.MaxValue) { size = BinaryPrimitives.ReadInt64LittleEndian(zip64[cursor..]); cursor += 8; }
                 if (compressed == uint.MaxValue) { compressed = BinaryPrimitives.ReadInt64LittleEndian(zip64[cursor..]); cursor += 8; }
@@ -130,10 +165,17 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
             var mode = externalAttributes >> 16;
             var symlink = (mode & 0xF000) == 0xA000;
 
-            headers.Add((name, localOffset, compressed, size, crc, method == 8, symlink, name.EndsWith('/')));
+            if (size < 0 || compressed < 0 || localOffset < 0 || localOffset > directoryOffset - 30)
+                throw new InstallerFormatException("Invalid installer ZIP entry size or offset.");
+            var unix = data[position + 5] == 3;
+            headers.Add((name, localOffset, compressed, size, crc, method == 8, symlink, name.EndsWith('/'),
+                unix ? (UnixFileMode?)(mode & 0x1ff) : null));
             position += 46 + nameLength + extraLength + commentLength;
         }
 
+        if (position != data.Length) throw new InstallerFormatException("Installer ZIP directory size/count mismatch.");
+        // Central directory order need not match the physical local-header order.
+        headers.Sort((a, b) => a.LocalOffset.CompareTo(b.LocalOffset));
         var entries = new List<InstallerEntry>(headers.Count);
         for (var i = 0; i < headers.Count; i++)
         {
@@ -142,10 +184,12 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
             // Data ends where the next local header begins; the last entry ends at the directory.
             var nextStart = i + 1 < headers.Count ? headers[i + 1].LocalOffset : directoryOffset;
             var dataOffset = nextStart - header.CompressedSize;
+            if (dataOffset < header.LocalOffset + 30)
+                throw new InstallerFormatException("Overlapping installer ZIP entries.");
 
             entries.Add(new InstallerEntry(
                 header.Name, dataOffset, header.CompressedSize, header.Size,
-                header.Crc, header.Deflated, header.Symlink, header.Directory));
+                header.Crc, header.Deflated, header.Symlink, header.Directory) { UnixMode = header.Mode });
         }
 
         return entries;
@@ -158,6 +202,7 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
         {
             var id = BinaryPrimitives.ReadUInt16LittleEndian(extra[position..]);
             var size = BinaryPrimitives.ReadUInt16LittleEndian(extra[(position + 2)..]);
+            if (size > extra.Length - position - 4) throw new InstallerFormatException("Truncated ZIP extra field.");
             if (id == wanted) return extra.Slice(position + 4, size);
             position += 4 + size;
         }
@@ -245,7 +290,8 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
     private async Task<byte[]> ReadRangeAsync(
         long from, int length, CancellationToken ct, IProgress<long>? bytes = null)
     {
-        from = Math.Max(from, 0);
+        if (from < 0 || length < 0) throw new InstallerFormatException("Invalid installer ZIP range.");
+        if (length == 0) return [];
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(from, from + length - 1);
@@ -253,9 +299,13 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
-        // Any ranged response tells us how long the installer is.
-        if (_fileSize == 0 && response.Content.Headers.ContentRange?.Length is { } total)
-            _fileSize = total;
+        var range = response.Content.Headers.ContentRange;
+        if (response.StatusCode != System.Net.HttpStatusCode.PartialContent || range?.Length is not > 0
+            || range.From != from || range.To != Math.Min(from + length - 1, range.Length.Value - 1)
+            || _fileSize != 0 && _fileSize != range.Length.Value)
+            throw new InstallerFormatException("The installer server did not return the requested byte range.");
+        _fileSize = range.Length.Value;
+        var expected = range.To!.Value - from + 1;
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var data = new MemoryStream();
@@ -264,9 +314,11 @@ public sealed class MojoSetupReader(HttpClient http, string url, RateLimiter? li
         while ((read = await stream.WithStallTimeoutAsync(buffer, ct)) > 0)
         {
             await _limiter.ConsumeAsync(read, ct);
+            if (data.Length + read > expected) throw new InstallerFormatException("Installer range is too long.");
             data.Write(buffer, 0, read);
             bytes?.Report(read);
         }
+        if (data.Length != expected) throw new InstallerFormatException("Truncated installer ZIP range.");
         return data.ToArray();
     }
 

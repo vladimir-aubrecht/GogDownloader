@@ -13,7 +13,10 @@ namespace GameArchiver.Core;
 public static class ZipFileEditor
 {
     public sealed record PreparedFile(string CompressedPath, long Size, long CompressedSize,
-        uint Crc, string Md5, string Sha1, DateTime Modified);
+        uint Crc, string Md5, string Sha1, DateTime Modified)
+    {
+        public UnixFileMode? UnixMode { get; init; }
+    }
 
     private sealed record Input(ParallelZipWriter.Entry Entry, long DataOffset);
 
@@ -82,7 +85,8 @@ public static class ZipFileEditor
             ct.ThrowIfCancellationRequested();
             return new(compressedPath, size, new FileInfo(compressedPath).Length, crc.Value,
                 Convert.ToHexString(md5.GetHashAndReset()).ToLowerInvariant(),
-                Convert.ToHexString(sha1.GetHashAndReset()).ToLowerInvariant(), File.GetLastWriteTime(filePath));
+                Convert.ToHexString(sha1.GetHashAndReset()).ToLowerInvariant(), File.GetLastWriteTime(filePath))
+                { UnixMode = !OperatingSystem.IsWindows() ? File.GetUnixFileMode(filePath) : null };
         }
         catch { if (created) File.Delete(compressedPath); throw; }
     }
@@ -148,8 +152,13 @@ public static class ZipFileEditor
         foreach (var change in changes)
         {
             ct.ThrowIfCancellationRequested();
+            var original = originals.FirstOrDefault(e => e.Entry.Name == change.EntryPath)?.Entry;
             var entry = new ParallelZipWriter.Entry("", change.EntryPath, false, replacement.Size, replacement.Modified)
-            { CompressedSize = replacement.CompressedSize, Crc = replacement.Crc, LocalHeaderOffset = output.Position };
+            {
+                CompressedSize = replacement.CompressedSize, Crc = replacement.Crc, LocalHeaderOffset = output.Position,
+                VersionMadeBy = original?.VersionMadeBy ?? (replacement.UnixMode is not null ? UnixArchivePermissions.VersionMadeBy : (ushort)45),
+                ExternalAttributes = original?.ExternalAttributes ?? (replacement.UnixMode is { } mode ? UnixArchivePermissions.Attributes(mode) : null),
+            };
             ParallelZipWriter.WriteLocalHeader(output, entry, zip64Threshold);
             compressed.Position = 0;
             await CopyAsync(compressed, replacement.CompressedSize);
@@ -197,6 +206,7 @@ public static class ZipFileEditor
                 throw new InvalidDataException($"Unsupported or inconsistent ZIP entry: {h.Name}");
             input.Position = h.CentralHeaderOffset; input.ReadExactly(raw);
             var flags = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(8));
+            var madeBy = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(4));
             // Deflate options, data descriptors and UTF-8 are supported; encryption is not.
             if ((flags & ~0x080e) != 0 || BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(34)) != 0)
                 throw new InvalidDataException($"Encrypted, split or unsupported ZIP entry: {h.Name}");
@@ -245,7 +255,7 @@ public static class ZipFileEditor
                 || h.CompressedSize > headers[0].CentralHeaderOffset - dataOffset)
                 throw new InvalidDataException($"ZIP payload is outside the content area: {h.Name}");
             result.Add(new(new("", h.Name, h.IsDirectory, h.Size, e.LastWriteTime.DateTime)
-            { OriginalMethod = h.Method, ExternalAttributes = (uint)e.ExternalAttributes, Crc = h.Crc, CompressedSize = h.CompressedSize }, dataOffset));
+            { OriginalMethod = h.Method, VersionMadeBy = madeBy, ExternalAttributes = (uint)e.ExternalAttributes, Crc = h.Crc, CompressedSize = h.CompressedSize }, dataOffset));
         }
         if (result.Any(e => HasFileParent(e.Entry.Name.TrimEnd('/'), files)))
             throw new InvalidDataException("ZIP contains conflicting file and directory paths.");

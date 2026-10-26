@@ -378,8 +378,10 @@ Build API outages are reported as errors rather than a missing Galaxy depot.
 `--limit-rate` applies to depot content and both installer paths, including Linux installer
 metadata reads. All transfers share the same bandwidth budget and can be cancelled while waiting.
 Archive verification compares content with staging and with the CRC recorded in the ZIP.
-`verify --deep --fix` checks all payloads after repairing headers. When an update renames an
-archive, the previous archive is kept until the new manifest has been saved successfully.
+`verify --deep --fix` checks all payloads after repairing headers. Default verification also rejects
+malformed or incomplete central directories. GOG updates preserve the previous archive until the
+new manifest commits, including when the version label is unchanged: a colliding filename gets a
+unique `(revision-<id>)` suffix. Failed or cancelled publication removes only the uncommitted ZIP.
 
 Installer build identities include the selected installer's language, version and size. `diff`
 uses the backup's requested language when comparing installer versions; older installer identities
@@ -388,7 +390,14 @@ are refreshed once. The metadata and archive name follow the live installer actu
 Directory and chained symlinks are copied as ordinary files and directories. Missing targets and
 cycles fail before an archive is published. Existing archives produced with missing link content
 need a download with `--force`. Generation 1 depot files and Linux installer entries stream into
-staging with bounded buffers, including files larger than 2 GiB.
+staging with bounded buffers, including files larger than 2 GiB. Linux installers with more than
+65,535 entries use the complete ZIP64 inventory.
+
+Archives preserve ordinary Unix rwx permissions from Linux installers and executable flags from
+GOG and Steam depots, even when downloading on Windows. Dereferenced links inherit the target's
+permissions; archive edits retain permissions on replaced files and their backups. Older Linux/macOS
+backups are rebuilt once on the next download (`ContentRevision: 2`), reusing verified depot files
+where possible. Existing Windows revision-1 backups do not need a permissions rebuild.
 
 ## Original GOG CLI commands
 

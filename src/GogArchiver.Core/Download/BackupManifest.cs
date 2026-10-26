@@ -9,16 +9,17 @@ public sealed record BackedUpFile(string Md5, long Size);
 /// <summary>One platform of one game: one zip.</summary>
 public sealed record PlatformBackup
 {
-    public const int CurrentContentRevision = 1;
+    public const int CurrentContentRevision = 2;
 
     /// <summary>
     /// Revision 1 applies DLC file overrides and binds installer caches to their source.
+    /// Revision 2 preserves Unix modes and reads the complete Linux ZIP64 file inventory.
     /// Older DLC/Windows installer backups may contain wrong bytes despite valid ZIP checksums.
     /// </summary>
     public int ContentRevision { get; init; }
 
-    public bool RequiresContentRefresh(GamePlatform platform) => ContentRevision < CurrentContentRevision
-        && (Dlcs.Count > 0 || (platform == GamePlatform.Windows
+    public bool RequiresContentRefresh(GamePlatform platform) => platform != GamePlatform.Windows && ContentRevision < 2
+        || ContentRevision < 1 && (Dlcs.Count > 0 || (platform == GamePlatform.Windows
             && BuildId.StartsWith("installer-", StringComparison.Ordinal)));
 
     public bool HasArchive(string gameDirectory)

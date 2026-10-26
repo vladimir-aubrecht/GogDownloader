@@ -49,8 +49,8 @@ public static class ZipInspector
     {
         using var file = File.OpenRead(zipPath);
 
-        var (offset, size) = LocateCentralDirectory(file);
-        if (size > int.MaxValue)
+        var (offset, size, count) = LocateCentralDirectory(file);
+        if (size > int.MaxValue || count > int.MaxValue || count > size / 46)
             throw new ZipFormatException($"Central directory of {size} bytes is implausible.");
 
         file.Position = offset;
@@ -60,9 +60,10 @@ public static class ZipInspector
         var entries = new List<ZipEntryHeader>();
         var at = 0;
 
-        while (at + 46 <= directory.Length
-               && BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(at)) == CentralHeaderSignature)
+        for (long i = 0; i < count; i++)
         {
+            if (directory.Length - at < 46 || BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(at)) != CentralHeaderSignature)
+                throw new ZipFormatException("Missing or malformed central directory entry.");
             var method = BinaryPrimitives.ReadUInt16LittleEndian(directory.AsSpan(at + 10));
             var crc = BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(at + 16));
             long compressed = BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(at + 20));
@@ -84,6 +85,9 @@ public static class ZipInspector
             if (uncompressed == uint.MaxValue || compressed == uint.MaxValue || localOffset == uint.MaxValue)
             {
                 var zip64 = FindExtra(extra, 0x0001);
+                var needed = (uncompressed == uint.MaxValue ? 8 : 0) + (compressed == uint.MaxValue ? 8 : 0)
+                    + (localOffset == uint.MaxValue ? 8 : 0);
+                if (zip64.Length < needed) throw new ZipFormatException("Missing or truncated ZIP64 entry fields.");
                 var read = 0;
 
                 if (uncompressed == uint.MaxValue && zip64.Length >= read + 8)
@@ -102,52 +106,77 @@ public static class ZipInspector
                     localOffset = BinaryPrimitives.ReadInt64LittleEndian(zip64[read..]);
             }
 
+            if (compressed < 0 || uncompressed < 0 || localOffset < 0 || localOffset > offset - 30
+                || BinaryPrimitives.ReadUInt16LittleEndian(directory.AsSpan(at + 34)) != 0)
+                throw new ZipFormatException("Invalid ZIP entry size, offset or disk number.");
             entries.Add(new ZipEntryHeader(name, method, compressed, uncompressed, crc, offset + at, localOffset));
             at += 46 + nameLength + extraLength + commentLength;
         }
 
+        // An optional central-directory digital signature is the only permitted trailer.
+        if (at != directory.Length && !(directory.Length - at >= 6
+            && BinaryPrimitives.ReadUInt32LittleEndian(directory.AsSpan(at)) == 0x05054b50
+            && directory.Length - at == 6 + BinaryPrimitives.ReadUInt16LittleEndian(directory.AsSpan(at + 4))))
+            throw new ZipFormatException("Central directory size/count does not match its entries.");
         return entries;
     }
 
-    private static (long Offset, long Size) LocateCentralDirectory(FileStream file)
+    private static (long Offset, long Size, long Count) LocateCentralDirectory(FileStream file)
     {
         var tailLength = (int)Math.Min(TailLength, file.Length);
         var tail = new byte[tailLength];
         file.Position = file.Length - tailLength;
         file.ReadExactly(tail);
 
-        var end = LastIndexOf(tail, EndOfCentralDirectorySignature)
-                  ?? throw new ZipFormatException("No end-of-central-directory record: not a ZIP, or truncated.");
-
+        var end = -1;
+        for (var i = tail.Length - 22; i >= 0; i--)
+            if (BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(i)) == EndOfCentralDirectorySignature
+                && i + 22 + BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(i + 20)) == tail.Length)
+            { end = i; break; }
+        if (end < 0) throw new ZipFormatException("No complete end-of-central-directory record.");
+        var endOffset = file.Length - tailLength + end;
+        if (BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(end + 4)) != 0
+            || BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(end + 6)) != 0
+            || BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(end + 8)) != BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(end + 10)))
+            throw new ZipFormatException("Split ZIP archives are unsupported.");
+        long count = BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(end + 10));
         long size = BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(end + 12));
         long offset = BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(end + 16));
 
-        if (size != uint.MaxValue && offset != uint.MaxValue) return (offset, size);
-
-        // Zip64: the locator sits immediately before the end record and points at the real one.
-        var locator = LastIndexOf(tail, Zip64LocatorSignature)
-                      ?? throw new ZipFormatException("Zip64 sizes without a Zip64 locator.");
-
-        var zip64End = BinaryPrimitives.ReadInt64LittleEndian(tail.AsSpan(locator + 8));
-
-        var record = new byte[56];
-        file.Position = zip64End;
-        file.ReadExactly(record);
-
-        if (BinaryPrimitives.ReadUInt32LittleEndian(record) != Zip64EndSignature)
-            throw new ZipFormatException("The Zip64 locator does not point at an end record.");
-
-        return (BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(48)),
-                BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(40)));
-    }
-
-    private static int? LastIndexOf(byte[] haystack, uint signature)
-    {
-        for (var i = haystack.Length - 4; i >= 0; i--)
-            if (BinaryPrimitives.ReadUInt32LittleEndian(haystack.AsSpan(i)) == signature)
-                return i;
-
-        return null;
+        var locator = end - 20;
+        var hasLocator = locator >= 0 && BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator)) == Zip64LocatorSignature;
+        // Classic ZIPs may contain exactly 65,535 records without a ZIP64 locator.
+        // A larger inventory cannot pass the exact count/size validation below.
+        if (size == uint.MaxValue || offset == uint.MaxValue || count == ushort.MaxValue && hasLocator)
+        {
+            if (locator < 0 || BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator)) != Zip64LocatorSignature
+                || BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator + 4)) != 0
+                || BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(locator + 16)) != 1)
+                throw new ZipFormatException("Missing or invalid ZIP64 locator.");
+            var zip64End = BinaryPrimitives.ReadInt64LittleEndian(tail.AsSpan(locator + 8));
+            if (zip64End < 0 || zip64End > endOffset - 20 - 56)
+                throw new ZipFormatException("ZIP64 end record is outside the archive.");
+            var record = new byte[56];
+            file.Position = zip64End;
+            file.ReadExactly(record);
+            var recordSize = BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(4));
+            if (BinaryPrimitives.ReadUInt32LittleEndian(record) != Zip64EndSignature || recordSize < 44
+                || recordSize > endOffset - 20 - zip64End - 12
+                || BinaryPrimitives.ReadUInt32LittleEndian(record.AsSpan(16)) != 0
+                || BinaryPrimitives.ReadUInt32LittleEndian(record.AsSpan(20)) != 0
+                || BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(24)) != BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(32)))
+                throw new ZipFormatException("Invalid or split ZIP64 end record.");
+            var actualCount = BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(32));
+            var actualSize = BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(40));
+            var actualOffset = BinaryPrimitives.ReadInt64LittleEndian(record.AsSpan(48));
+            if (count != ushort.MaxValue && count != actualCount || size != uint.MaxValue && size != actualSize
+                || offset != uint.MaxValue && offset != actualOffset)
+                throw new ZipFormatException("ZIP and ZIP64 end records disagree.");
+            count = actualCount; size = actualSize; offset = actualOffset; endOffset = zip64End;
+        }
+        if (count < 0 || size < 0 || offset < 0 || offset > endOffset || size > endOffset - offset)
+            throw new ZipFormatException("Central directory is outside the archive.");
+        return (offset, size, count);
     }
 
     /// <summary>The payload of one extra field, or empty when the archive has no such field.</summary>

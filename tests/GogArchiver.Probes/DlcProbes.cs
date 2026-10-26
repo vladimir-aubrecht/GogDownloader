@@ -152,9 +152,10 @@ public static class DlcProbes
         await legacy.SaveAsync(Path.Combine(root, game.DirectoryName));
         var legacyDiff = await Cli("diff", "space_age", "--slugs", "--snapshot", snapshotPath, "--out", root);
         Probe.Check("diff requests a pre-fix DLC archive even when it records every DLC", legacyDiff.Output.Trim() == "factorio");
+        var refreshed = await downloader.RunAsync(stale, options);
         Probe.Check("the stale-link completion guard also refreshes pre-fix DLC archives",
-            (await downloader.RunAsync(stale, options)).Outcome == DownloadOutcome.Completed);
-        File.Delete(repaired.ArchivePath!);
+            refreshed.Outcome == DownloadOutcome.Completed);
+        File.Delete(refreshed.ArchivePath!);
         var gone = await Cli("diff", "space_age", "--slugs", "--snapshot", snapshotPath, "--out", root);
         Probe.Check("diff notices a missing archive despite a completion manifest", gone.Output.Trim() == "factorio");
     }

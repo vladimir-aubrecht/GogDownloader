@@ -133,8 +133,10 @@ public static class InstallerCacheProbes
             var directory = Path.Combine(options.OutputRoot, game.DirectoryName);
             var manifest = (await BackupManifest.LoadAsync(directory))!;
             manifest.Platforms[GamePlatform.Windows] = manifest.Platforms[GamePlatform.Windows] with { ContentRevision = 0 };
-            Probe.Check("old Linux installer backups do not require the Windows cache repair",
-                !manifest.Platforms[GamePlatform.Windows].RequiresContentRefresh(GamePlatform.Linux));
+            Probe.Check("old Linux installers need the ZIP64 inventory and permissions refresh",
+                manifest.Platforms[GamePlatform.Windows].RequiresContentRefresh(GamePlatform.Linux));
+            Probe.Check("revision-1 Windows installers do not need a Unix permissions rebuild",
+                !(manifest.Platforms[GamePlatform.Windows] with { ContentRevision = 1 }).RequiresContentRefresh(GamePlatform.Windows));
             await manifest.SaveAsync(directory);
             result = await downloader.RunAsync(game, options with { Clean = false });
             Probe.Check("an older installer backup is refreshed once without --force", result.Outcome == DownloadOutcome.Completed);

@@ -5,6 +5,7 @@ public sealed record ContentLink(string Path, string Target);
 public sealed record ContentLayout(List<ContentEntry> Files, List<string> Directories, List<ContentLink> Links)
 {
     public long LinkBytes { get; init; }
+    public Dictionary<string, string> DirectoryTargets { get; init; } = [];
 }
 
 
@@ -72,6 +73,7 @@ public static class ContentLinks
 
         var copies = new Dictionary<string, (ContentLink Link, long Size)>(comparer);
         var directories = plan.Directories.ToHashSet(comparer);
+        var directoryTargets = new Dictionary<string, string>(plan.DirectoryTargets, comparer);
         void Expand(Node node, string destination, HashSet<Node> visiting)
         {
             node = Follow(node, []);
@@ -83,6 +85,7 @@ public static class ContentLinks
             if (!visiting.Add(node))
                 throw new InvalidOperationException($"Cyclic manifest directory link at {destination}");
             directories.Add(destination);
+            directoryTargets[destination] = node.Path;
             foreach (var (name, child) in node.Children)
                 Expand(child, $"{destination}/{name}", visiting);
             visiting.Remove(node);
@@ -94,6 +97,7 @@ public static class ContentLinks
         {
             Links = copies.Values.Select(c => c.Link).ToList(),
             Directories = directories.ToList(),
+            DirectoryTargets = directoryTargets,
             LinkBytes = copies.Values.Sum(c => c.Size),
         };
     }

@@ -22,6 +22,7 @@ await ProviderLayoutProbes.RunAsync();
 await ArchiveFileProbes.RunAsync();
 await ReviewProbes.RunAsync();
 await ArchiveSafetyProbes.RunAsync();
+await ArchiveRegressionProbes.RunAsync();
 await DlcProbes.RunAsync();
 await DepotOverlayProbes.RunAsync();
 await InstallerCacheProbes.RunAsync();

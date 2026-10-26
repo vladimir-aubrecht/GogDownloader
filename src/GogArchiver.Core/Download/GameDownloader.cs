@@ -1,3 +1,4 @@
+using GameArchiver.Core;
 using System.Buffers;
 using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
@@ -288,43 +289,64 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
             var (launchExecutable, launchParameters) =
                 await StartScript.ResolveLaunchAsync(staging, options.Platform, ct);
 
-            var archivePath = Path.Combine(gameDirectory, archiveName);
-            await GameArchiver.Core.ArchivePublisher.PublishAsync(staging, archivePath,
-                options.MaxCompressionThreads, options.VerifyArchive,
-                new GameArchiver.Core.InlineProgress<GameArchiver.Core.ArchiveProgress>(p => progress?.Report(
-                    new DownloadProgress(p.Phase, p.Bytes, p.TotalBytes, p.Files, p.TotalFiles))), ct);
+            var unixModes = new Dictionary<string, UnixFileMode>(StringComparer.Ordinal);
+            if (options.Platform != GamePlatform.Windows && plan is not null)
+            {
+                foreach (var file in plan.Files) unixModes[file.RelativePath] = file.UnixMode ?? UnixArchivePermissions.Regular;
+                foreach (var link in plan.Links) unixModes[link.Path] = unixModes[link.Target];
+                foreach (var directory in plan.Directories)
+                    unixModes[directory] = plan.DirectoryModes.GetValueOrDefault(directory, UnixArchivePermissions.Executable);
+            }
 
+            // A version label does not identify content: languages, DLC and republished
+            // builds can share it. Never overwrite an archive before metadata commits.
             var previous = existing?.Platforms.GetValueOrDefault(options.Platform)?.ArchiveName;
-
-            var manifest = existing ?? new BackupManifest
+            if (File.Exists(Path.Combine(gameDirectory, archiveName)))
+                archiveName = GameArchiver.Core.UniqueArchiveName.Create(archiveName);
+            var archivePath = Path.Combine(gameDirectory, archiveName);
+            var committed = false;
+            try
             {
-                GameId = game.Id,
-                Slug = game.Slug,
-                Title = game.Title,
-            };
+                await GameArchiver.Core.ArchivePublisher.PublishAsync(staging, archivePath,
+                    options.MaxCompressionThreads, options.VerifyArchive,
+                    new GameArchiver.Core.InlineProgress<GameArchiver.Core.ArchiveProgress>(p => progress?.Report(
+                        new DownloadProgress(p.Phase, p.Bytes, p.TotalBytes, p.Files, p.TotalFiles))), ct, unixModes);
 
-            manifest.Platforms[options.Platform] = new PlatformBackup
+                var manifest = existing ?? new BackupManifest
+                {
+                    GameId = game.Id,
+                    Slug = game.Slug,
+                    Title = game.Title,
+                };
+
+                manifest.Platforms[options.Platform] = new PlatformBackup
+                {
+                    ContentRevision = PlatformBackup.CurrentContentRevision,
+                    BuildId = buildId,
+                    VersionName = versionName,
+                    Language = options.Language,
+                    ArchiveName = archiveName,
+                    ArchiveSize = new FileInfo(archivePath).Length,
+                    InstalledSize = DirectorySize(staging),
+                    Dlcs = plan?.DlcIds ?? [],
+                    SkippedDependencies = plan?.Dependencies ?? [],
+                    LaunchExecutable = launchExecutable,
+                    LaunchParameters = launchParameters,
+
+                    // Inno Setup yields no per-file hashes, so a later patch cannot reuse this zip.
+                    Files = plan?.Files
+                        .Where(f => f.Identity is not null)
+                        .ToDictionary(f => f.RelativePath, f => new BackedUpFile(f.Identity!, f.Size)) ?? [],
+                };
+
+                // Only now does the game count as downloaded.
+                await manifest.SaveAsync(gameDirectory, ct);
+                committed = true;
+            }
+            finally
             {
-                ContentRevision = PlatformBackup.CurrentContentRevision,
-                BuildId = buildId,
-                VersionName = versionName,
-                Language = options.Language,
-                ArchiveName = archiveName,
-                ArchiveSize = new FileInfo(archivePath).Length,
-                InstalledSize = DirectorySize(staging),
-                Dlcs = plan?.DlcIds ?? [],
-                SkippedDependencies = plan?.Dependencies ?? [],
-                LaunchExecutable = launchExecutable,
-                LaunchParameters = launchParameters,
-
-                // Inno Setup yields no per-file hashes, so a later patch cannot reuse this zip.
-                Files = plan?.Files
-                    .Where(f => f.Identity is not null)
-                    .ToDictionary(f => f.RelativePath, f => new BackedUpFile(f.Identity!, f.Size)) ?? [],
-            };
-
-            // Only now does the game count as downloaded.
-            await manifest.SaveAsync(gameDirectory, ct);
+                if (!committed) SafeDelete(archivePath);
+            }
 
             // Keep the previous archive until the manifest commits. If saving fails or is
             // cancelled, the on-disk manifest must still reference an intact backup.

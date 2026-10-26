@@ -424,6 +424,7 @@ internal sealed class SteamKitSession : ISteamSession
                     c.Checksum, checked((long)c.Offset), checked((int)c.CompressedLength), checked((int)c.UncompressedLength))).ToList())
             {
                 IsDirectory = f.Flags.HasFlag(EDepotFileFlag.Directory),
+                IsExecutable = f.Flags.HasFlag(EDepotFileFlag.Executable),
                 LinkTarget = f.Flags.HasFlag(EDepotFileFlag.Symlink) ? f.LinkTarget ?? "" : null,
             }).ToList());
         }

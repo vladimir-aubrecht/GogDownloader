@@ -408,7 +408,8 @@ public static class DownloadProbes
             Probe.Check("the game file is present", names.Contains("game/data.pak"));
             Probe.Check("support files are kept aside", names.Contains("gog-support/99/readme.txt"));
             Probe.Check("an empty directory survives as a trailing-slash entry", names.Contains("empty/"));
-            Probe.Check("non-empty directories get no entry of their own", !names.Contains("game/"));
+            Probe.Check("nonempty directory records preserve Unix modes when available",
+                OperatingSystem.IsWindows() ? !names.Contains("game/") : names.Contains("game/"));
             Probe.Check("the large file is intact", zip.GetEntry("game/data.pak")!.Length == 96L * 1024 * 1024);
             Probe.Check("an empty file is an entry of its own", names.Contains("game/CDROM.INI"));
         }

@@ -1,3 +1,4 @@
+using GameArchiver.Core;
 using System.Buffers;
 using System.IO.Compression;
 using System.Text;
@@ -61,6 +62,7 @@ public static class ParallelZipWriter
         public long LocalHeaderOffset { get; set; }
         public ushort? OriginalMethod { get; init; }
         public uint? ExternalAttributes { get; init; }
+        public ushort VersionMadeBy { get; init; } = 45;
         public ushort Method => OriginalMethod ?? (IsStored ? Stored : Deflated);
     }
 
@@ -71,9 +73,10 @@ public static class ParallelZipWriter
         CompressionLevel level = CompressionLevel.Optimal,
         IProgress<ZipProgress>? progress = null,
         CancellationToken ct = default,
-        long zip64Threshold = Zip64Threshold)
+        long zip64Threshold = Zip64Threshold,
+        IReadOnlyDictionary<string, UnixFileMode>? unixModes = null)
     {
-        var entries = Enumerate(sourceDirectory);
+        var entries = Enumerate(sourceDirectory, unixModes);
         var partsDirectory = zipPath + ".parts";
         Directory.CreateDirectory(partsDirectory);
 
@@ -167,7 +170,7 @@ public static class ParallelZipWriter
         }
     }
 
-    private static List<Entry> Enumerate(string root)
+    private static List<Entry> Enumerate(string root, IReadOnlyDictionary<string, UnixFileMode>? unixModes)
     {
         var entries = new List<Entry>();
 
@@ -179,8 +182,9 @@ public static class ParallelZipWriter
 
             if (Directory.Exists(path))
             {
-                // Only empty directories need an entry; the rest are implied by their files.
-                if (!Directory.EnumerateFileSystemEntries(path).Any())
+                // Explicit Unix modes also require records for nonempty directories.
+                if (unixModes?.ContainsKey(name) == true || unixModes is null && !OperatingSystem.IsWindows()
+                    || !Directory.EnumerateFileSystemEntries(path).Any())
                     entries.Add(new Entry(path, name + "/", true, 0, Directory.GetLastWriteTime(path)));
             }
             else
@@ -190,7 +194,17 @@ public static class ParallelZipWriter
             }
         }
 
-        return entries;
+        return entries.Select(entry =>
+        {
+            UnixFileMode? mode = unixModes is not null
+                ? unixModes.TryGetValue(entry.Name.TrimEnd('/'), out var supplied) ? supplied : null
+                : !OperatingSystem.IsWindows() ? File.GetUnixFileMode(entry.FullPath) : null;
+            return mode is { } permissions ? entry with
+            {
+                VersionMadeBy = UnixArchivePermissions.VersionMadeBy,
+                ExternalAttributes = UnixArchivePermissions.Attributes(permissions, entry.IsDirectory),
+            } : entry;
+        }).ToList();
     }
 
     private static async Task CompressAsync(
@@ -278,7 +292,7 @@ public static class ParallelZipWriter
             var extraLength = zip64 ? 4 + (bigSizes ? 16 : 0) + (bigOffset ? 8 : 0) : 0;
 
             writer.Write(CentralHeaderSignature);
-            writer.Write((ushort)45);                       // version made by
+            writer.Write(entry.VersionMadeBy);
             writer.Write((ushort)(zip64 ? 45 : 20));        // version needed
             writer.Write(Utf8NameFlag);
             writer.Write(entry.Method);

@@ -67,6 +67,7 @@ public sealed record SteamChunk(string Id, uint Checksum, long Offset, int Compr
 public sealed record SteamFile(string Path, long Size, string Sha1, IReadOnlyList<SteamChunk> Chunks)
 {
     public bool IsDirectory { get; init; }
+    public bool IsExecutable { get; init; }
     public string? LinkTarget { get; init; }
 }
 public sealed record SteamManifest(SteamDepotRequest Depot, IReadOnlyList<SteamFile> Files);

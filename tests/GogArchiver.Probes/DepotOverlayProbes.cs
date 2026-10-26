@@ -24,6 +24,21 @@ public static class DepotOverlayProbes
             finally { Directory.Delete(root, recursive: true); }
         }
 
+        foreach (var generation in new[] { 1, 2 })
+        {
+            var root = Probe.ScratchDirectory();
+            try { await CheckUnixModesAsync(root, generation); }
+            finally { Directory.Delete(root, true); }
+        }
+
+        Probe.Group("Replacing GOG archives with the same version label");
+        foreach (var trigger in new[] { "build", "language", "DLC", "force" })
+        {
+            var root = Probe.ScratchDirectory();
+            try { await CheckPublicationAsync(root, trigger); }
+            finally { Directory.Delete(root, true); }
+        }
+
         Probe.Group("Resuming old DLC staging follows the current file plan");
         foreach (var generation in new[] { 1, 2 })
         foreach (var scenario in new[] { "missing hash", "old casing", "both casings" })
@@ -172,9 +187,62 @@ public static class DepotOverlayProbes
             && (await downloader.RunAsync(game, options)).Outcome == DownloadOutcome.AlreadyDone);
     }
 
+    private static async Task CheckUnixModesAsync(string root, int generation)
+    {
+        using var fixture = new Fixture(generation, false) { ExecutableFlag = true };
+        using var http = new HttpClient(fixture);
+        var game = new LibraryEntry { Id = 1, Slug = "modes", Title = "Modes", Platforms = new()
+        { [GamePlatform.Mac] = new() { Depot = new("1", generation, "1", "https://fixture.invalid/repository"), Dlcs = [] } } };
+        var options = new DownloadOptions { OutputRoot = root, StagingRoot = Path.Combine(root, "stage"),
+            Platform = GamePlatform.Mac, WriteLauncher = false, MaxCompressionThreads = 2 };
+        var result = await new GameDownloader(new(http), new(http, http, new(0)), http).RunAsync(game, options);
+        using var zip = ZipFile.OpenRead(result.ArchivePath!);
+        Probe.Check($"GOG gen{generation} executable flags survive macOS archiving on any host",
+            ((uint)zip.GetEntry("game.exe")!.ExternalAttributes >> 16 & 0x1ff) == 0x1ed
+            && ((uint)zip.GetEntry("asset.bin")!.ExternalAttributes >> 16 & 0x1ff) == 0x1a4);
+    }
+
+    private static async Task CheckPublicationAsync(string root, string trigger)
+    {
+        using var fixture = new Fixture(2, false);
+        using var http = new HttpClient(fixture);
+        var downloader = new GameDownloader(new(http), new(http, http, new(0)), http);
+        var game = new LibraryEntry { Id = 1, Slug = "publication", Title = "Publication",
+            Platforms = new() { [GamePlatform.Windows] = new()
+                { Depot = new("old", 2, "1", "https://fixture.invalid/repository"), Dlcs = [] } } };
+        var options = new DownloadOptions { OutputRoot = root, StagingRoot = Path.Combine(root, "stage"),
+            Platform = GamePlatform.Windows, WriteLauncher = false, MaxCompressionThreads = 2 };
+        var first = await downloader.RunAsync(game, options);
+        var directory = Path.GetDirectoryName(first.ArchivePath!)!;
+        var oldZip = await File.ReadAllBytesAsync(first.ArchivePath!);
+        var oldMetadata = await File.ReadAllBytesAsync(BackupManifest.PathFor(directory));
+        fixture.OwnsDlc = true; // Change content without changing the human-readable version.
+        var changed = game with { Platforms = new() { [GamePlatform.Windows] = game.Platforms[GamePlatform.Windows] with
+        {
+            Depot = game.Platforms[GamePlatform.Windows].Depot! with { BuildId = trigger == "build" ? "new" : "old" },
+            Dlcs = trigger == "DLC" ? [new("2", "Expansion")] : [],
+        } } };
+        var changedOptions = options with { Force = trigger == "force", Language = trigger == "language" ? "de" : "en" };
+        using var cancellation = new CancellationTokenSource();
+        var stopped = false;
+        try { await downloader.RunAsync(changed, changedOptions, new SyncProgress<DownloadProgress>(p =>
+            { if (p.Phase == "publish") cancellation.Cancel(); }), cancellation.Token); }
+        catch (DownloadInterruptedException) { stopped = true; }
+        Probe.Check($"{trigger}: cancelling after publication preserves the committed ZIP and metadata",
+            stopped && oldZip.SequenceEqual(await File.ReadAllBytesAsync(first.ArchivePath!))
+            && oldMetadata.SequenceEqual(await File.ReadAllBytesAsync(BackupManifest.PathFor(directory)))
+            && Directory.EnumerateFiles(directory, "*.zip").Count() == 1);
+        var result = await downloader.RunAsync(changed, changedOptions);
+        Probe.Check($"{trigger}: retry commits a distinct archive and only then removes the old one",
+            result.Outcome == DownloadOutcome.Completed && result.ArchivePath != first.ArchivePath
+            && !File.Exists(first.ArchivePath) && await ReadAsync(result.ArchivePath!, "game.exe") == "PLUS"
+            && (await BackupManifest.LoadAsync(directory))!.Platforms[GamePlatform.Windows].ArchiveName == Path.GetFileName(result.ArchivePath));
+    }
+
     private sealed class Fixture(int generation, bool dlcFirst) : HttpMessageHandler
     {
         public bool OwnsDlc { get; set; }
+        public bool ExecutableFlag { get; init; }
         public bool OmitDlcIdentity { get; init; }
         public string ExecutablePath { get; init; } = "game.exe";
         public bool IncludeLayout { get; init; }
@@ -207,7 +275,7 @@ public static class DepotOverlayProbes
                     .Concat(id == 1 ? [(Path: "asset.bin", Data: "asset", Offset: 4)] : []);
                 body = generation == 2 ? Json(new { depot = new { items = records.Select(r => (object)new
                 {
-                    type = "DepotFile", path = r.Path,
+                    type = "DepotFile", path = r.Path, flags = ExecutableFlag && r.Path.EndsWith(".exe") ? new[] { "executable" } : [],
                     // Multi-chunk depots may omit the whole-file hash even though chunks have hashes.
                     chunks = (OmitDlcIdentity && id == 2 ? new[] { r.Data[..2], r.Data[2..] } : new[] { r.Data })
                         .Select(data => new { md5 = Hash(data), compressedMd5 = Hash(Compress(data)), size = data.Length, compressedSize = Compress(data).Length }),
@@ -217,7 +285,7 @@ public static class DepotOverlayProbes
                     new { type = "DepotLink", path = "asset-link.bin", target = "asset.bin" },
                 } : []) } }) : Json(new { depot = new { files = records.Select(r => (object)new
                 {
-                    path = r.Path, size = r.Data.Length, offset = r.Offset, hash = OmitDlcIdentity && id == 2 ? null : Hash(r.Data),
+                    path = r.Path, size = r.Data.Length, offset = r.Offset, executable = ExecutableFlag && r.Path.EndsWith(".exe"), hash = OmitDlcIdentity && id == 2 ? null : Hash(r.Data),
                 }).Concat(IncludeLayout && id == 1 ? new object[] { new { path = "data/empty", directory = true } } : []) } });
             }
             else if (path.EndsWith("/secure_link"))

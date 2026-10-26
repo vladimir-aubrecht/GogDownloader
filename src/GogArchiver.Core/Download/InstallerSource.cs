@@ -41,6 +41,7 @@ public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameI
         var files = new List<PlannedFile>();
         var directories = new HashSet<string>(StringComparer.Ordinal);
         var links = new List<PlannedLink>();
+        var directoryModes = new Dictionary<string, UnixFileMode>();
 
         foreach (var entry in _reader.Entries)
         {
@@ -54,6 +55,7 @@ public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameI
             if (entry.IsDirectory)
             {
                 directories.Add(relative);
+                if (entry.UnixMode is { } mode) directoryModes[relative] = mode;
                 continue;
             }
 
@@ -70,13 +72,13 @@ public sealed class InstallerSource(GogApiClient api, HttpClient cdn, long gameI
             // A ZIP entry is one range, and a CRC is not a hash we can compare a file against,
             // so a resumed run re-fetches an entry it cannot otherwise prove.
             var part = new PlannedPart(0, entry.DataOffset, entry.Size, null, entry.CompressedSize);
-            files.Add(new PlannedFile(relative, gameId.ToString(), entry.Size, null, [part]));
+            files.Add(new PlannedFile(relative, gameId.ToString(), entry.Size, null, [part]) { UnixMode = entry.UnixMode });
         }
 
         if (files.Count == 0)
             throw new InstallerFormatException($"The installer holds nothing under {MojoSetupReader.GamePrefix}.");
 
-        return new DepotPlan(files, directories.ToList(), links, [], []);
+        return new DepotPlan(files, directories.ToList(), links, [], []) { DirectoryModes = directoryModes };
     }
 
     /// <summary>

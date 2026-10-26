@@ -116,6 +116,10 @@ public sealed record ArchiveMetadata
                 || p.Value.ArchiveSize < 0 || string.IsNullOrWhiteSpace(p.Value.ArchiveName)))
                 throw new InvalidDataException($"Invalid platform metadata in {path}");
             foreach (var backup in result.Platforms.Values) _ = ArchivePaths.Within(Path.GetDirectoryName(path)!, backup.ArchiveName);
+            if (source == "steam")
+                foreach (var (platform, backup) in result.Platforms.ToArray())
+                    if (platform != GameOs.Windows && backup.Version.ContentRevision < 2)
+                        result.Platforms[platform] = backup with { NeedsRefresh = true };
             _ = result.Key;
             return result with { Source = source! };
         }
@@ -131,16 +135,18 @@ public sealed record ArchiveMetadata
             var v = p.Value;
             var dlcs = v.TryGetProperty("Dlcs", out var ds) ? ds.EnumerateArray().Select(d => d.GetString()!).ToList() : [];
             var build = Text(v, "BuildId");
-            var oldContent = !v.TryGetProperty("ContentRevision", out var revision) || revision.GetInt32() < 1;
+            var contentRevision = v.TryGetProperty("ContentRevision", out var revision) ? revision.GetInt32() : 0;
+            var oldContent = contentRevision < 1;
             metadata.Platforms[platform] = new()
             {
                 Version = new(build) { Name = Text(v, "VersionName"), Language = Text(v, "Language", "en"), Architecture = "",
-                    BuildVariesByLanguage = build.StartsWith("installer-", StringComparison.Ordinal), Dlcs = dlcs },
+                    BuildVariesByLanguage = build.StartsWith("installer-", StringComparison.Ordinal), Dlcs = dlcs,
+                    ContentRevision = platform == GameOs.Windows ? 1 : Math.Max(1, contentRevision) },
                 ArchiveName = Text(v, "ArchiveName"), ArchiveSize = v.GetProperty("ArchiveSize").GetInt64(),
                 InstalledSize = v.GetProperty("InstalledSize").GetInt64(),
                 CompletedAt = v.TryGetProperty("CompletedAt", out var time) ? time.GetDateTimeOffset() : DateTimeOffset.MinValue,
                 ModifiedAt = v.TryGetProperty("ModifiedAt", out var modified) && modified.ValueKind != JsonValueKind.Null ? modified.GetDateTimeOffset() : null,
-                NeedsRefresh = oldContent && (dlcs.Count > 0 || platform == GameOs.Windows && build.StartsWith("installer-")),
+                NeedsRefresh = platform != GameOs.Windows && contentRevision < 2 || oldContent && (dlcs.Count > 0 || platform == GameOs.Windows && build.StartsWith("installer-")),
                 RuntimeRequirement = "drm-free", LaunchExecutable = Text(v, "LaunchExecutable"), LaunchParameters = Text(v, "LaunchParameters"),
                 Files = v.TryGetProperty("Files", out var files) ? files.EnumerateObject().ToDictionary(f => f.Name,
                     f => new ArchivedFile(Text(f.Value, "Md5"), f.Value.GetProperty("Size").GetInt64(), "md5")) : [],

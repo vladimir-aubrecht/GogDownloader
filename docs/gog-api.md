@@ -371,3 +371,13 @@ Windows/macOS — it errors out. So even the reference implementation gives up o
 installer path. For such titles we are on our own (innoextract / Wine).
 
 `library stats` over the real library reports **24** such Windows/macOS titles out of 256 games.
+
+## Archive correctness and permissions
+
+Content revision 2 records the complete Linux ZIP64 inventory (including counts beyond 65,535)
+and Unix rwx modes. Linux installer central-directory external attributes provide modes; GOG
+v2 `flags` contains `executable`, and v1 file records use the `executable` boolean (confirmed
+in the cached gogdl `objects/v1.py`). These flags map to 0755 for executable files and 0644
+for ordinary files. Explicit installer modes are retained, including directory modes and
+permissions of dereferenced targets. Staging-host permissions do not determine the archive's modes.
+Older Linux/macOS backups need one rebuild; Windows retains the revision-1 refresh rules.

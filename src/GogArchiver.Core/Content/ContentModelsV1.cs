@@ -68,6 +68,7 @@ public sealed record DepotFileV1
     [JsonPropertyName("hash")] public string? Hash { get; init; }
     [JsonPropertyName("support")] public bool Support { get; init; }
     [JsonPropertyName("directory")] public bool Directory { get; init; }
+    [JsonPropertyName("executable")] public bool Executable { get; init; }
 }
 
 public sealed record DepotBodyV1

@@ -245,9 +245,12 @@ Primary sources for labels: `Samples/013_UnifiedMessages/Program.cs` and
    the depot key. SteamKit2 decrypts/decompresses content and validates its Adler checksum.
 7. The provider additionally validates chunk and whole-file SHA-1 and exact chunk coverage.
 
-Validate manifest identity and decrypted file names. File flags include `Directory` and
+Validate manifest identity and decrypted file names. File flags include `Executable`, `Directory` and
 `Symlink`; links are dereferenced against the manifest tree, with missing/cyclic/escaping targets
-rejected. Nothing outside the selected staging tree may be included.
+rejected. Nothing outside the selected staging tree may be included. Preserve `Executable`
+as Unix mode 0755 (ordinary files use 0644; directories use 0755) for Linux/macOS archives,
+including copied link targets, regardless of the staging host. Content revision 2 refreshes
+older Linux/macOS archives once and can reuse verified cached payloads.
 
 Version 3.4.0's CDN methods do not accept caller cancellation tokens. The configured HTTP factory
 therefore propagates operation and per-transfer cancellation into response-body reads, including

@@ -171,7 +171,7 @@ public static class ArchiveSafetyProbes
         }
         Probe.Check("a failed manifest commit retains the previous archive and manifest",
             blocked && failed && File.Exists(previous) && File.ReadAllText(previous) == "OLD!"
-            && Directory.EnumerateFiles(directory, "*.zip").Count() == 2
+            && Directory.EnumerateFiles(directory, "*.zip").Count() == 1
             && File.ReadAllText(obstruction) == originalManifest
             && !Directory.EnumerateFiles(directory, "*.tmp").Any()
             && (await BackupManifest.LoadAsync(directory))!.Platforms[GamePlatform.Windows].BuildId == "old");

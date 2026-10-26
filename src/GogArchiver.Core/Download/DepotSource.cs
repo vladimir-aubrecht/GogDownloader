@@ -23,6 +23,7 @@ public sealed record PlannedFile(
     List<PlannedPart> Parts)
 {
     public long DownloadSize => Parts.Sum(p => p.DownloadSize);
+    public UnixFileMode? UnixMode { get; init; }
 }
 
 public sealed record PlannedLink(string Path, string Target);
@@ -36,6 +37,7 @@ public sealed record DepotPlan(
 {
     public long DownloadBytes => Files.Sum(f => f.DownloadSize);
     public long LinkBytes { get; init; }
+    public Dictionary<string, UnixFileMode> DirectoryModes { get; init; } = [];
     public long InstalledBytes => Files.Sum(f => f.Size) + LinkBytes;
 }
 
@@ -309,7 +311,8 @@ public sealed class DepotSourceV2(ContentClient content, GogApiClient api, strin
                             offset += chunk.Size;
                         }
 
-                        OverlayFile(files, new PlannedFile(relative, depot.ProductId, item.Size, item.Identity, parts));
+                        OverlayFile(files, new PlannedFile(relative, depot.ProductId, item.Size, item.Identity, parts)
+                        { UnixMode = item.Flags.Contains("executable") ? GameArchiver.Core.UnixArchivePermissions.Executable : GameArchiver.Core.UnixArchivePermissions.Regular });
                         break;
                     }
                     case "DepotDirectory":
@@ -399,7 +402,8 @@ public sealed class DepotSourceV1(
                 var relative = RelativePathFor(record.Path, productId, record.Support);
                 var part = new PlannedPart(0, record.Offset, record.Size, record.Hash, record.Size);
 
-                OverlayFile(files, new PlannedFile(relative, productId, record.Size, record.Hash, [part]));
+                OverlayFile(files, new PlannedFile(relative, productId, record.Size, record.Hash, [part])
+                { UnixMode = record.Executable ? GameArchiver.Core.UnixArchivePermissions.Executable : GameArchiver.Core.UnixArchivePermissions.Regular });
             }
         }
 

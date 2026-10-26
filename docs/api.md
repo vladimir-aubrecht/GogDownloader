@@ -266,7 +266,9 @@ An existing entry is renamed with a `.backup` suffix, repeated until unoccupied.
 remain intact. Unsafe paths, case-colliding entries, directory/file conflicts, encrypted ZIPs,
 unsupported compression and inconsistent headers are refused. ZIP64 and streaming data descriptors
 are supported. Unchanged compressed payloads are copied with bounded buffers; newly inserted
-content is verified. `verify --deep` remains the way to check every existing payload.
+content is verified. Original creator and Unix mode fields survive raw-copy edits; replacements
+retain the target's permissions, and new entries use the source file's mode when available.
+`verify --deep` remains the way to check every existing payload.
 
 Edits take the same archive lease as downloads. They publish to a unique `(local-<id>).zip` name,
 then atomically update the authoritative metadata, and only then delete the previous ZIP.

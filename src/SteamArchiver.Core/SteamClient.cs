@@ -333,6 +333,7 @@ public sealed class SteamClient : IGameStore
         var version = new GameVersion(buildId)
         {
             Name = buildId, Branch = options.Branch, Architecture = options.Architecture, Language = options.Language.ToLowerInvariant(),
+            ContentRevision = options.Platform == GameOs.Windows ? 1 : 2,
             Dlcs = game.OwnedDlcs, Manifests = selected.Values.Select(d => d.Request).OrderBy(d => d.DepotId)
                 .ToDictionary(d => d.DepotId.ToString(), d => d.ManifestId.ToString()),
             Dependencies = dependencies.Distinct().ToList(),
@@ -533,7 +534,15 @@ public sealed class SteamClient : IGameStore
         var fingerprint = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(selection.Version, ArchiveJson.Options)))[..12];
         var archiveName = ArchiveName.For(selection.Game, options.Platform, $"{selection.Version.Name}-{fingerprint}", portable: false);
         var archivePath = Path.Combine(location.Directory, archiveName);
-        await ArchivePublisher.PublishAsync(staging, archivePath, options.CompressionThreads, options.Verify, progress, ct);
+        var unixModes = new Dictionary<string, UnixFileMode>(comparer);
+        if (options.Platform != GameOs.Windows)
+        {
+            foreach (var item in files.Values) unixModes[item.File.Path] = item.File.IsExecutable
+                ? UnixArchivePermissions.Executable : UnixArchivePermissions.Regular;
+            foreach (var link in layout.Links) unixModes[link.Path] = unixModes[link.Target];
+            foreach (var directory in directories) unixModes[directory] = UnixArchivePermissions.Executable;
+        }
+        await ArchivePublisher.PublishAsync(staging, archivePath, options.CompressionThreads, options.Verify, progress, ct, unixModes);
         var backedFiles = files.Values.ToDictionary(f => f.File.Path, f => new ArchivedFile(f.File.Sha1, f.File.Size));
         foreach (var link in layout.Links) backedFiles[link.Path] = backedFiles[link.Target];
         var osName = options.Platform switch { GameOs.Windows => "windows", GameOs.Mac => "macos", _ => "linux" };

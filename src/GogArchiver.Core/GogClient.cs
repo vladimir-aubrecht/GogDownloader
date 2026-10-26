@@ -149,6 +149,7 @@ public sealed class GogClient : IGameStore
         return new(availability.Depot?.BuildId ?? installer?.BuildId ?? "")
         {
             Name = availability.Depot?.VersionName ?? installer?.Version, Language = language, Architecture = "",
+            ContentRevision = platform == GameOs.Windows ? 1 : 2,
             BuildVariesByLanguage = availability.Depot is null,
             Dlcs = game.DlcsFor((GamePlatform)platform).Select(d => d.ProductId).ToList(),
             DownloadSize = availability.Depot is null ? installer?.TotalSize ?? 0 : availability.DownloadSize,

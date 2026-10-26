@@ -262,7 +262,9 @@ See [the PCGamingWiki adapter and its limits](docs/pcgamingwiki.md).
 ## Download a subset by size
 
 Use `--max-size` with `download --all` to select games whose recorded full download estimate
-is **below** the limit. Run sync after updating to populate Steam sizes, then preview:
+is **below** the limit. When Steam's transfer estimate is missing or predates the corrected
+size calculation, the filter uses its recorded installed size instead. Run sync to populate
+sizes, then preview:
 
 ```sh
 dotnet run --project src/GameArchiver.Cli -- library sync --source steam
@@ -276,13 +278,19 @@ branch and owned DLC, counting a shared depot once. GOG installer estimates use 
 installer's total size. A DLC selection is resolved to its base game before applying the limit.
 
 Unknown sizes, retained failed-sync metadata and sizes for another language/branch/architecture
-are skipped and counted in the summary. A new sync populates the default English, public,
-64-bit Steam selection. Older Steam size estimates also require a fresh sync: some nonempty
-depots report a zero download estimate, which must not make a multi-gigabyte game look small.
+are skipped. The summary counts transfer estimates and installed-size fallbacks separately,
+and distinguishes outdated estimates, missing sizes, failed syncs and selection mismatches.
+`--details` explains each candidate. A new sync populates the default English, public,
+64-bit Steam selection. Old Steam transfer estimates are not trusted: some nonempty depots
+report a zero download estimate, which must not make a multi-gigabyte game look small. Old
+snapshots can still use their independently recorded installed sizes; if those are missing too,
+run `library sync --source steam` with the rebuilt version. Some sizes may remain unavailable.
 Before transferring game content, Steam checks the actual selected manifest chunk sizes against
 the limit; an oversized selection returns `SkippedSize`. GOG rechecks its current estimate.
 The limit describes a full transfer, independent of resume/reuse; it is neither the resulting
-ZIP size nor a hard network-byte cap (metadata and retries also use bandwidth).
+ZIP size nor a hard network-byte cap (metadata and retries also use bandwidth). An installed-size
+fallback is an approximation for selecting small games, not a measured compressed transfer size;
+Steam's manifest check still enforces the transfer selection before game content is downloaded.
 
 `100MB` means 100,000,000 bytes; `100MiB` or `100M` means 104,857,600 bytes. Bare numbers mean
 bytes. KB/MB/GB/TB use powers of 1000; KiB/MiB/GiB/TiB and K/M/G/T use powers of 1024.

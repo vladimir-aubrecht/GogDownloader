@@ -324,7 +324,9 @@ public static partial class ArchiveCommandLine
             {
                 if (library is null) throw new FileNotFoundException("No aggregate library snapshot. Run library sync first.");
                 var candidates = library.SelectDownloads(games.Where(g => Search(g, search)), options.Platform);
-                var tooLarge = 0; var unknown = 0; var drmExcluded = 0;
+                var tooLarge = 0; var drmExcluded = 0;
+                var failedSync = 0; var incompatible = 0; var missing = 0; var outdated = 0;
+                var downloadEstimates = 0; var installedEstimates = 0;
                 foreach (var game in candidates)
                 {
                     if (drmFilter is not null && drmFilter != "any"
@@ -332,21 +334,44 @@ public static partial class ArchiveCommandLine
                     { drmExcluded++; continue; }
                     if (maxSize is null) { keys.Add(game.Key); continue; }
                     var version = game.Versions[options.Platform];
-                    if (library.Failures.ContainsKey(game.Key.Source) || library.Failures.ContainsKey(game.Key.ToString())
-                        || game.Key.Source == "steam" && version.SizeEstimateRevision < 1
-                        || version.DownloadSize <= 0 || version.Branch != options.Branch
+                    void Explain(string reason)
+                    {
+                        if (flags.ContainsKey("details")) Console.Error.WriteLine($"{game.Key} ({game.Title}): {reason}");
+                    }
+                    if (library.Failures.ContainsKey(game.Key.Source) || library.Failures.ContainsKey(game.Key.ToString()))
+                    { failedSync++; Explain("size excluded because the last source/product sync failed"); continue; }
+                    if (version.Branch != options.Branch
                         || !string.Equals(version.Language, options.Language, StringComparison.OrdinalIgnoreCase)
                         || version.Architecture.Length > 0 && version.Architecture != options.Architecture)
-                    { unknown++; continue; }
-                    if (version.DownloadSize >= maxSize.Value) { tooLarge++; continue; }
+                    { incompatible++; Explain($"size describes {options.Platform}/{version.Language}/{version.Architecture}/{version.Branch}, not the requested selection"); continue; }
+                    var oldSteamEstimate = game.Key.Source == "steam" && version.SizeEstimateRevision < 1;
+                    // Old Steam compressed totals could omit nonempty zero-estimate depots.
+                    // Installed totals were recorded independently and remain a useful estimate
+                    // for selecting small games. The provider still checks real transfer sizes.
+                    var useInstalled = game.Key.Source == "steam" && (oldSteamEstimate || version.DownloadSize <= 0);
+                    var estimate = useInstalled ? version.InstalledSize : version.DownloadSize;
+                    if (estimate <= 0)
+                    {
+                        if (oldSteamEstimate) { outdated++; Explain("old Steam download estimate with no usable installed-size fallback; run library sync --source steam"); }
+                        else { missing++; Explain("no usable size estimate in the snapshot"); }
+                        continue;
+                    }
+                    if (useInstalled) installedEstimates++; else downloadEstimates++;
+                    Explain($"{estimate} bytes ({(useInstalled ? "installed-size fallback" : "download estimate")}); {(estimate < maxSize.Value ? "below" : "at or above")} limit");
+                    if (estimate >= maxSize.Value) { tooLarge++; continue; }
                     keys.Add(game.Key);
                 }
                 if (drmFilter is not null) Console.Error.WriteLine($"DRM filter ({drmFilter}): {drmExcluded} excluded. Uses reported status for {options.Platform}/{options.Branch}; unknown is not DRM-free.");
                 if (maxSize is not null)
                 {
-                    Console.Error.WriteLine($"Size filter: {keys.Count} selected below {maxSize.Value} bytes (download estimate); "
+                    var unknown = failedSync + incompatible + missing + outdated;
+                    Console.Error.WriteLine($"Size filter: {keys.Count} selected below {maxSize.Value} bytes; "
                         + $"{tooLarge} at or above the limit; {unknown} with unknown or incompatible size.");
-                    if (unknown > 0) Console.Error.WriteLine("Run library sync to update sizes. The size filter requires the snapshot's language, branch and architecture.");
+                    Console.Error.WriteLine($"Estimate basis: {downloadEstimates} download estimates, {installedEstimates} Steam installed-size fallbacks.");
+                    if (unknown > 0) Console.Error.WriteLine($"Skipped sizes: {outdated} old Steam estimates without a fallback; {missing} missing estimates; "
+                        + $"{failedSync} failed syncs; {incompatible} language/branch/architecture mismatches. Use --details for individual reasons.");
+                    if (outdated > 0) Console.Error.WriteLine("Run library sync --source steam with the rebuilt version to replace old estimates.");
+                    else if (missing > 0 || failedSync > 0) Console.Error.WriteLine("Run library sync to refresh metadata; Steam may still omit some sizes.");
                 }
             }
             else
@@ -607,7 +632,7 @@ public static partial class ArchiveCommandLine
           --layout flat|provider --provider-dir PROVIDER=FOLDER (repeatable; implies provider layout)
           --platform windows|linux|mac --language en --arch 32|64|arm64 --branch public
           --directory NAME --connections N --compression-threads N --limit-rate 5M
-          --max-size 100MB (download --all: below the recorded full download size; unknown sizes skipped)
+          --max-size 100MB (download --all: download estimate, falling back to Steam installed size; unknown sizes skipped)
           --drm free|protected|unknown|any (library list or download --all; reported status for the selected OS/branch)
         DRM: library drm sync [--source steam|gog|all] [--refresh]
           library drm set SOURCE:ID --platform windows|linux|mac --drm free|protected|unknown --note TEXT

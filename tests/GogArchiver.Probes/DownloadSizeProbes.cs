@@ -16,7 +16,7 @@ public static class DownloadSizeProbes
         await SteamSizesAsync();
         GogSizes();
         var root = Probe.ScratchDirectory();
-        try { await CliAsync(root); await ManifestLimitAsync(root); }
+        try { await CliAsync(root); await FallbackAsync(root); await ManifestLimitAsync(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -181,6 +181,63 @@ public static class DownloadSizeProbes
         var result = await client.DownloadAsync("1", options);
         Probe.Check("real manifest size blocks misleading appinfo before any content or staging writes",
             result.Outcome == ArchiveOutcome.SkippedSize && !Directory.Exists(staging) && result.Detail!.Contains("10000000 bytes"));
+        var game = Game("steam", "1", 0);
+        game.Versions[GameOs.Windows] = game.Versions[GameOs.Windows] with { InstalledSize = 1 };
+        var snapshot = Path.Combine(root, "guard-library.json");
+        await new ArchiveLibrary { Games = [game] }.SaveAsync(snapshot);
+        var retry = new Session { Owned = [1], Content = new OversizedContent(), Apps = session.Apps };
+        var output = await CaptureAsync(() => ArchiveCommandLine.RunAsync(
+            ["download", "--all", "--source", "steam", "--max-size", "10MB", "--snapshot", snapshot,
+                "--out", options.OutputRoot, "--staging", staging], storeFactory: _ => [new SteamStore(retry)]));
+        Probe.Check("installed-size fallback still propagates the limit and skips oversized live content before transfer",
+            output.Exit == 0 && output.Output.Contains("SkippedSize") && !Directory.Exists(staging));
+    }
+
+    private static async Task FallbackAsync(string root)
+    {
+        GameInfo Entry(string id, long download, long installed, int revision = 1, string language = "en")
+        {
+            var game = Game("steam", id, download, language);
+            game.Versions[GameOs.Windows] = game.Versions[GameOs.Windows] with { InstalledSize = installed, SizeEstimateRevision = revision };
+            return game;
+        }
+        var library = new ArchiveLibrary { Games = [
+            Entry("217980", 5_220_784, 7_243_075_694, revision: 0), // Old Dishonored-style partial estimate.
+            Entry("2", 50_000_000, 100_000_000, revision: 0),
+            Entry("3", 0, 200_000_000),
+            Entry("4", 400_000_000, 700_000_000),
+            Entry("5", 0, 0),
+            Entry("6", 5_000_000, 0, revision: 0),
+            Entry("7", 0, 1_000_000),
+            Entry("8", 0, 1_000_000, language: "de"),
+            Entry("9", 0, 500_000_000),
+        ], Failures = new() { ["steam:7"] = "Metadata retained after a failed sync" } };
+        var snapshot = Path.Combine(root, "fallback-library.json"); await library.SaveAsync(snapshot);
+        var calls = new List<GameKey>();
+        var result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(
+            ["download", "--all", "--source", "steam", "--max-size", "500MB", "--dry-run", "--details", "--snapshot", snapshot],
+            storeFactory: _ => [new Store("steam", calls)]));
+        Probe.Check("small Steam games remain selectable from old or missing transfer estimates using installed size",
+            result.Exit == 0 && result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()).SequenceEqual(["steam:2", "steam:3", "steam:4"])
+            && calls.Count == 0);
+        Probe.Check("fallback excludes large games and the exact boundary without reviving a partial transfer estimate",
+            !result.Output.Contains("steam:217980") && !result.Output.Contains("steam:9")
+            && result.Error.Contains("2 at or above the limit") && result.Error.Contains("1 download estimates, 4 Steam installed-size fallbacks"));
+        Probe.Check("skipped-size diagnostics distinguish old data, missing values, failed syncs and selection mismatches",
+            result.Error.Contains("1 old Steam estimates without a fallback; 1 missing estimates; 1 failed syncs; 1 language/branch/architecture mismatches")
+            && result.Error.Contains("steam:217980 (Game 217980): 7243075694 bytes (installed-size fallback)")
+            && result.Error.Contains("library sync --source steam"));
+        // Mirrors a pre-fix snapshot: every Steam entry lacks the newly added revision field.
+        library = new() { Games = [Entry("10", 5_000_000, 7_000_000_000, revision: 0), Entry("11", 20_000_000, 30_000_000, revision: 0)] };
+        await library.SaveAsync(snapshot);
+        var oldJson = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(snapshot))!;
+        foreach (var game in oldJson["Games"]!.AsArray()) game!["Versions"]!["Windows"]!.AsObject().Remove("SizeEstimateRevision");
+        await File.WriteAllTextAsync(snapshot, oldJson.ToJsonString());
+        result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(
+            ["download", "--all", "--source", "steam", "--max-size", "500MB", "--dry-run", "--snapshot", snapshot],
+            storeFactory: _ => [new Store("steam", calls)]));
+        Probe.Check("a whole old snapshot no longer collapses to zero matches when installed sizes are present",
+            result.Exit == 0 && result.Output.Trim() == "steam:11" && result.Error.Contains("0 with unknown or incompatible size"));
     }
 
     private sealed class OversizedContent : ISteamContentSession

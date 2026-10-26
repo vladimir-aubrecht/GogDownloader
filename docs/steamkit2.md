@@ -98,7 +98,10 @@ A zero download estimate is valid only with an explicitly zero installed size. N
 depots can publish `download=0`: app 217980 depot 217981 reports `size=7243075694` and `download=0`,
 while depot 217982 reports only `download=5220784` (public appinfo observed 2026-10-26).
 Treat that total as unknown, not 5 MB. `SizeEstimateRevision=1` distinguishes corrected Steam
-estimates; the CLI rejects older estimates until sync. Download also compares the selected
+transfer estimates; the CLI does not trust older compressed totals. If a compressed total is
+missing/outdated, it can use the independently recorded installed total for small-game filtering,
+including old snapshots. A missing installed total still requires a fresh sync or remains unknown.
+The fallback never bypasses failed-sync or language/branch/architecture checks. Download compares the selected
 manifest chunk total with `MaxDownloadSize` before requesting any game chunks or changing staging.
 An explicitly empty depot is valid when other selected depots have content. Size estimates do
 not participate in `GameVersion.Matches`, so learning a size does not invalidate a backup.

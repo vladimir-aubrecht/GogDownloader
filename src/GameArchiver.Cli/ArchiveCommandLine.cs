@@ -86,8 +86,16 @@ public static class ArchiveCommandLine
             legacy = json.RootElement.TryGetProperty("Games", out var rawGames) && (rawGames.GetArrayLength() > 0
                 && rawGames[0].TryGetProperty("Id", out _) || json.RootElement.TryGetProperty("SchemaVersion", out var schema)
                 && schema.TryGetInt32(out var version) && version == LibrarySnapshot.CurrentSchema);
-            library = legacy ? new() { Games = GogClient.ConvertLibrary((await LibrarySnapshot.LoadAsync(snapshotPath, ct))!).ToList() }
-                : await ArchiveLibrary.LoadAsync(snapshotPath, ct);
+            if (legacy)
+            {
+                var gogSnapshot = (await LibrarySnapshot.LoadAsync(snapshotPath, ct))!;
+                library = new()
+                {
+                    Games = GogClient.ConvertLibrary(gogSnapshot).ToList(),
+                    Failures = gogSnapshot.Failures.ToDictionary(f => $"gog:{f.Key.ToString(CultureInfo.InvariantCulture)}", f => f.Value),
+                };
+            }
+            else library = await ArchiveLibrary.LoadAsync(snapshotPath, ct);
         }
         IEnumerable<IGameStore> DefaultStores(string selected)
         {
@@ -167,13 +175,17 @@ public static class ArchiveCommandLine
             if (library is null) throw new FileNotFoundException("No aggregate library snapshot. Run library sync first.");
             if (subcommand == "compare")
             {
-                if (source != "steam" || positionals.Count != 2 || stores.SingleOrDefault() is not SteamArchiver.Core.SteamClient steam)
-                    throw new ArgumentException("Usage: library compare --source steam [--snapshot FILE] [--details]");
-                if (legacy || !library.Games.Any(g => g.Key.Source == "steam")
-                    && !library.Failures.Keys.Any(k => k == "steam" || k.StartsWith("steam:", StringComparison.Ordinal)))
-                    throw new InvalidOperationException("No Steam data in this snapshot. Run library sync --source steam first.");
-                var listed = await steam.GetOwnedGamesAsync(ct);
-                PrintSteamComparison(library, listed, flags.ContainsKey("details"));
+                if (source is not "steam" and not "gog" || positionals.Count != 2 || stores.Length != 1)
+                    throw new ArgumentException("Usage: library compare --source gog|steam [--snapshot FILE] [--details]");
+                var emptyAggregate = !legacy && library.Games.Count == 0 && library.Failures.Count == 0;
+                if (!emptyAggregate && !(legacy && source == "gog") && !library.Games.Any(g => g.Key.Source == source)
+                    && !library.Failures.Keys.Any(k => k == source || k.StartsWith(source + ":", StringComparison.Ordinal)))
+                    throw new InvalidOperationException($"No {(source == "steam" ? "Steam" : "GOG")} data in this snapshot. Run library sync --source {source} first.");
+                if (source == "steam" && stores[0] is SteamArchiver.Core.SteamClient steam)
+                    PrintSteamComparison(library, await steam.GetOwnedGamesAsync(ct), flags.ContainsKey("details"));
+                else if (source == "gog" && stores[0] is GogClient gog)
+                    PrintGogComparison(library, await gog.GetOwnedGameIdsAsync(ct), flags.ContainsKey("details"));
+                else throw new NotSupportedException($"Library comparison is not supported by the supplied {source} provider.");
                 return 0;
             }
             if (subcommand == "failures")
@@ -351,6 +363,31 @@ public static class ArchiveCommandLine
         }
     }
 
+    private static void PrintGogComparison(ArchiveLibrary library, IReadOnlyList<long> listed, bool details)
+    {
+        var products = library.Games.Where(g => g.Key.Source == "gog").ToDictionary(g => g.Key.ProductId);
+        var owned = listed.Select(id => id.ToString(CultureInfo.InvariantCulture)).ToHashSet();
+        var onlySnapshot = products.Values.Where(g => !owned.Contains(g.Key.ProductId)).OrderBy(g => g.Title).ToList();
+        var onlyOwned = listed.Where(id => !products.ContainsKey(id.ToString(CultureInfo.InvariantCulture))).Order().ToList();
+        Console.WriteLine($"GOG snapshot: {products.Count} products.");
+        Console.WriteLine($"GOG owned-product API: {listed.Count} products (includes DLC and packs).");
+        Console.WriteLine($"Snapshot products present in the owned list: {products.Count - onlySnapshot.Count} of {products.Count}.");
+        Console.WriteLine($"Differences: {onlySnapshot.Count} snapshot products absent from the owned list; "
+            + $"{onlyOwned.Count} owned products absent from the snapshot.");
+        foreach (var game in onlySnapshot) Console.WriteLine($"SnapshotOnly {game.Key}: {game.Title} (type: {game.Kind})");
+        foreach (var id in onlyOwned) Console.WriteLine($"OwnedOnly {FailureLabel(library, $"gog:{id.ToString(CultureInfo.InvariantCulture)}")}");
+        foreach (var (key, failure) in library.Failures.Where(f => f.Key == "gog" || f.Key.StartsWith("gog:", StringComparison.Ordinal)).OrderBy(f => f.Key))
+        {
+            var id = key.Split(':', 2).ElementAtOrDefault(1);
+            var state = id is null ? "source failure" : owned.Contains(id) ? "listed as owned" : "not listed as owned";
+            Console.WriteLine($"SyncFailure {FailureLabel(library, key)} [{state}]: "
+                + (details ? failure : library.FailureSummaries.GetValueOrDefault(key, failure)));
+        }
+        Console.WriteLine("This compares saved product IDs with GOG's live ownership list, the same endpoint used by sync. "
+            + "Names come from the snapshot; the API returns IDs only. Ownership does not prove download access. "
+            + "The snapshot and its failures are unchanged.");
+    }
+
     private static void PrintSteamComparison(ArchiveLibrary library, IReadOnlyDictionary<uint, string> listed, bool details)
     {
         var products = library.Games.Where(g => g.Key.Source == "steam").ToDictionary(g => g.Key.ProductId);
@@ -466,7 +503,7 @@ public static class ArchiveCommandLine
           auth login|status|logout --source gog|steam
           library sync|list|stats|failures [search] [--source gog|steam|all]
             --details shows full diagnostics for library sync or library failures
-          library compare --source steam [--details]   compare the snapshot with live GetOwnedGames
+          library compare --source gog|steam [--details]   compare the snapshot with a live product list
           download <source:ID|slug> [--source gog|steam] | download --all [search]
           diff [search] [--refresh] [--keys]
           verify [search] [--deep] [--fix] [--keys]

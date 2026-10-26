@@ -165,8 +165,11 @@ The Steam store lists [Burntime as free](https://store.steampowered.com/app/3269
 `include_played_free_games` is not a request for all unplayed free titles. Valve's newer
 `GetOwnedGames` API description defines `include_all_free_games` for that purpose, subject
 to playtime visibility. The user confirmed that neither missing game had ever been launched,
-consistent with this filter excluding them. The corrected response on that account still
-needs to be verified; the flag's absence alone does not prove the server's reason for omission.
+consistent with this filter excluding them. The user then verified the corrected request:
+317 entries, including all 307 snapshot games, eight applications and two demos. Neither
+snapshot games nor API entries were missing from the other set. All 15 denied AppIDs remained
+absent from the list. This validates the free-game fix on this account, but does not identify
+the 306/307 client-count discrepancy or prove that the denied apps are unused dependencies.
 
 Verified schema and API description snapshots:
 - [webui/service_player.proto, field 10](https://github.com/SteamDatabase/Protobufs/blob/94546e8057dc80a155d4c52f05f6b230a97919e4/webui/service_player.proto)
@@ -177,8 +180,7 @@ steamclient schema may lag the web UI schema. Use protobuf-net's supported `IExt
 mechanism to append bool field 10 to that request. Field 9 is `include_family_licenses` and
 must not be confused with field 10. Both full comparison and filtered name lookup share the
 builder, so both receive the flag. Wire-format probes decode the serialized request with a
-newer schema and check its survival through the older generated type. Live server behavior
-still requires confirmation on the user's account. This does not change download ownership,
+newer schema and check its survival through the older generated type. This does not change download ownership,
 PICS retry policy, or the handling of incomplete/denied diagnostic responses.
 
 Primary sources for labels: `Samples/013_UnifiedMessages/Program.cs` and

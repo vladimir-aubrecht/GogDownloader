@@ -78,6 +78,14 @@ public sealed class GogClient : IGameStore
         finally { _gate.Release(); }
     }
 
+    /// <summary>Read live ownership without loading builds, syncing or changing either library snapshot.</summary>
+    public async Task<IReadOnlyList<long>> GetOwnedGameIdsAsync(CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try { return await _api.GetOwnedGameIdsAsync(ct); }
+        finally { _gate.Release(); }
+    }
+
     public async Task<LibrarySnapshot> SyncGogLibraryAsync(IProgress<(int done, int total)>? progress = null, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);

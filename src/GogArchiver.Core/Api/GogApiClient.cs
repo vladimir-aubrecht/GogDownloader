@@ -7,7 +7,7 @@ namespace GogArchiver.Core.Api;
 
 public sealed record OwnedGames
 {
-    [JsonPropertyName("owned")] public List<long> Owned { get; init; } = [];
+    [JsonRequired, JsonPropertyName("owned")] public List<long> Owned { get; init; } = [];
 }
 
 public sealed record InstallerFile
@@ -125,7 +125,9 @@ public sealed class GogApiClient(HttpClient http)
     {
         var result = await http.GetFromJsonAsync<OwnedGames>(
             $"{GogConstants.Embed}/user/data/games", ct);
-        return result?.Owned ?? [];
+        if (result?.Owned is not { } owned || owned.Any(id => id <= 0) || owned.Distinct().Count() != owned.Count)
+            throw new InvalidDataException("GOG returned an invalid owned-product list.");
+        return owned;
     }
 
     public async Task<Product?> GetProductAsync(long id, CancellationToken ct = default)

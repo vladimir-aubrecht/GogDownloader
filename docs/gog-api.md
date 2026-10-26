@@ -54,6 +54,14 @@ The access token is short-lived (roughly an hour), the refresh token is long-liv
 | Product data | `GET {GOG_API}/products/{id}` (`?expand=…`) |
 | Games a pack contains | `GET {GOG_API}/v2/games/{id}?locale=en` → `_links.includesGames[].href` |
 
+`/user/data/games` returns `{"owned":[productId,...]}` without titles. The list includes
+owned DLC and pack products, so its size is not a playable-game count. The client requires
+the `owned` array and unique positive IDs; an explicitly empty array is valid, but missing,
+null or malformed ownership data must fail rather than look like an empty account.
+`GogClient.GetOwnedGameIdsAsync` and `library compare --source gog` read this list without
+loading content or writing library snapshots. Comparison uses saved names and retains all
+saved sync failures; ownership alone does not prove build or installer access.
+
 ### Packs are containers, not games
 
 `GET {GOG_API}/products/{id}` returns `game_type: "pack"` (and `is_installable: false`) for a

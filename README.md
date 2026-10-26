@@ -145,6 +145,27 @@ when it finds differences; inaccessible, incomplete or invalid responses cause e
 Use `--snapshot FILE` to select a saved library. In PowerShell, append
 `| Tee-Object steam-comparison.txt` to save the report.
 
+GOG supports the same diagnostic command with its saved login:
+
+```sh
+dotnet run --project src/GameArchiver.Cli -- library compare --source gog
+```
+
+It compares **all GOG product IDs**, including DLC and packs, with the live
+`/user/data/games` ownership list, the same endpoint used by GOG sync. `SnapshotOnly` shows
+saved products no longer listed as owned; `OwnedOnly` shows owned products absent from the
+snapshot. `SyncFailure` retains each saved GOG failure and says whether that ID is currently
+owned; `--details` prints its full error. Names come from the snapshot or saved failure names:
+this endpoint returns only IDs, so newly owned products may show `Name unavailable`.
+Unlike the Steam diagnostic, this is a fresh check of the sync's ownership source, not a
+comparison against a second catalog API. It does not check build versions or download access.
+
+Use `--snapshot FILE` for either an aggregate library or an original GOG library snapshot.
+The command only reads ownership, leaving both snapshots, their failures and archives unchanged.
+It does not fetch product details, builds or depots. Differences and saved failures still mean
+exit 0 if comparison completed; authentication, HTTP and malformed-response errors mean exit 1.
+Neither provider's comparison changes the selected download targets or resolves sync failures.
+
 The rename changes project, assembly and namespace names, plus the unified tool command to
 `gamearchiver`. Existing configuration/staging directories (`gogdownloader` and `gamearchive`),
 environment variables (`GOGDL_SNAPSHOT` and `GAMEARCHIVE_STEAM_*`), metadata filenames and

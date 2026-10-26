@@ -45,6 +45,8 @@ public sealed record GameVersion(string BuildId)
     /// <summary>Content provenance for this platform/language/architecture/branch selection.</summary>
     public List<GameDependency> Dependencies { get; init; } = [];
     public long DownloadSize { get; init; }
+    /// <summary>Provider size-calculation revision; old Steam estimates can contain false zero-byte depots.</summary>
+    public int SizeEstimateRevision { get; init; }
     public long InstalledSize { get; init; }
 
     internal bool IsValid => BuildId is not null && Branch is not null && Language is not null && Architecture is not null
@@ -89,6 +91,8 @@ public sealed record ArchiveOptions : GameSelection
     public int MaxConnections { get; init; } = 5;
     public int CompressionThreads { get; init; } = Environment.ProcessorCount;
     public long MaxBytesPerSecond { get; init; }
+    /// <summary>Skip a full download whose size is unknown or at/above this limit. Not a network-byte cap.</summary>
+    public long? MaxDownloadSize { get; init; }
     public bool Force { get; init; }
     public bool Clean { get; init; }
     public bool Reuse { get; init; } = true;
@@ -99,6 +103,7 @@ public sealed record ArchiveOptions : GameSelection
     public override void Validate()
     {
         base.Validate();
+        if (MaxDownloadSize is <= 0) throw new ArgumentOutOfRangeException(nameof(MaxDownloadSize));
         ArgumentException.ThrowIfNullOrWhiteSpace(OutputRoot);
         if (!Enum.IsDefined(Layout) || ProviderDirectories is null)
             throw new ArgumentException("Invalid archive layout.");
@@ -120,7 +125,7 @@ public sealed record ArchiveOptions : GameSelection
 }
 
 public sealed record ArchiveProgress(string Phase, long Bytes = 0, long TotalBytes = 0, int Files = 0, int TotalFiles = 0);
-public enum ArchiveOutcome { Completed, AlreadyDone, Unavailable, NotEnoughSpace, Incomplete }
+public enum ArchiveOutcome { Completed, AlreadyDone, Unavailable, NotEnoughSpace, Incomplete, SkippedSize }
 public sealed record ArchiveResult(GameKey Key, ArchiveOutcome Outcome, string? ArchivePath = null, string? Detail = null);
 public sealed class InlineProgress<T>(Action<T> report) : IProgress<T> { public void Report(T value) => report(value); }
 public sealed record StoreLibraryResult(IReadOnlyList<GameInfo> Games)

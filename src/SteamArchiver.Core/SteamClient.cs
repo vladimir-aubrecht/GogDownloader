@@ -317,6 +317,9 @@ public sealed class SteamClient : IGameStore
                     ? existing.Request : new SteamDepotRequest(parent.AppId, depot.DepotId, manifest, options.Branch);
                 long? downloadSize = depot.DownloadSizes.TryGetValue(options.Branch, out var download) ? download : null;
                 long? installedSize = depot.InstalledSizes.TryGetValue(options.Branch, out var installed) ? installed : null;
+                // Older nonempty depots publish download=0 as an unavailable estimate.
+                // Only an explicitly empty depot can contribute a known zero.
+                if (downloadSize == 0 && installedSize != 0) downloadSize = null;
                 if (sameManifest)
                 {
                     // A repeated depot is downloaded once. Its size can be present in only
@@ -338,6 +341,7 @@ public sealed class SteamClient : IGameStore
                 .ToDictionary(d => d.DepotId.ToString(), d => d.ManifestId.ToString()),
             Dependencies = dependencies.Distinct().ToList(),
             DownloadSize = TotalSize(selected.Values.Select(d => d.DownloadSize)),
+            SizeEstimateRevision = 1,
             InstalledSize = TotalSize(selected.Values.Select(d => d.InstalledSize)),
         };
         return new(game, version, selected.Values.OrderBy(d => d.Dlc).ThenBy(d => d.Request.DepotId).Select(d => d.Request).ToList(), app);
@@ -413,6 +417,10 @@ public sealed class SteamClient : IGameStore
             }
         }
         if (files.Count == 0) throw new InvalidDataException("Steam selection has no game files; refusing an empty archive.");
+        var fullDownloadSize = files.Values.Sum(f => f.File.Chunks.Sum(c => (long)c.CompressedSize));
+        if (options.MaxDownloadSize is { } limit && fullDownloadSize >= limit)
+            return new(selection.Game.Key, ArchiveOutcome.SkippedSize,
+                Detail: $"Selected Steam manifests require {fullDownloadSize} bytes, at or above the {limit}-byte limit. No game content downloaded.");
         var layout = ContentLinks.Resolve(new(files.Values.Select(f => new ContentEntry(f.File.Path, f.File.Size)).ToList(),
             directories.ToList(), links.Values.ToList()), options.Platform == GameOs.Windows);
         var expectedFiles = files.Keys.Concat(layout.Links.Select(l => l.Path)).ToHashSet(comparer);

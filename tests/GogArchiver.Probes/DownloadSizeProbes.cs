@@ -16,7 +16,7 @@ public static class DownloadSizeProbes
         await SteamSizesAsync();
         GogSizes();
         var root = Probe.ScratchDirectory();
-        try { await CliAsync(root); }
+        try { await CliAsync(root); await ManifestLimitAsync(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -81,6 +81,12 @@ public static class DownloadSizeProbes
         session.Apps[2] = session.Apps[2] with { Depots = [Depot(60, 0, 0)] };
         Probe.Check("a known empty DLC depot does not invalidate the remaining size estimate",
             (await steam.GetVersionAsync("1", new())).DownloadSize == 22);
+        session.Apps[2] = session.Apps[2] with { Depots = [Depot(60, 0, 7_243_075_694)] };
+        Probe.Check("zero download size for a nonempty depot is unknown, never a partial small-game total",
+            (await steam.GetVersionAsync("1", new())).DownloadSize == 0);
+        session.Apps[2] = session.Apps[2] with { Depots = [Depot(60, 0, null)] };
+        Probe.Check("zero download size without an installed size is not proof of an empty depot",
+            (await steam.GetVersionAsync("1", new())).DownloadSize == 0);
         session.Owned = [1];
         session.Apps[1] = parsed;
         Probe.Check("Steam branch selection uses that branch's sizes", (await steam.GetVersionAsync("1", new() { Branch = "beta" })).DownloadSize == 0);
@@ -104,14 +110,14 @@ public static class DownloadSizeProbes
 
     private static GameInfo Game(string source, string id, long size, string language = "en", string kind = "game") =>
         new(new(source, id), $"Game {id}", $"game_{id}") { Kind = kind, Versions = new() { [GameOs.Windows] = new("1")
-        { DownloadSize = size, Language = language, Architecture = source == "gog" ? "" : "64" } } };
+        { DownloadSize = size, SizeEstimateRevision = 1, Language = language, Architecture = source == "gog" ? "" : "64" } } };
 
     private static async Task CliAsync(string root)
     {
         var parent = Game("steam", "8", 150_000_000) with { OwnedDlcs = ["7"] };
         parent.Versions[GameOs.Windows] = parent.Versions[GameOs.Windows] with { Dlcs = ["7"] };
         var multiOs = Game("steam", "9", 30_000_000);
-        multiOs.Versions[GameOs.Linux] = new("1") { DownloadSize = 300_000_000 };
+        multiOs.Versions[GameOs.Linux] = new("1") { DownloadSize = 300_000_000, SizeEstimateRevision = 1 };
         var library = new ArchiveLibrary { Games = [Game("gog", "1", 50_000_000), Game("steam", "2", 100_000_000),
             Game("steam", "3", 120_000_000), Game("steam", "4", 0), Game("steam", "5", 5_000_000, language: "de"),
             Game("steam", "6", 20_000_000), Game("steam", "7", 1, kind: "dlc"), parent, multiOs],
@@ -155,6 +161,30 @@ public static class DownloadSizeProbes
         }
         result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(["download", "--all", "--dry-run", ..common], storeFactory: Stores));
         Probe.Check("omitting the size limit retains the existing batch selection", result.Exit == 0 && result.Output.Contains("steam:4") && result.Output.Contains("steam:8"));
+        multiOs.Versions[GameOs.Windows] = multiOs.Versions[GameOs.Windows] with { SizeEstimateRevision = 0 };
+        await library.SaveAsync(snapshot);
+        result = await CaptureAsync(() => ArchiveCommandLine.RunAsync(["download", "--all", "--max-size", "100MB", "--dry-run", ..common], storeFactory: Stores));
+        Probe.Check("legacy Steam estimates require a sync instead of trusting potentially false zeros", !result.Output.Contains("steam:9"));
+    }
+
+    private static async Task ManifestLimitAsync(string root)
+    {
+        var session = new Session { Owned = [1], Content = new OversizedContent() };
+        session.Apps[1] = new(1, "Large game") { Builds = new() { ["public"] = "1" }, Depots = [Depot(10, 1, 1)] };
+        await using var client = new SteamStore(session);
+        var staging = Path.Combine(root, "guard-staging");
+        var options = new ArchiveOptions { OutputRoot = Path.Combine(root, "guard-output"), StagingRoot = staging, MaxDownloadSize = 10_000_000 };
+        var result = await client.DownloadAsync("1", options);
+        Probe.Check("real manifest size blocks misleading appinfo before any content or staging writes",
+            result.Outcome == ArchiveOutcome.SkippedSize && !Directory.Exists(staging) && result.Detail!.Contains("10000000 bytes"));
+    }
+
+    private sealed class OversizedContent : ISteamContentSession
+    {
+        public Task<SteamManifest> GetManifestAsync(SteamDepotRequest depot, CancellationToken ct) => Task.FromResult(new SteamManifest(depot,
+            [new SteamFile("large.bin", 10_000_000, new string('a', 40), [new(new string('a', 40), 0, 0, 10_000_000, 10_000_000)])]));
+        public Task<byte[]> GetChunkAsync(SteamDepotRequest depot, SteamChunk chunk, CancellationToken ct) => throw new Exception("Oversized content must never be requested");
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static async Task<(int Exit, string Output, string Error)> CaptureAsync(Func<Task<int>> action)
@@ -169,9 +199,10 @@ public static class DownloadSizeProbes
             Task.FromResult<IReadOnlyDictionary<uint, string>>(Owned.ToDictionary(id => id, id => Apps[id].Title));
         public HashSet<uint> Owned = [];
         public Dictionary<uint, SteamApp> Apps = [];
+        public ISteamContentSession? Content;
         public Task<IReadOnlySet<uint>> GetOwnedAppIdsAsync(CancellationToken ct) => Task.FromResult<IReadOnlySet<uint>>(Owned);
         public Task<SteamApp> GetAppAsync(uint id, CancellationToken ct) => Task.FromResult(Apps[id]);
-        public Task<ISteamContentSession> OpenContentAsync(long rate, CancellationToken ct) => throw new Exception("Size planning must not download content");
+        public Task<ISteamContentSession> OpenContentAsync(long rate, CancellationToken ct) => Task.FromResult(Content ?? throw new Exception("Size planning must not download content"));
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private sealed class Store(string source, List<GameKey> downloads) : IGameStore

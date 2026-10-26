@@ -197,6 +197,13 @@ public sealed class GogClient : IGameStore
     {
         options.Validate();
         if (options.Branch != "public") throw new NotSupportedException("GOG does not support Steam branch selection.");
+        if (options.MaxDownloadSize is { } limit)
+        {
+            var current = await GetVersionCoreAsync(productId, options, ct);
+            if (current.DownloadSize <= 0 || current.DownloadSize >= limit)
+                return new(new(Source, productId), ArchiveOutcome.SkippedSize,
+                    Detail: $"Current GOG download estimate is unknown or at/above the {limit}-byte limit ({current.DownloadSize} bytes).");
+        }
         var (snapshot, game) = await ResolveAsync(productId, options.Platform, ct);
         var key = new GameKey(Source, game.Id.ToString());
         if (snapshot.PackDuplicates(game).Count > 0) return new(key, ArchiveOutcome.Unavailable, Detail: "Pack is covered by separately owned games.");

@@ -94,7 +94,13 @@ Record both sizes for the final selected depot set, after OS/language/architectu
 filtering and shared-depot resolution. Count repeated depot/manifest pairs once. Size data
 from another manifest must never be reused after a DLC override. Missing or malformed size
 fields make that total unknown (zero in `GameVersion`), rather than summing only known depots.
-A known zero-byte depot is valid when other selected depots have content. Size estimates do
+A zero download estimate is valid only with an explicitly zero installed size. Nonempty legacy
+depots can publish `download=0`: app 217980 depot 217981 reports `size=7243075694` and `download=0`,
+while depot 217982 reports only `download=5220784` (public appinfo observed 2026-10-26).
+Treat that total as unknown, not 5 MB. `SizeEstimateRevision=1` distinguishes corrected Steam
+estimates; the CLI rejects older estimates until sync. Download also compares the selected
+manifest chunk total with `MaxDownloadSize` before requesting any game chunks or changing staging.
+An explicitly empty depot is valid when other selected depots have content. Size estimates do
 not participate in `GameVersion.Matches`, so learning a size does not invalidate a backup.
 
 Primary sources: `Steam/Handlers/SteamApps/SteamApps.cs`, `Callbacks.cs`, `Types/KeyValue.cs`.

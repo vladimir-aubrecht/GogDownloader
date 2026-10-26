@@ -223,7 +223,7 @@ public static class ArchiveCommandLine
                 Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}");
             return games.Count == 0 ? 1 : 0;
         }
-        var options = Options(flags, providerDirectories);
+        var options = Options(flags, providerDirectories) with { MaxDownloadSize = maxSize };
         var knownProviders = factory is null ? new[] { "gog", "steam" } : archive.Sources.ToArray();
         if (providerDirectories.Keys.Any(p => !knownProviders.Contains(p, StringComparer.OrdinalIgnoreCase)))
             throw new ArgumentException("--provider-dir names an unregistered provider.");
@@ -299,6 +299,7 @@ public static class ArchiveCommandLine
                     if (maxSize is null) { keys.Add(game.Key); continue; }
                     var version = game.Versions[options.Platform];
                     if (library.Failures.ContainsKey(game.Key.Source) || library.Failures.ContainsKey(game.Key.ToString())
+                        || game.Key.Source == "steam" && version.SizeEstimateRevision < 1
                         || version.DownloadSize <= 0 || version.Branch != options.Branch
                         || !string.Equals(version.Language, options.Language, StringComparison.OrdinalIgnoreCase)
                         || version.Architecture.Length > 0 && version.Architecture != options.Architecture)
@@ -345,7 +346,7 @@ public static class ArchiveCommandLine
                         Console.Error.Write($"\r{key} {p.Phase}: {p.Bytes}/{p.TotalBytes} bytes, {p.Files}/{p.TotalFiles} files       ")), ct);
                     Console.Error.WriteLine();
                     Console.WriteLine($"{result.Outcome}: {result.Key} {result.ArchivePath ?? result.Detail}");
-                    failed |= result.Outcome is not ArchiveOutcome.Completed and not ArchiveOutcome.AlreadyDone;
+                    failed |= result.Outcome is not ArchiveOutcome.Completed and not ArchiveOutcome.AlreadyDone and not ArchiveOutcome.SkippedSize;
                 }
                 catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"Failed {key}: {e.Message}"); failed = true; }
             }

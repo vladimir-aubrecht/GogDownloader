@@ -235,8 +235,12 @@ installer's total size. A DLC selection is resolved to its base game before appl
 
 Unknown sizes, retained failed-sync metadata and sizes for another language/branch/architecture
 are skipped and counted in the summary. A new sync populates the default English, public,
-64-bit Steam selection. The estimate is for a full transfer, independent of resume/reuse, and
-is neither the resulting ZIP size nor a hard network-byte cap; a newer live build may differ.
+64-bit Steam selection. Older Steam size estimates also require a fresh sync: some nonempty
+depots report a zero download estimate, which must not make a multi-gigabyte game look small.
+Before transferring game content, Steam checks the actual selected manifest chunk sizes against
+the limit; an oversized selection returns `SkippedSize`. GOG rechecks its current estimate.
+The limit describes a full transfer, independent of resume/reuse; it is neither the resulting
+ZIP size nor a hard network-byte cap (metadata and retries also use bandwidth).
 
 `100MB` means 100,000,000 bytes; `100MiB` or `100M` means 104,857,600 bytes. Bare numbers mean
 bytes. KB/MB/GB/TB use powers of 1000; KiB/MiB/GiB/TiB and K/M/G/T use powers of 1024.

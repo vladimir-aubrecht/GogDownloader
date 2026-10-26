@@ -480,6 +480,8 @@ public static class MultiStoreProbes
     }
     private sealed class SteamFixture : ISteamSession
     {
+        public Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyDictionary<uint, string>>(Owned.ToDictionary(id => id, id => $"Listed app {id}"));
         public HashSet<uint> Owned = [1];
         public int Revision;
         public int DlcRevision, OwnershipCalls;

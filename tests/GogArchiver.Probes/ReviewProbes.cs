@@ -383,6 +383,8 @@ public static class ReviewProbes
     }
     private sealed class SelectionSession : ISteamSession
     {
+        public Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyDictionary<uint, string>>(Owned.ToDictionary(id => id, id => Apps[id].Title));
         public Dictionary<uint, SteamApp> Apps = [];
         public HashSet<uint> Owned = [1];
         public List<uint> Requests = [];

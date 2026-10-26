@@ -12,6 +12,7 @@ await BackupSourceProbes.RunAsync();
 await MultiStoreProbes.RunAsync();
 await SteamConnectionProbes.RunAsync();
 await SteamSharedDepotProbes.RunAsync();
+await SteamCatalogProbes.RunAsync();
 await SteamAppInfoProbes.RunAsync();
 await SteamReportingProbes.RunAsync();
 await SteamComparisonProbes.RunAsync();

@@ -22,6 +22,7 @@ public static class SteamSharedDepotProbes
         {
             await LibraryAsync(root);
             await FallbackAsync();
+            await VariantFilteringAsync();
         }
         finally { Directory.Delete(root, true); }
     }
@@ -125,6 +126,57 @@ public static class SteamSharedDepotProbes
             await RejectsAsync<InvalidDataException>(() => steam.GetVersionAsync("8870", new())));
     }
 
+    private static async Task VariantFilteringAsync()
+    {
+        SteamDepot Local(uint id) => new(id) { Manifests = new() { ["public"] = id * 100 } };
+        var fixture = new Session { Owned = [1] };
+        var game = new SteamApp(1, "Variants") { Builds = new() { ["public"] = "1" }, Depots =
+            [Local(10), new(20) { Language = "german", Architecture = "64", SharedFromApp = 999 },
+                new(21) { Language = "english", Architecture = "32", SharedFromApp = 998 },
+                Local(22) with { Language = "english", Architecture = "64" }] };
+        fixture.Apps[1] = game;
+        await using var steam = new SteamStore(fixture);
+        var version = await steam.GetVersionAsync("1", new());
+        Probe.Check("irrelevant language and architecture variants never request protected shared appinfo",
+            version.Manifests.Keys.ToHashSet().SetEquals(["10", "22"]) && fixture.AppRequests.SequenceEqual([1u]));
+        Probe.Check("requested language availability is still checked after skipping irrelevant sources",
+            await RejectsAsync<NotSupportedException>(() => steam.GetVersionAsync("1", new() { Language = "fr" })));
+        Probe.Check("requested architecture availability is still checked after skipping irrelevant sources",
+            await RejectsAsync<NotSupportedException>(() => steam.GetVersionAsync("1", new() { Architecture = "arm64" })));
+        Probe.Check("a selected language with inaccessible shared metadata still fails",
+            await RejectsAsync<SteamAuthenticationException>(() => steam.GetVersionAsync("1", new() { Language = "de" })));
+        fixture.Apps[1] = game with { Depots = [Local(10), new(22) { Language = "english", Architecture = "64", SharedFromApp = 997 }] };
+        Probe.Check("a genuinely required source cannot be silently skipped",
+            await RejectsAsync<SteamAuthenticationException>(() => steam.GetVersionAsync("1", new())));
+
+        fixture.Owned = [1, 4];
+        fixture.Apps[1] = game with { Depots = [Local(10), new(20) { SharedFromApp = 2 },
+            Local(21) with { DlcAppId = 4, Language = "german", Architecture = "32" }] };
+        fixture.Apps[2] = new(2, "Intermediate") { Depots = [new(20) { SharedFromApp = 3, OsList = "windows",
+            DlcAppId = 4, Language = "english", Architecture = "64" }] };
+        fixture.Apps[3] = new(3, "Final source") { Depots = [Local(20)] };
+        fixture.Apps[4] = new(4, "Owned expansion") { Type = "dlc", ParentAppId = 1 };
+        fixture.AppRequests.Clear();
+        version = await steam.GetVersionAsync("1", new());
+        Probe.Check("multi-hop shared depots retain intermediate architecture, language and DLC grouping",
+            version.Manifests.Keys.ToHashSet().SetEquals(["10", "20"]) && fixture.AppRequests.SequenceEqual([1u, 4u, 2u, 3u]));
+        Probe.Check("selection records both required metadata hops and the inherited DLC license",
+            version.Dependencies.Contains(new("2", "shared-depot", "20"))
+            && version.Dependencies.Contains(new("3", "shared-depot", "20"))
+            && version.Dependencies.Contains(new("4", "dlc-license", "20", false)));
+        fixture.Apps[1] = game with { Depots = [Local(10), new(20) { SharedFromApp = 2 }] };
+        fixture.Apps[2] = new(2, "Linux intermediate") { Depots = [new(20) { SharedFromApp = 3, OsList = "linux" }] };
+        fixture.AppRequests.Clear();
+        version = await steam.GetVersionAsync("1", new());
+        Probe.Check("an intermediate OS restriction stops traversal before an unrelated source",
+            version.Manifests.Keys.SequenceEqual(["10"]) && !fixture.AppRequests.Contains(3));
+        fixture.Apps[2] = new(2, "Unowned DLC intermediate") { Depots = [new(20) { SharedFromApp = 3, DlcAppId = 5 }] };
+        fixture.AppRequests.Clear();
+        version = await steam.GetVersionAsync("1", new());
+        Probe.Check("an intermediate DLC license restriction cannot disappear at a later hop",
+            version.Manifests.Keys.SequenceEqual(["10"]) && !fixture.AppRequests.Contains(3));
+    }
+
     private static string Read(ZipArchive zip, string name)
     { using var reader = new StreamReader(zip.GetEntry(name)!.Open()); return reader.ReadToEnd(); }
     private static async Task<bool> RejectsAsync<T>(Func<Task> action) where T : Exception
@@ -137,6 +189,8 @@ public static class SteamSharedDepotProbes
         public List<uint> AppRequests = [];
         public List<SteamDepotRequest> ManifestRequests = [];
         public bool DenySharedContent;
+        public Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyDictionary<uint, string>>(Apps.ToDictionary(p => p.Key, p => p.Value.Title));
         public Task<IReadOnlySet<uint>> GetOwnedAppIdsAsync(CancellationToken ct) => Task.FromResult<IReadOnlySet<uint>>(Owned);
         public Task<SteamApp> GetAppAsync(uint id, CancellationToken ct)
         {

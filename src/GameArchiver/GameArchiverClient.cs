@@ -36,7 +36,7 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
             try
             {
                 var snapshot = await store.SyncLibraryAsync(ct);
-                if (snapshot.Games.Any(g => g.Key.Source != source)
+                if (snapshot.PrimaryCatalog?.Any(string.IsNullOrWhiteSpace) == true || snapshot.Games.Any(g => g.Key.Source != source)
                     || snapshot.Games.GroupBy(g => g.Key).Any(g => g.Count() > 1))
                     throw new InvalidDataException($"Store {source} returned invalid or duplicate identities.");
                 var games = snapshot.Games.ToList();
@@ -51,22 +51,33 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
                     if (string.IsNullOrWhiteSpace(name)) name = previous?.FailureNames.GetValueOrDefault(key.ToString());
                     if (!string.IsNullOrWhiteSpace(name)) names[key.ToString()] = name;
                 }
-                return (Games: games, Failures: snapshot.Failures.ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value), Names: names,
+                return (Source: source, Catalog: snapshot.PrimaryCatalog?.ToHashSet() ?? previous?.PrimaryCatalogs.GetValueOrDefault(source),
+                    Impacts: snapshot.FailureImpacts.Where(f => snapshot.Failures.ContainsKey(f.Key))
+                        .ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value),
+                    Games: games, Failures: snapshot.Failures.ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value), Names: names,
                     Summaries: snapshot.FailureSummaries.Where(f => snapshot.Failures.ContainsKey(f.Key) && !string.IsNullOrWhiteSpace(f.Value))
                         .ToDictionary(f => new GameKey(source, f.Key).ToString(), f => f.Value));
             }
             catch (Exception e) when (e is not OperationCanceledException)
             {
-                return (Games: previous?.Games.Where(g => g.Key.Source == source).ToList() ?? [],
-                    Failures: new Dictionary<string, string> { [source] = e.Message },
+                var failures = previous?.Failures.Where(f => f.Key.Split(':', 2)[0] == source).ToDictionary() ?? [];
+                failures[source] = e.Message;
+                return (Source: source, Catalog: previous?.PrimaryCatalogs.GetValueOrDefault(source),
+                    Impacts: previous?.FailureImpacts.Where(f => failures.ContainsKey(f.Key)).ToDictionary() ?? new Dictionary<string, List<LibraryFailureImpact>>(),
+                    Games: previous?.Games.Where(g => g.Key.Source == source).ToList() ?? [],
+                    Failures: failures,
                     Names: previous?.FailureNames.Where(f => f.Key.Split(':', 2)[0] == source).ToDictionary() ?? new Dictionary<string, string>(),
-                    Summaries: new Dictionary<string, string>());
+                    Summaries: previous?.FailureSummaries.Where(f => f.Key != source && failures.ContainsKey(f.Key)).ToDictionary() ?? new Dictionary<string, string>());
             }
         }));
         // Syncing a selected source must not remove other stores from a shared snapshot.
         var unchanged = previous?.Games.Where(g => !_stores.ContainsKey(g.Key.Source)) ?? [];
         return new()
         {
+            PrimaryCatalogs = results.Where(r => r.Catalog is not null).ToDictionary(r => r.Source, r => r.Catalog!)
+                .Concat(previous?.PrimaryCatalogs.Where(c => !_stores.ContainsKey(c.Key)) ?? []).ToDictionary(),
+            FailureImpacts = results.SelectMany(r => r.Impacts).Concat(previous?.FailureImpacts
+                .Where(f => !_stores.ContainsKey(f.Key.Split(':', 2)[0])) ?? []).ToDictionary(),
             Games = results.SelectMany(r => r.Games).Concat(unchanged).OrderBy(g => g.Title).ThenBy(g => g.Key.Source).ToList(),
             Failures = results.SelectMany(r => r.Failures).Concat(previous?.Failures
                 .Where(f => !_stores.ContainsKey(f.Key.Split(':', 2)[0])) ?? [])
@@ -109,7 +120,7 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
         options.Validate();
         var catalog = await ScanAsync(options, ct);
         var rows = new List<ArchiveDifference>();
-        foreach (var game in library.Games.Where(g => _stores.ContainsKey(g.Key.Source) && g.CanBackUp(options.Platform)))
+        foreach (var game in library.Games.Where(g => _stores.ContainsKey(g.Key.Source) && library.IsCatalogEntry(g.Key) && g.CanBackUp(options.Platform)))
         {
             ct.ThrowIfCancellationRequested();
             if (!game.Versions.TryGetValue(options.Platform, out var expected)) continue;

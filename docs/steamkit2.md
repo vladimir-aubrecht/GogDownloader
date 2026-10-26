@@ -42,6 +42,15 @@ duplicate library entries. A package can contain games, DLC, software, demos and
 the saved product count is not a license count or the Steam client's game count. Display the
 product types separately, using `common/type`.
 
+Sync separately fetches the complete validated `GetOwnedGames` catalog before processing the
+license inventory. Catalog membership controls default archive roots, while active packages
+still authorize roots and DLC. Query failure or an incomplete response fails the source and
+preserves its prior products, catalog and unresolved failure evidence. A listed AppID without
+an active package license is recorded as a catalog failure, not granted content access.
+Keep all successful inventory appinfo and retain old entries for failed products; do not trim
+the saved product collection to the API list. Only catalog roots receive default content
+planning during sync. Non-catalog inventory appinfo does not trigger unrelated depot planning.
+
 Request app access tokens with `PICSGetAccessTokens`, then app info with `PICSGetProductInfo`.
 `AsyncJobMultiple.ResultSet.Complete` and `Failed` must be checked; partial results are not a
 complete library. Large appinfo can carry `UseHttp` and `HttpUri`; that body must be read and
@@ -91,6 +100,27 @@ may be inaccessible and may describe a different manifest. Look up source appinf
 the local entry has no manifest for that branch. Authorize depot keys and manifest requests
 against the licensed parent game, and retain the shared depot in the archive and completion
 metadata. A failed depot download must still prevent completion.
+
+Before each shared-app lookup, check the current depot's known OS, license, architecture and
+language constraints. Keep incompatible language/architecture variants in availability checks
+so an unavailable requested variant cannot silently produce a partial archive of common files.
+When walking multiple sources, carry the accumulated constraints forward instead of merging
+every hop against the original unconstrained entry. Retain cycle detection and the preference
+for local branch manifests.
+
+Each successful selection records `GameVersion.Dependencies`: DLC metadata reads, shared-app
+metadata inspected during resolution, and references backed by local manifests. A local
+manifest sets `MetadataRequired: false`; inherited DLC license gates are recorded separately
+as `dlc-license`. These are provenance, not an independent authorization or completeness proof.
+Dependencies inherit platform from the enclosing version map and language/architecture/branch
+from the version. Provenance is excluded from archive-content equality.
+
+Confirmed selection failures record `FailureImpacts` with the affected catalog root, selection,
+required AppID and depot when known. Every checked platform keeps its own diagnostic even
+when the product-level summary reflects the final failure. Inventory failures without a
+confirmed edge stay unresolved, with unknown impact for other selections. Unsupported default
+variants and failures that stop discovery early do not prove all dependencies were examined.
+Neither classification nor catalog absence clears a failure or changes sync's failing exit code.
 
 Observed on 2026-10-25 in the public appinfo cache at
 `https://api.steamcmd.net/v1/info/{appid}`: BioShock Infinite (8870), XCOM 2 (268500), BioShock
@@ -157,8 +187,8 @@ and one demo. Two licensed snapshot games were absent, Burntime Remastered (3269
 King's Quest (345390), despite both appearing in the Steam client. The client reported 306
 games, one soundtrack, eight software products and 141 tools; the snapshot had 307 games,
 one music product, eight applications and 32 tools. These counts do not identify the extra
-game or establish that any soundtrack is misclassified. Do not filter backup targets solely
-by presence in `GetOwnedGames` or reinterpret the tool-count difference as missing games.
+game or establish that any soundtrack is misclassified. The incomplete original query must
+not be used to discard licensed products or reinterpret the tool-count difference as missing games.
 
 The Steam store lists [Burntime as free](https://store.steampowered.com/app/3269080/) and
 [King's Quest's first chapter as free](https://store.steampowered.com/app/345390/).

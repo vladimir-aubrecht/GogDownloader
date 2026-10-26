@@ -12,7 +12,7 @@ namespace GameArchiver.Cli;
 public static class ArchiveCommandLine
 {
     private static readonly HashSet<string> Switches = ["all", "dry-run", "force", "clean", "no-reuse", "no-verify", "no-launcher",
-        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details"];
+        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
         "file", "entry", "name", "path", "max-size"];
@@ -72,6 +72,8 @@ public static class ArchiveCommandLine
         var snapshotPath = flags.GetValueOrDefault("snapshot", ArchiveLibrary.DefaultPath);
         var command = positionals[0];
         var subcommand = positionals.ElementAtOrDefault(1);
+        if (flags.ContainsKey("inventory") && (command != "library" || subcommand is not "list" and not "stats"))
+            throw new ArgumentException("--inventory requires library list or library stats.");
         long? maxSize = null;
         if (flags.TryGetValue("max-size", out var sizeLimit))
         {
@@ -161,9 +163,17 @@ public static class ArchiveCommandLine
             await library.SaveAsync(snapshotPath, ct);
             Console.WriteLine($"Saved {library.Games.Count} product{(library.Games.Count == 1 ? "" : "s")} to {snapshotPath}.");
             PrintLibraryStats(library.Games);
+            PrintCatalogStats(library, source);
             var currentFailures = library.Failures.Where(f => archive.Sources.Contains(f.Key.Split(':', 2)[0])).ToList();
-            foreach (var failure in currentFailures) Console.Error.WriteLine($"Failed {FailureLabel(library, failure.Key)}: "
-                + (flags.ContainsKey("details") ? failure.Value : library.FailureSummaries.GetValueOrDefault(failure.Key, failure.Value)));
+            foreach (var failure in currentFailures)
+            {
+                var parts = failure.Key.Split(':', 2);
+                var inventoryOnly = parts.Length == 2 && library.PrimaryCatalogs.TryGetValue(parts[0], out var catalog)
+                    && !catalog.Contains(parts[1]) && library.FailureImpacts.GetValueOrDefault(failure.Key, []).Count == 0;
+                Console.Error.WriteLine($"{(inventoryOnly ? "Inventory metadata unavailable" : "Failed")} {FailureLabel(library, failure.Key)}: "
+                    + (flags.ContainsKey("details") ? failure.Value : library.FailureSummaries.GetValueOrDefault(failure.Key, failure.Value)));
+                PrintFailureImpact(library, failure.Key, flags.ContainsKey("details"), Console.Error);
+            }
             if (currentFailures.Count > 0 && !flags.ContainsKey("details"))
                 Console.Error.WriteLine($"{currentFailures.Count} unresolved sync failures. Use --details for full diagnostics (also supported by library failures).");
             return currentFailures.Count == 0 ? 0 : 1;
@@ -179,6 +189,7 @@ public static class ArchiveCommandLine
                     throw new ArgumentException("Usage: library compare --source gog|steam [--snapshot FILE] [--details]");
                 var emptyAggregate = !legacy && library.Games.Count == 0 && library.Failures.Count == 0;
                 if (!emptyAggregate && !(legacy && source == "gog") && !library.Games.Any(g => g.Key.Source == source)
+                    && !library.PrimaryCatalogs.ContainsKey(source)
                     && !library.Failures.Keys.Any(k => k == source || k.StartsWith(source + ":", StringComparison.Ordinal)))
                     throw new InvalidOperationException($"No {(source == "steam" ? "Steam" : "GOG")} data in this snapshot. Run library sync --source {source} first.");
                 if (source == "steam" && stores[0] is SteamArchiver.Core.SteamClient steam)
@@ -193,15 +204,20 @@ public static class ArchiveCommandLine
                 var failures = library.Failures.Where(f => (source == "all" || f.Key.Split(':', 2)[0] == source)
                     && (search.Length == 0 || f.Key.Contains(search, StringComparison.OrdinalIgnoreCase)
                         || FailureLabel(library, f.Key).Contains(search, StringComparison.OrdinalIgnoreCase)
+                        || library.FailureImpacts.GetValueOrDefault(f.Key, []).Any(i => FailureLabel(library, f.Key.Split(':', 2)[0] + ":" + i.ProductId).Contains(search, StringComparison.OrdinalIgnoreCase))
                         || f.Value.Contains(search, StringComparison.OrdinalIgnoreCase))).OrderBy(f => f.Key).ToList();
-                foreach (var failure in failures) Console.WriteLine($"{FailureLabel(library, failure.Key)}: "
-                    + (flags.ContainsKey("details") ? failure.Value : library.FailureSummaries.GetValueOrDefault(failure.Key, failure.Value)));
+                foreach (var failure in failures)
+                {
+                    Console.WriteLine($"{FailureLabel(library, failure.Key)}: "
+                        + (flags.ContainsKey("details") ? failure.Value : library.FailureSummaries.GetValueOrDefault(failure.Key, failure.Value)));
+                    PrintFailureImpact(library, failure.Key, flags.ContainsKey("details"), Console.Out);
+                }
                 Console.WriteLine($"{failures.Count} recorded sync failures.");
                 return 0;
             }
-            games = games.Where(g => Search(g, search)).ToList();
+            games = games.Where(g => Search(g, search) && (flags.ContainsKey("inventory") || library.IsCatalogEntry(g.Key))).ToList();
             if (subcommand == "stats")
-            { PrintLibraryStats(games); return 0; }
+            { PrintLibraryStats(games); if (search.Length == 0) PrintCatalogStats(library, source); return 0; }
             if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats|failures|compare");
             foreach (var game in games)
                 Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}");
@@ -363,6 +379,41 @@ public static class ArchiveCommandLine
         }
     }
 
+    private static void PrintCatalogStats(ArchiveLibrary library, string selectedSource)
+    {
+        foreach (var (source, ids) in library.PrimaryCatalogs.Where(c => selectedSource == "all" || selectedSource == c.Key).OrderBy(c => c.Key))
+        {
+            var known = library.Games.Where(g => g.Key.Source == source && ids.Contains(g.Key.ProductId)).ToList();
+            Console.WriteLine($"{source} primary catalog: {ids.Count} entries, {known.Count} with saved metadata, "
+                + $"{known.Count(g => g.Versions.Keys.Any(g.CanBackUp))} archivable; "
+                + $"{library.Games.Count(g => g.Key.Source == source && !ids.Contains(g.Key.ProductId))} additional inventory products.");
+            if (library.Failures.ContainsKey(source)) Console.WriteLine($"{source} catalog is from the previous sync; the source refresh failed.");
+        }
+    }
+
+    private static void PrintFailureImpact(ArchiveLibrary library, string key, bool details, TextWriter writer)
+    {
+        var parts = key.Split(':', 2);
+        if (parts.Length != 2) return;
+        var impacts = library.FailureImpacts.GetValueOrDefault(key, []);
+        foreach (var impact in impacts)
+        {
+            var selection = impact.Platform is { } platform ? $"{platform}/{impact.Language}/{impact.Architecture}/{impact.Branch}" : "product metadata";
+            writer.WriteLine($"  Blocks {FailureLabel(library, parts[0] + ":" + impact.ProductId)} [{selection}]"
+                + (impact.RequiredProductId is null ? "." : $"; requires {parts[0]}:{impact.RequiredProductId}"
+                    + (impact.DepotId is null ? "." : $", depot {impact.DepotId}.")));
+            if (details && impact.Detail is not null) writer.WriteLine($"    {impact.Detail}");
+        }
+        if (impacts.Count == 0 && library.PrimaryCatalogs.TryGetValue(parts[0], out var catalog))
+            writer.WriteLine(catalog.Contains(parts[1])
+                ? "  Primary catalog product; dependency impact is not yet known."
+                : "  Inventory metadata outside the primary catalog; no blocking catalog dependency confirmed. Other selections may still require it.");
+        if (impacts.Count > 0 && library.Failures.ContainsKey(parts[0]))
+            writer.WriteLine("  Impact is from the previous sync; the source refresh failed.");
+        else if (library.Failures.ContainsKey(parts[0]) && library.PrimaryCatalogs.ContainsKey(parts[0]))
+            writer.WriteLine("  Catalog membership is from the previous sync; the source refresh failed.");
+    }
+
     private static void PrintGogComparison(ArchiveLibrary library, IReadOnlyList<long> listed, bool details)
     {
         var products = library.Games.Where(g => g.Key.Source == "gog").ToDictionary(g => g.Key.ProductId);
@@ -414,6 +465,7 @@ public static class ArchiveCommandLine
             var state = id is null ? "source failure" : present ? "listed by GetOwnedGames" : "not listed by GetOwnedGames";
             Console.WriteLine($"SyncFailure {label} [{state}]: "
                 + (details ? failure : library.FailureSummaries.GetValueOrDefault(key, failure)));
+            PrintFailureImpact(library, key, details, Console.Out);
         }
         Console.WriteLine("This compares saved metadata with a live API list, not the Steam client's counter. "
             + "Listed apps are not proof of depot access. The snapshot and its failures are unchanged.");
@@ -503,6 +555,7 @@ public static class ArchiveCommandLine
           auth login|status|logout --source gog|steam
           library sync|list|stats|failures [search] [--source gog|steam|all]
             --details shows full diagnostics for library sync or library failures
+            --inventory includes products outside the primary catalog in library list/stats
           library compare --source gog|steam [--details]   compare the snapshot with a live product list
           download <source:ID|slug> [--source gog|steam] | download --all [search]
           diff [search] [--refresh] [--keys]

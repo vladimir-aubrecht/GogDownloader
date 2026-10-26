@@ -42,17 +42,26 @@ public sealed record GameVersion(string BuildId)
     public string Architecture { get; init; } = "64";
     public Dictionary<string, string> Manifests { get; init; } = [];
     public List<string> Dlcs { get; init; } = [];
+    /// <summary>Content provenance for this platform/language/architecture/branch selection.</summary>
+    public List<GameDependency> Dependencies { get; init; } = [];
     public long DownloadSize { get; init; }
     public long InstalledSize { get; init; }
 
     internal bool IsValid => BuildId is not null && Branch is not null && Language is not null && Architecture is not null
-        && Manifests is not null && Dlcs is not null && Dlcs.All(d => !string.IsNullOrWhiteSpace(d));
+        && Manifests is not null && Dlcs is not null && Dlcs.All(d => !string.IsNullOrWhiteSpace(d))
+        && Dependencies is not null && Dependencies.All(d => d is not null && !string.IsNullOrWhiteSpace(d.ProductId));
 
     public bool Matches(GameVersion other) => IsValid && other.IsValid && ContentRevision == other.ContentRevision && BuildId == other.BuildId
         && Branch == other.Branch && Architecture == other.Architecture && string.Equals(Language, other.Language, StringComparison.OrdinalIgnoreCase)
         && Manifests.OrderBy(k => k.Key).SequenceEqual(other.Manifests.OrderBy(k => k.Key))
         && Dlcs.Order().SequenceEqual(other.Dlcs.Order());
 }
+
+public sealed record GameDependency(string ProductId, string Kind, string? DepotId = null, bool MetadataRequired = true);
+
+/// <summary>A confirmed failed catalog selection, not a claim about every possible variant.</summary>
+public sealed record LibraryFailureImpact(string ProductId, GameOs? Platform = null, string Language = "en",
+    string Architecture = "64", string Branch = "public", string? RequiredProductId = null, string? DepotId = null, string? Detail = null);
 
 public record GameSelection
 {
@@ -115,6 +124,9 @@ public sealed record ArchiveResult(GameKey Key, ArchiveOutcome Outcome, string? 
 public sealed class InlineProgress<T>(Action<T> report) : IProgress<T> { public void Report(T value) => report(value); }
 public sealed record StoreLibraryResult(IReadOnlyList<GameInfo> Games)
 {
+    /// <summary>Null leaves membership unchanged, or uses legacy selection if absent. Empty means an explicitly empty catalog.</summary>
+    public IReadOnlySet<string>? PrimaryCatalog { get; init; }
+    public IReadOnlyDictionary<string, List<LibraryFailureImpact>> FailureImpacts { get; init; } = new Dictionary<string, List<LibraryFailureImpact>>();
     public IReadOnlyDictionary<string, string> Failures { get; init; } = new Dictionary<string, string>();
     public IReadOnlyDictionary<string, string> FailureNames { get; init; } = new Dictionary<string, string>();
     /// <summary>Optional display summaries; Failures retains full diagnostics and determines failure status.</summary>
@@ -140,6 +152,10 @@ public sealed record ArchiveLibrary
     public Dictionary<string, string> FailureNames { get; init; } = [];
     /// <summary>Optional display summaries keyed by source:product ID. Full diagnostics remain in Failures.</summary>
     public Dictionary<string, string> FailureSummaries { get; init; } = [];
+    public Dictionary<string, HashSet<string>> PrimaryCatalogs { get; init; } = [];
+    public Dictionary<string, List<LibraryFailureImpact>> FailureImpacts { get; init; } = [];
+
+    public bool IsCatalogEntry(GameKey key) => !PrimaryCatalogs.TryGetValue(key.Source, out var catalog) || catalog.Contains(key.ProductId);
 
     /// <summary>Resolve filtered DLC selections to their archivable parents for this OS.</summary>
     public IReadOnlyList<GameInfo> SelectDownloads(IEnumerable<GameInfo> selected, GameOs platform)
@@ -148,10 +164,10 @@ public sealed record ArchiveLibrary
         foreach (var game in selected)
         {
             var parents = Games.Where(parent => parent.Key.Source == game.Key.Source && parent.Key != game.Key
-                && parent.CanBackUp(platform) && parent.Versions[platform].Dlcs.Contains(game.Key.ProductId)).ToList();
+                && IsCatalogEntry(parent.Key) && parent.CanBackUp(platform) && parent.Versions[platform].Dlcs.Contains(game.Key.ProductId)).ToList();
             if (parents.Count > 0)
                 foreach (var parent in parents) result.TryAdd(parent.Key, parent);
-            else if (game.CanBackUp(platform)) result.TryAdd(game.Key, game);
+            else if (IsCatalogEntry(game.Key) && game.CanBackUp(platform)) result.TryAdd(game.Key, game);
         }
         return result.Values.ToList();
     }
@@ -165,6 +181,10 @@ public sealed record ArchiveLibrary
             ?? throw new InvalidDataException("Empty library snapshot.");
         if (library.SchemaVersion != 1) throw new InvalidDataException("Unsupported library snapshot schema.");
         if (library.Games is null || library.Failures is null || library.FailureNames is null || library.FailureSummaries is null
+            || library.PrimaryCatalogs is null || library.PrimaryCatalogs.Any(c => string.IsNullOrWhiteSpace(c.Key)
+                || c.Value is null || c.Value.Any(string.IsNullOrWhiteSpace))
+            || library.FailureImpacts is null || library.FailureImpacts.Any(f => f.Value is null
+                || f.Value.Any(i => i is null || string.IsNullOrWhiteSpace(i.ProductId) || i.Platform is { } p && !Enum.IsDefined(p)))
             || library.Games.Any(g => g is null || g.Key is null
             || g.Versions is null || g.Versions.Any(v => !Enum.IsDefined(v.Key) || v.Value is null || !v.Value.IsValid)
             || g.OwnedDlcs is null || g.Title is null || g.Slug is null)

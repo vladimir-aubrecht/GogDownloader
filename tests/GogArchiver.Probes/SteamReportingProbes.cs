@@ -67,7 +67,7 @@ public static class SteamReportingProbes
         Probe.Check("sync --details preserves full output and the failure exit code",
             output.Exit == 1 && output.Text.Contains("Failed Same title (steam:2): Cannot read Steam app 2:")
             && output.Text.Contains("Licensed packages: 7, 8"));
-        output = await OfflineAsync(snapshot, "stats");
+        output = await OfflineAsync(snapshot, "stats", "--inventory");
         Probe.Check("offline stats counts only the selected source and includes DLC and software separately",
             output.Text.Contains("steam: 5 products (1 game, 1 DLC, 1 application, 1 demo, 1 tool)") && !output.Text.Contains("gog:"));
         output = await OfflineAsync(snapshot, "stats", "Same title");
@@ -113,6 +113,8 @@ public static class SteamReportingProbes
 
     private sealed class Session : ISteamSession
     {
+        public Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyDictionary<uint, string>>(new Dictionary<uint, string> { [1] = "Same title", [6] = "Dependent game", [8] = "App 8", [9] = "App 9" });
         private readonly Dictionary<uint, int> _calls = [];
         private readonly SteamAppInfoCache _cache;
         public Session() => _cache = new((ids, _) => Task.FromResult<IReadOnlyDictionary<uint, SteamAppInfoResult>>(

@@ -159,6 +159,8 @@ public static class SteamAppInfoProbes
     }
     private sealed class NameSession : ISteamSession
     {
+        public Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyDictionary<uint, string>>(new Dictionary<uint, string> { [1] = "", [2] = "", [3] = "" });
         public bool FailNames;
         public bool FailLibrary;
         public Task<IReadOnlySet<uint>> GetOwnedAppIdsAsync(CancellationToken ct) => FailLibrary ? throw new IOException("Steam unavailable")

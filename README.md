@@ -109,9 +109,27 @@ even if their titles match. Such failures are not suppressed.
 
 `Saved N products` counts unique `(source, product ID)` entries in the saved snapshot, including
 DLC, applications, demos and tools. It is neither a license count nor the Steam client's game
-count. Sync also prints a per-source breakdown by product type; `library stats --source steam`
-shows the same breakdown offline. A source-filtered sync retains the other stores' entries and
+count. Sync also prints a per-source breakdown by product type; `library stats --source steam --inventory`
+shows the complete inventory breakdown offline. A source-filtered sync retains the other stores' entries and
 older entries for failed products, so the saved total can include both.
+
+Steam sync now reads the full validated `GetOwnedGames` list once to establish the **primary
+catalog**, separately from the package-license inventory. The primary catalog controls normal
+`library list` / `library stats`, `download --all` and `diff`. Use `library list --source steam
+--inventory` to inspect all known Steam products, including DLC, tools and games outside that
+catalog. Sync prints the primary-catalog count separately, including listed products whose
+metadata could not be loaded. Missing license grants remain failures even for catalog entries.
+
+The inventory still supplies owned DLC and shared-depot references. Searching a DLC during a
+batch download resolves to its catalog parent. An explicit `download steam:APPID` remains
+available outside the catalog and checks live licenses and content access. Existing archives
+are not moved or removed; inventory products are not treated as orphaned just because they
+are outside the primary catalog. Old snapshots retain their previous selection behavior until
+a successful Steam sync adds catalog membership. GOG selection behavior is unchanged.
+
+If the complete catalog or package inventory cannot be read, the previous source entries,
+catalog membership and failure diagnostics are retained, with a source failure. An explicitly
+empty catalog is valid and never falls back to selecting every licensed product.
 
 Inspect the saved failures without logging in or repeating sync:
 
@@ -120,6 +138,20 @@ dotnet run --project src/GameArchiver.Cli -- library failures --source steam
 dotnet run --project src/GameArchiver.Cli -- library failures "title or AppID" --source steam
 dotnet run --project src/GameArchiver.Cli -- library failures --source steam --details
 ```
+
+Confirmed failures show `Blocks <title> (steam:APPID)` with the platform/language/architecture/
+branch and required AppID/depot. Searches also match blocked games' names. Inventory metadata
+failures without a confirmed blocking link are labelled separately; that does **not** establish
+they are harmless for other selections. They remain saved failures and keep sync's exit status
+nonzero. Local shared manifests can make a parent's selection succeed without reading the
+source app's metadata, but they do not resolve the source app's own metadata failure.
+
+The aggregate snapshot adds optional `PrimaryCatalogs` (provider to product-ID set) and
+`FailureImpacts` (failure key to affected selections). `GameVersion.Dependencies` records
+required DLC metadata, inspected shared-app metadata and local shared-manifest references;
+`MetadataRequired: false` distinguishes a reference that needs no appinfo lookup. These
+fields also support C# consumers. Dependency provenance does not invalidate an otherwise
+identical archive; actual depot/manifest selection still determines content identity.
 
 To investigate differences from Steam's game count, compare the saved snapshot with the
 full `GetOwnedGames` list using the remembered Steam login (no Web API key is needed):
@@ -137,8 +169,9 @@ based on its title. The comparison matches AppIDs, never names.
 
 The command makes one `GetOwnedGames` request, asking for free games including unplayed
 titles, free packages and unvetted apps. This API list is not necessarily the Steam client's
-displayed count or a complete inventory of licensed products. Absence here must not exclude
-a licensed game from backup; Steam can omit entries depending on service filters and visibility.
+displayed count or a complete inventory of licensed products. Steam can omit entries depending
+on service filters and visibility; absence does not erase a licensed product from the inventory
+or prevent an explicit download. The next successful sync uses this list for default catalog selection.
 It does not refresh PICS, download content or change the snapshot. Being listed does not
 establish depot access or clear a sync failure. Exit 0 means the comparison completed, even
 when it finds differences; inaccessible, incomplete or invalid responses cause exit 1.

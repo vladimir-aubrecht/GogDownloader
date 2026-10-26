@@ -165,6 +165,8 @@ public static class DownloadSizeProbes
     }
     private sealed class Session : ISteamSession
     {
+        public Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyDictionary<uint, string>>(Owned.ToDictionary(id => id, id => Apps[id].Title));
         public HashSet<uint> Owned = [];
         public Dictionary<uint, SteamApp> Apps = [];
         public Task<IReadOnlySet<uint>> GetOwnedAppIdsAsync(CancellationToken ct) => Task.FromResult<IReadOnlySet<uint>>(Owned);

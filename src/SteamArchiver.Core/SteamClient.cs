@@ -69,17 +69,41 @@ public sealed class SteamClient : IGameStore
         try
         {
             await EnsureSessionAsync();
+            // A failed/incomplete catalog query must fail the source, preserving the previous snapshot.
+            // Membership selects batch roots; licenses still authorize every root and owned DLC.
+            var catalog = await _session.GetOwnedGamesAsync(ct);
+            if (catalog.Keys.Any(id => id == 0)) throw new InvalidDataException("Steam catalog contains an invalid AppID.");
             var owned = await _session.GetOwnedAppIdsAsync(ct);
             await _session.PreloadAppsAsync(owned, ct);
             var games = new List<GameInfo>();
             var failures = new Dictionary<string, string>();
             var summaries = new Dictionary<string, string>();
-            var names = new Dictionary<string, string>();
-            foreach (var id in owned.Order())
+            var names = catalog.Where(p => !string.IsNullOrWhiteSpace(p.Value)).ToDictionary(p => p.Key.ToString(), p => p.Value);
+            var impacts = new Dictionary<string, List<LibraryFailureImpact>>();
+            void RecordFailure(uint id, Exception error)
+            {
+                failures[id.ToString()] = error.Message;
+                summaries.Remove(id.ToString());
+                for (Exception? cause = error; cause is not null; cause = cause.InnerException)
+                    if (cause is SteamAppInfoRecheckException { ExplicitlyDenied: true } denied)
+                    {
+                        summaries[id.ToString()] = denied.AppId == id
+                            ? "Steam denied access to this app's metadata after retry."
+                            : $"Required Steam app {denied.AppId} is unavailable: metadata access denied after retry.";
+                        break;
+                    }
+            }
+            void RecordImpact(uint failedId, LibraryFailureImpact impact)
+            {
+                if (!impacts.TryGetValue(failedId.ToString(), out var list)) impacts[failedId.ToString()] = list = [];
+                if (!list.Contains(impact)) list.Add(impact);
+            }
+            foreach (var id in owned.Concat(catalog.Keys).Distinct().Order())
             {
                 ct.ThrowIfCancellationRequested();
                 try
                 {
+                    if (!owned.Contains(id)) throw new SteamAuthenticationException($"Steam catalog app {id} has no active package license. Catalog membership does not authorize content access.");
                     var app = await _session.GetAppAsync(id, ct);
                     names[id.ToString()] = app.Title;
                     var dlcs = app.Dlcs.Concat(app.Depots.Select(d => d.DlcAppId).Where(d => d > 0))
@@ -91,13 +115,17 @@ public sealed class SteamClient : IGameStore
                         Versions = app.Platforms.ToDictionary(p => p, _ => new GameVersion(app.Builds.GetValueOrDefault("public", ""))
                         { Name = app.Builds.GetValueOrDefault("public"), Dlcs = dlcs }),
                     };
-                    foreach (var platform in app.Platforms.Where(game.CanBackUp))
+                    var failed = false;
+                    foreach (var platform in app.Platforms.Where(p => catalog.ContainsKey(id) && game.CanBackUp(p)))
                     {
+                        uint requiredId = id;
+                        uint? requiredDepot = null;
                         try
                         {
                             // Reuse the same selection as download, including shared and DLC depots.
                             // Ownership and bulk appinfo have already been loaded for this sync.
-                            game.Versions[platform] = (await SelectAsync(app, owned, new() { Platform = platform }, ct)).Version;
+                            game.Versions[platform] = (await SelectAsync(app, owned, new() { Platform = platform }, ct,
+                                (dependency, depot) => { requiredId = dependency; requiredDepot = depot; })).Version;
                         }
                         catch (NotSupportedException)
                         {
@@ -105,20 +133,21 @@ public sealed class SteamClient : IGameStore
                             // Keep the product discoverable; an empty manifest map makes diff
                             // request a live refresh for the user's explicit selection.
                         }
+                        catch (Exception e) when (e is not OperationCanceledException)
+                        {
+                            failed = true;
+                            RecordFailure(id, e);
+                            var impact = new LibraryFailureImpact(id.ToString(), platform, RequiredProductId: requiredId.ToString(), DepotId: requiredDepot?.ToString(), Detail: e.Message);
+                            RecordImpact(id, impact);
+                            if (requiredId != id) RecordImpact(requiredId, impact);
+                        }
                     }
-                    games.Add(game);
+                    if (!failed) games.Add(game);
                 }
                 catch (Exception e) when (e is not OperationCanceledException)
                 {
-                    failures[id.ToString()] = e.Message;
-                    for (Exception? cause = e; cause is not null; cause = cause.InnerException)
-                        if (cause is SteamAppInfoRecheckException { ExplicitlyDenied: true } denied)
-                        {
-                            summaries[id.ToString()] = denied.AppId == id
-                                ? "Steam denied access to this app's metadata after retry."
-                                : $"Required Steam app {denied.AppId} is unavailable: metadata access denied after retry.";
-                            break;
-                        }
+                    RecordFailure(id, e);
+                    if (catalog.ContainsKey(id)) RecordImpact(id, new(id.ToString(), RequiredProductId: id.ToString()));
                 }
             }
             var missingNames = failures.Keys.Where(id => !names.ContainsKey(id)).Select(uint.Parse).ToHashSet();
@@ -131,8 +160,9 @@ public sealed class SteamClient : IGameStore
                 }
                 catch (Exception e) when (e is not OperationCanceledException) { /* Optional labels must not discard a successful sync. */ }
             }
-            return new(games) { Failures = failures, FailureNames = names.Where(p => failures.ContainsKey(p.Key)).ToDictionary(),
-                FailureSummaries = summaries };
+            return new(games) { PrimaryCatalog = catalog.Keys.Select(id => id.ToString()).ToHashSet(),
+                Failures = failures, FailureNames = names.Where(p => failures.ContainsKey(p.Key)).ToDictionary(),
+                FailureSummaries = summaries, FailureImpacts = impacts.Where(p => failures.ContainsKey(p.Key)).ToDictionary() };
         }
         finally { _gate.Release(); }
     }
@@ -156,7 +186,8 @@ public sealed class SteamClient : IGameStore
         return await SelectAsync(app, owned, options, ct);
     }
 
-    private async Task<Selection> SelectAsync(SteamApp app, IReadOnlySet<uint> owned, GameSelection options, CancellationToken ct)
+    private async Task<Selection> SelectAsync(SteamApp app, IReadOnlySet<uint> owned, GameSelection options, CancellationToken ct,
+        Action<uint, uint?>? dependencyFailure = null)
     {
         if (!app.Platforms.Contains(options.Platform)) throw new NotSupportedException($"{app.Title} has no {options.Platform} release.");
         if (!app.Builds.TryGetValue(options.Branch, out var buildId))
@@ -166,7 +197,14 @@ public sealed class SteamClient : IGameStore
         var dlcs = app.Dlcs.Concat(app.Depots.Select(d => d.DlcAppId).Where(id => id > 0))
             .Where(owned.Contains).Distinct().Order().ToList();
         var apps = new List<SteamApp> { app };
-        foreach (var dlc in dlcs) apps.Add(await _session.GetAppAsync(dlc, ct));
+        var dependencies = new List<GameDependency>();
+        async Task<SteamApp> ReadDependencyAsync(uint id, uint? depot, string kind)
+        {
+            dependencies.Add(new(id.ToString(), kind, depot?.ToString()));
+            try { return await _session.GetAppAsync(id, ct); }
+            catch (Exception e) when (e is not OperationCanceledException) { dependencyFailure?.Invoke(id, depot); throw; }
+        }
+        foreach (var dlc in dlcs) apps.Add(await ReadDependencyAsync(dlc, null, "dlc"));
         var selected = new Dictionary<uint, (SteamDepotRequest Request, bool Dlc, long? DownloadSize, long? InstalledSize)>();
         foreach (var parent in apps)
         {
@@ -184,13 +222,27 @@ public sealed class SteamClient : IGameStore
                 // source appinfo may be private even though this depot is accessible.
                 while (depot.SharedFromApp != 0 && !depot.Manifests.ContainsKey(options.Branch))
                 {
-                    if (!visited.Add(depot.SharedFromApp)) throw new InvalidDataException("Cyclic shared Steam depot.");
-                    var shared = (await _session.GetAppAsync(depot.SharedFromApp, ct)).Depots.SingleOrDefault(d => d.DepotId == depot.DepotId)
-                        ?? throw new InvalidDataException($"Shared depot {depot.DepotId} is missing.");
-                    depot = shared with { DlcAppId = original.DlcAppId != 0 ? original.DlcAppId : shared.DlcAppId,
-                        OsList = original.OsList.Length > 0 ? original.OsList : shared.OsList,
-                        Architecture = original.Architecture.Length > 0 ? original.Architecture : shared.Architecture,
-                        Language = original.Language.Length > 0 ? original.Language : shared.Language };
+                    // Keep incompatible variants for availability checks below, but never
+                    // request protected metadata for a variant this selection will not use.
+                    if (depot.DlcAppId != 0 && !owned.Contains(depot.DlcAppId)
+                        || depot.OsList.Length > 0 && !depot.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase)
+                        || depot.Architecture.Length > 0 && depot.Architecture != options.Architecture
+                        || depot.Language.Length > 0 && !string.Equals(depot.Language, language, StringComparison.OrdinalIgnoreCase)) break;
+                    if (!visited.Add(depot.SharedFromApp))
+                    {
+                        dependencyFailure?.Invoke(depot.SharedFromApp, depot.DepotId);
+                        throw new InvalidDataException("Cyclic shared Steam depot.");
+                    }
+                    var shared = (await ReadDependencyAsync(depot.SharedFromApp, depot.DepotId, "shared-depot")).Depots.SingleOrDefault(d => d.DepotId == depot.DepotId);
+                    if (shared is null)
+                    {
+                        dependencyFailure?.Invoke(depot.SharedFromApp, depot.DepotId);
+                        throw new InvalidDataException($"Shared depot {depot.DepotId} is missing from app {depot.SharedFromApp}.");
+                    }
+                    depot = shared with { DlcAppId = depot.DlcAppId != 0 ? depot.DlcAppId : shared.DlcAppId,
+                        OsList = depot.OsList.Length > 0 ? depot.OsList : shared.OsList,
+                        Architecture = depot.Architecture.Length > 0 ? depot.Architecture : shared.Architecture,
+                        Language = depot.Language.Length > 0 ? depot.Language : shared.Language };
                 }
                 if (depot.DlcAppId != 0 && !owned.Contains(depot.DlcAppId)) continue;
                 if (depot.OsList.Length > 0 && !depot.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase)) continue;
@@ -211,6 +263,10 @@ public sealed class SteamClient : IGameStore
             {
                 if (!depot.Manifests.TryGetValue(options.Branch, out var manifest))
                     throw new NotSupportedException($"No accessible '{options.Branch}' manifest for depot {depot.DepotId}; private branches are not supported.");
+                if (depot.SharedFromApp != 0)
+                    dependencies.Add(new(depot.SharedFromApp.ToString(), "shared-depot", depot.DepotId.ToString(), MetadataRequired: false));
+                if (depot.DlcAppId != 0)
+                    dependencies.Add(new(depot.DlcAppId.ToString(), "dlc-license", depot.DepotId.ToString(), MetadataRequired: false));
                 var isDlc = parent.AppId != app.AppId || depot.DlcAppId != 0;
                 var sameManifest = selected.TryGetValue(depot.DepotId, out var existing) && existing.Request.ManifestId == manifest;
                 var request = sameManifest
@@ -235,6 +291,7 @@ public sealed class SteamClient : IGameStore
             Name = buildId, Branch = options.Branch, Architecture = options.Architecture, Language = options.Language.ToLowerInvariant(),
             Dlcs = game.OwnedDlcs, Manifests = selected.Values.Select(d => d.Request).OrderBy(d => d.DepotId)
                 .ToDictionary(d => d.DepotId.ToString(), d => d.ManifestId.ToString()),
+            Dependencies = dependencies.Distinct().ToList(),
             DownloadSize = TotalSize(selected.Values.Select(d => d.DownloadSize)),
             InstalledSize = TotalSize(selected.Values.Select(d => d.InstalledSize)),
         };

@@ -23,6 +23,7 @@ public static class SteamSharedDepotProbes
             await LibraryAsync(root);
             await FallbackAsync();
             await VariantFilteringAsync();
+            await KnownConstraintsAsync();
         }
         finally { Directory.Delete(root, true); }
     }
@@ -230,6 +231,49 @@ public static class SteamSharedDepotProbes
         version = await steam.GetVersionAsync("1", new());
         Probe.Check("an intermediate DLC license restriction cannot disappear at a later hop",
             version.Manifests.Keys.SequenceEqual(["10"]) && !fixture.AppRequests.Contains(3));
+    }
+
+    private static async Task KnownConstraintsAsync()
+    {
+        var fixture = new Session { Owned = [1, 4] };
+        var foreign = new SteamDepot(20) { DlcAppId = 4, OsList = "windows", Architecture = "64", Language = "german", SharedFromApp = 999 };
+        SteamApp Game(SteamDepot variant) => new(1, "Known variants") { Builds = new() { ["public"] = "1" }, Depots =
+            [new(5) { OsList = "windows", Architecture = "64", Manifests = new() { ["public"] = 50 } },
+             new(10) { DlcAppId = 4, OsList = "windows", Language = "english", Manifests = new() { ["public"] = 100 } },
+             new(11) { DlcAppId = 4, OsList = "windows", Architecture = "32", Language = "german", Manifests = new() { ["public"] = 110 } }, variant] };
+        fixture.Apps[4] = new(4, "Expansion") { Type = "dlc", ParentAppId = 1 };
+        fixture.Apps[2] = new(2, "Intermediate constraints") { Depots = [foreign] };
+        await using var steam = new SteamStore(fixture);
+        foreach (var variant in new[] { foreign, foreign with { SharedFromApp = 2, OsList = "" } })
+        {
+            fixture.Apps[1] = Game(variant);
+            fixture.AppRequests.Clear();
+            GameVersion? version = null;
+            try { version = await steam.GetVersionAsync("1", new()); }
+            catch (SteamAuthenticationException) { }
+            Probe.Check("known variant constraints establish availability without its unused manifest",
+                version is not null && version.Manifests.Keys.ToHashSet().SetEquals(["5", "10"])
+                && !fixture.AppRequests.Contains(999)
+                && fixture.AppRequests.Contains(2) == (variant.SharedFromApp == 2));
+        }
+        foreach (var incomplete in new[] { foreign with { DlcAppId = 0 }, foreign with { OsList = "" },
+            foreign with { Architecture = "" }, foreign with { Language = "" } })
+        {
+            fixture.Apps[1] = Game(incomplete);
+            fixture.AppRequests.Clear();
+            Probe.Check("unknown inherited constraints cannot be treated as fully known availability",
+                await RejectsAsync<SteamAuthenticationException>(() => steam.GetVersionAsync("1", new()))
+                && fixture.AppRequests.Contains(999));
+        }
+        fixture.Apps[1] = Game(foreign);
+        Probe.Check("a selected fully constrained variant still requires its manifest",
+            await RejectsAsync<SteamAuthenticationException>(() => steam.GetVersionAsync("1", new() { Language = "de" })));
+        fixture.Apps[1] = Game(foreign with { Architecture = "32", Language = "" });
+        fixture.AppRequests.Clear();
+        Exception? failure = null;
+        try { await steam.GetVersionAsync("1", new()); } catch (Exception error) { failure = error; }
+        Probe.Check("a proven architecture mismatch does not query an irrelevant inherited language",
+            failure is NotSupportedException && !fixture.AppRequests.Contains(999));
     }
 
     private static string Read(ZipArchive zip, string name)

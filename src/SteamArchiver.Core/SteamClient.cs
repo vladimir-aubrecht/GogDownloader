@@ -102,7 +102,8 @@ public sealed class SteamClient : IGameStore
             foreach (var id in owned.Concat(catalog.Keys).Distinct().Order())
             {
                 ct.ThrowIfCancellationRequested();
-                if (!catalog.ContainsKey(id)) metadataOnly.Add(id.ToString());
+                // Membership or a successful appinfo read does not recheck a download selection.
+                metadataOnly.Add(id.ToString());
                 try
                 {
                     if (!owned.Contains(id)) throw new SteamAuthenticationException($"Steam catalog app {id} has no active package license. Catalog membership does not authorize content access.");
@@ -143,6 +144,7 @@ public sealed class SteamClient : IGameStore
                             RecordImpact(id, impact);
                             if (requiredId != id) RecordImpact(requiredId, impact);
                         }
+                        metadataOnly.Remove(id.ToString());
                     }
                     if (!failed) games.Add(game);
                 }
@@ -212,12 +214,18 @@ public sealed class SteamClient : IGameStore
         {
             bool Eligible(SteamDepot depot) => (depot.DlcAppId == 0 || owned.Contains(depot.DlcAppId))
                 && (depot.OsList.Length == 0 || depot.OsList.Split(',').Contains(os, StringComparer.OrdinalIgnoreCase));
-            bool NeedsResolution(SteamDepot depot) => depot.SharedFromApp != 0 && !depot.Manifests.ContainsKey(options.Branch);
+            bool NeedsManifestResolution(SteamDepot depot) => depot.SharedFromApp != 0 && !depot.Manifests.ContainsKey(options.Branch);
+            // A foreign variant's manifest is not needed to establish its fully specified
+            // constraints. Empty fields can still inherit restrictions from a shared source;
+            // language is irrelevant once a known architecture excludes the variant.
+            bool NeedsConstraintResolution(SteamDepot depot) => NeedsManifestResolution(depot)
+                && (depot.DlcAppId == 0 || depot.OsList.Length == 0 || depot.Architecture.Length == 0
+                    || depot.Architecture == options.Architecture && depot.Language.Length == 0);
             async Task<SteamDepot> ResolveAsync(SteamDepot depot, bool checkAvailability = false)
             {
                 var visited = new HashSet<uint>();
                 // Prefer a local manifest even when the source application's appinfo is private.
-                while (NeedsResolution(depot) && Eligible(depot))
+                while (NeedsManifestResolution(depot) && Eligible(depot) && (!checkAvailability || NeedsConstraintResolution(depot)))
                 {
                     if (!checkAvailability && (depot.Architecture.Length > 0 && depot.Architecture != options.Architecture
                         || depot.Language.Length > 0 && !string.Equals(depot.Language, language, StringComparison.OrdinalIgnoreCase))) break;
@@ -263,13 +271,13 @@ public sealed class SteamClient : IGameStore
             List<SteamDepot> compatible;
             while (true)
             {
-                var known = CheckAvailability(eligible.Where(d => !NeedsResolution(d)));
+                var known = CheckAvailability(eligible.Where(d => !NeedsConstraintResolution(d)));
                 var all = CheckAvailability(eligible);
                 if (known.MissingGroup is null && all.MissingGroup is null)
                 { compatible = all.Compatible; break; }
 
                 var missing = known.MissingGroup is not null ? known : all;
-                var unresolved = eligible.Where(NeedsResolution);
+                var unresolved = eligible.Where(NeedsConstraintResolution);
                 SteamDepot? pending;
                 if (known.MissingGroup is not null)
                 {

@@ -127,7 +127,7 @@ public sealed record StoreLibraryResult(IReadOnlyList<GameInfo> Games)
 {
     /// <summary>Null leaves membership unchanged, or uses legacy selection if absent. Empty means an explicitly empty catalog.</summary>
     public IReadOnlySet<string>? PrimaryCatalog { get; init; }
-    /// <summary>Products processed only for metadata, without rechecking prior download selection failures.</summary>
+    /// <summary>Products whose download selections were not evaluated, including failures before selection began.</summary>
     public IReadOnlySet<string> MetadataOnlyProducts { get; init; } = new HashSet<string>();
     public IReadOnlyDictionary<string, List<LibraryFailureImpact>> FailureImpacts { get; init; } = new Dictionary<string, List<LibraryFailureImpact>>();
     public IReadOnlyDictionary<string, string> Failures { get; init; } = new Dictionary<string, string>();

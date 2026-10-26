@@ -149,6 +149,7 @@ If a game leaves the primary catalog while remaining licensed, sync refreshes it
 metadata without checking its download selection. A previous selection failure stays saved
 and is labelled `Previously blocked (not rechecked)` until a later selection check resolves it.
 Successful appinfo alone clears only the app's metadata failure, not its unchecked selection.
+Returning to the catalog also preserves this evidence if appinfo fails before selection starts.
 
 The aggregate snapshot adds optional `PrimaryCatalogs` (provider to product-ID set) and
 `FailureImpacts` (failure key to affected selections, with `IsStale` for unchecked evidence).

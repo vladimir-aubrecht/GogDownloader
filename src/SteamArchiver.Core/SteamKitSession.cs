@@ -281,9 +281,7 @@ internal sealed class SteamKitSession : ISteamSession
         {
             // This service may provide display names even when PICS appinfo is protected.
             // It never supplies ownership or manifests to the archive planner.
-            var request = new CPlayer_GetOwnedGames_Request { steamid = account.ConvertToUInt64(), include_appinfo = true,
-                include_played_free_games = true, include_free_sub = true, skip_unvetted_apps = false };
-            request.appids_filter.AddRange(missing);
+            var request = SteamOwnedGames.Request(account.ConvertToUInt64(), missing);
             var service = _client.GetHandler<SteamUnifiedMessages>()!.CreateService<Player>();
             var timeout = _options.OperationTimeout > TimeSpan.Zero && _options.OperationTimeout < TimeSpan.FromSeconds(10)
                 ? _options.OperationTimeout : TimeSpan.FromSeconds(10);
@@ -296,6 +294,21 @@ internal sealed class SteamKitSession : ISteamSession
         catch (Exception e) when (e is AsyncJobFailedException or TimeoutException or IOException
             || e is OperationCanceledException && !ct.IsCancellationRequested) { /* Display names are best effort. */ }
         return names;
+    }
+
+    public async Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct)
+    {
+        await LoginAsync(null, ct);
+        var account = _client.SteamID ?? throw new SteamAuthenticationException("Steam account is unavailable.");
+        var service = _client.GetHandler<SteamUnifiedMessages>()!.CreateService<Player>();
+        try
+        {
+            var result = await WaitAsync(service.GetOwnedGames(SteamOwnedGames.Request(account.ConvertToUInt64())).ToTask(), ct);
+            ct.ThrowIfCancellationRequested();
+            return SteamOwnedGames.Parse(result.Result, result.Body);
+        }
+        catch (AsyncJobFailedException e)
+        { throw new IOException("Steam GetOwnedGames request failed; comparison was not performed.", e); }
     }
 
     private async Task<SteamApp> DecodeProductAsync(uint appId, SteamApps.PICSProductInfoCallback.PICSProductInfo product, CancellationToken ct)

@@ -14,6 +14,7 @@ await SteamConnectionProbes.RunAsync();
 await SteamSharedDepotProbes.RunAsync();
 await SteamAppInfoProbes.RunAsync();
 await SteamReportingProbes.RunAsync();
+await SteamComparisonProbes.RunAsync();
 await DownloadSizeProbes.RunAsync();
 await ProviderLayoutProbes.RunAsync();
 await ArchiveFileProbes.RunAsync();

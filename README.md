@@ -121,6 +121,28 @@ dotnet run --project src/GameArchiver.Cli -- library failures "title or AppID" -
 dotnet run --project src/GameArchiver.Cli -- library failures --source steam --details
 ```
 
+To investigate differences from Steam's game count, compare the saved snapshot with the
+full `GetOwnedGames` list using the remembered Steam login (no Web API key is needed):
+
+```sh
+dotnet run --project src/GameArchiver.Cli -- library compare --source steam
+```
+
+`SnapshotGameOnly` identifies snapshot products tagged `game` but absent from that API list;
+`GetOwnedGamesOnly` identifies API entries absent from the snapshot. `OtherListedProduct`
+shows listed products classified as software, music, DLC or other types in the snapshot.
+`SyncFailure` shows whether each failed AppID appears in the live list, using its returned
+name when available; `--details` prints the full saved error. A soundtrack is not reclassified
+based on its title. The comparison matches AppIDs, never names.
+
+The command makes one `GetOwnedGames` request, including played free games, free packages
+and unvetted apps. This API list is not necessarily the Steam client's displayed count.
+It does not refresh PICS, download content or change the snapshot. Being listed does not
+establish depot access or clear a sync failure. Exit 0 means the comparison completed, even
+when it finds differences; inaccessible, incomplete or invalid responses cause exit 1.
+Use `--snapshot FILE` to select a saved library. In PowerShell, append
+`| Tee-Object steam-comparison.txt` to save the report.
+
 The rename changes project, assembly and namespace names, plus the unified tool command to
 `gamearchiver`. Existing configuration/staging directories (`gogdownloader` and `gamearchive`),
 environment variables (`GOGDL_SNAPSHOT` and `GAMEARCHIVE_STEAM_*`), metadata filenames and

@@ -150,6 +150,17 @@ Shared package membership or a matching title never merges different AppIDs or d
 unresolved appinfo failure. The aggregate snapshot can also retain old entries for failed
 products and unselected providers; its total is not the number of newly refreshed games.
 
+`SteamClient.GetOwnedGamesAsync(ct)` reads the full diagnostic list through the existing
+SteamKit2 session and returns AppID/name pairs. It includes played free games, free packages
+and unvetted apps, without an AppID filter. This is separate from PICS-derived ownership and
+does not provide download authorization. The method is serialized with other client operations;
+it does not sync or mutate archive metadata. `ISteamSession.GetOwnedGamesAsync` has a default
+implementation that throws `NotSupportedException` for transports without this diagnostic.
+The native session checks the service result, explicit response count, positive unique IDs
+and list length before returning; failures and cancellation propagate instead of becoming an
+empty list. The unified `library compare --source steam` command uses this API against a saved
+snapshot, with names for any still-unresolved AppIDs found in the returned list.
+
 ## Aggregate API
 
 ```csharp

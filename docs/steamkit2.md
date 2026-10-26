@@ -134,6 +134,22 @@ when no fresh name is available. Source outages and source-filtered sync preserv
 Unknown names are displayed explicitly instead of guessed. This lookup is best effort and does
 not establish that every private application will return a name.
 
+For explicit diagnostics, `library compare --source steam` calls the same service without
+`appids_filter`, using the existing authenticated session and current SteamID. Set
+`include_appinfo`, `include_played_free_games`, `include_free_sub` to true and
+`skip_unvetted_apps` to false for both full-list diagnostics and filtered name lookups.
+The full request uses the configured operation timeout and has no automatic retry. Unlike
+optional name lookup, diagnostic failures must propagate: require `EResult.OK`, an explicitly
+present `game_count` equal to the returned list length, and positive unique AppIDs. An omitted
+count is unavailable data, not proof of an empty library. Preserve nameless entries by AppID.
+
+Compare this result against saved metadata without updating it. Compare game-tagged snapshot
+entries with the API list by AppID, show API-only entries against all snapshot product types,
+and identify matching non-game types separately. Always retain unresolved sync failures, even
+when the API supplies a name for that same AppID. Neither presence in `GetOwnedGames` nor a
+soundtrack-like title proves depot access or overrides the product type from PICS. The API's
+list and the client's displayed game counter can use different filters.
+
 Primary sources for labels: `Samples/013_UnifiedMessages/Program.cs` and
 `Base/Generated/SteamMsgPlayer.cs` (`CPlayer_GetOwnedGames_Request`, response and `Player` service).
 

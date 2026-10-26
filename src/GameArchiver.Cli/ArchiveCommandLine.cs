@@ -24,7 +24,9 @@ public static class ArchiveCommandLine
         try { return await RunCoreAsync(args, storeFactory, ct); }
         catch (OperationCanceledException)
         {
-            Console.Error.WriteLine(args.Contains("archive")
+            Console.Error.WriteLine(args.Length >= 2 && args[0] == "library" && args[1] == "compare"
+                ? "Interrupted. Library comparison was not completed."
+                : args.Contains("archive")
                 ? "Interrupted. Completed archive edits were kept; unfinished edits were not committed."
                 : "Interrupted. Downloaded files were kept; rerun to resume.");
             return 130;
@@ -163,6 +165,17 @@ public static class ArchiveCommandLine
         if (command == "library")
         {
             if (library is null) throw new FileNotFoundException("No aggregate library snapshot. Run library sync first.");
+            if (subcommand == "compare")
+            {
+                if (source != "steam" || positionals.Count != 2 || stores.SingleOrDefault() is not SteamArchiver.Core.SteamClient steam)
+                    throw new ArgumentException("Usage: library compare --source steam [--snapshot FILE] [--details]");
+                if (legacy || !library.Games.Any(g => g.Key.Source == "steam")
+                    && !library.Failures.Keys.Any(k => k == "steam" || k.StartsWith("steam:", StringComparison.Ordinal)))
+                    throw new InvalidOperationException("No Steam data in this snapshot. Run library sync --source steam first.");
+                var listed = await steam.GetOwnedGamesAsync(ct);
+                PrintSteamComparison(library, listed, flags.ContainsKey("details"));
+                return 0;
+            }
             if (subcommand == "failures")
             {
                 var failures = library.Failures.Where(f => (source == "all" || f.Key.Split(':', 2)[0] == source)
@@ -177,7 +190,7 @@ public static class ArchiveCommandLine
             games = games.Where(g => Search(g, search)).ToList();
             if (subcommand == "stats")
             { PrintLibraryStats(games); return 0; }
-            if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats|failures");
+            if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats|failures|compare");
             foreach (var game in games)
                 Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}");
             return games.Count == 0 ? 1 : 0;
@@ -338,6 +351,37 @@ public static class ArchiveCommandLine
         }
     }
 
+    private static void PrintSteamComparison(ArchiveLibrary library, IReadOnlyDictionary<uint, string> listed, bool details)
+    {
+        var products = library.Games.Where(g => g.Key.Source == "steam").ToDictionary(g => g.Key.ProductId);
+        var names = listed.ToDictionary(p => p.Key.ToString(CultureInfo.InvariantCulture), p => p.Value);
+        var games = products.Values.Where(g => string.Equals(g.Kind, "game", StringComparison.OrdinalIgnoreCase)).ToList();
+        var onlySnapshot = games.Where(g => !names.ContainsKey(g.Key.ProductId)).OrderBy(g => g.Title).ToList();
+        var onlyListed = names.Where(p => !products.ContainsKey(p.Key)).OrderBy(p => p.Value).ThenBy(p => p.Key).ToList();
+        var otherListed = products.Values.Where(g => names.ContainsKey(g.Key.ProductId)
+            && !string.Equals(g.Kind, "game", StringComparison.OrdinalIgnoreCase)).OrderBy(g => g.Title).ToList();
+        Console.WriteLine($"Steam snapshot: {products.Count} products, {games.Count} tagged as game.");
+        Console.WriteLine($"GetOwnedGames: {listed.Count} entries (includes played free games, free packages and unvetted apps).");
+        Console.WriteLine($"Snapshot games present in GetOwnedGames: {games.Count - onlySnapshot.Count} of {games.Count}.");
+        Console.WriteLine($"Differences: {onlySnapshot.Count} snapshot games absent from GetOwnedGames; "
+            + $"{onlyListed.Count} GetOwnedGames entries absent from the snapshot; {otherListed.Count} listed products with another snapshot type.");
+        foreach (var game in onlySnapshot) Console.WriteLine($"SnapshotGameOnly {game.Key}: {game.Title} (type: {game.Kind})");
+        foreach (var (id, name) in onlyListed) Console.WriteLine($"GetOwnedGamesOnly steam:{id}: {(string.IsNullOrWhiteSpace(name) ? "Name unavailable" : name)}");
+        foreach (var game in otherListed) Console.WriteLine($"OtherListedProduct {game.Key}: {game.Title} (type: {game.Kind})");
+        foreach (var (key, failure) in library.Failures.Where(f => f.Key == "steam" || f.Key.StartsWith("steam:", StringComparison.Ordinal)).OrderBy(f => f.Key))
+        {
+            var id = key.Split(':', 2).ElementAtOrDefault(1);
+            var present = id is not null && names.ContainsKey(id);
+            var label = id is not null && names.TryGetValue(id, out var freshName) && !string.IsNullOrWhiteSpace(freshName)
+                ? $"{freshName} ({key})" : FailureLabel(library, key);
+            var state = id is null ? "source failure" : present ? "listed by GetOwnedGames" : "not listed by GetOwnedGames";
+            Console.WriteLine($"SyncFailure {label} [{state}]: "
+                + (details ? failure : library.FailureSummaries.GetValueOrDefault(key, failure)));
+        }
+        Console.WriteLine("This compares saved metadata with a live API list, not the Steam client's counter. "
+            + "Listed apps are not proof of depot access. The snapshot and its failures are unchanged.");
+    }
+
     private static long ParseSizeLimit(string value)
     {
         var match = Regex.Match(value.Trim(), @"^([0-9]+(?:\.[0-9]+)?)\s*(B|K|M|G|T|KB|MB|GB|TB|KiB|MiB|GiB|TiB)?$",
@@ -422,6 +466,7 @@ public static class ArchiveCommandLine
           auth login|status|logout --source gog|steam
           library sync|list|stats|failures [search] [--source gog|steam|all]
             --details shows full diagnostics for library sync or library failures
+          library compare --source steam [--details]   compare the snapshot with live GetOwnedGames
           download <source:ID|slug> [--source gog|steam] | download --all [search]
           diff [search] [--refresh] [--keys]
           verify [search] [--deep] [--fix] [--keys]

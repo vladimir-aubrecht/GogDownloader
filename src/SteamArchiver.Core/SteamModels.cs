@@ -80,6 +80,9 @@ public interface ISteamSession : IAsyncDisposable
     /// <summary>Optional labels for diagnostics only; names do not establish ownership or downloadable content.</summary>
     Task<IReadOnlyDictionary<uint, string>> GetAppNamesAsync(IReadOnlySet<uint> appIds, CancellationToken ct) =>
         Task.FromResult<IReadOnlyDictionary<uint, string>>(new Dictionary<uint, string>());
+    /// <summary>Full GetOwnedGames list for diagnostics only; does not authorize content downloads.</summary>
+    Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct) =>
+        throw new NotSupportedException("This Steam session does not support GetOwnedGames diagnostics.");
     Task<ISteamContentSession> OpenContentAsync(long maxBytesPerSecond, CancellationToken ct);
 }
 

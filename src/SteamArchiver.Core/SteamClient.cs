@@ -51,6 +51,18 @@ public sealed class SteamClient : IGameStore
         finally { _gate.Release(); }
     }
 
+    /// <summary>Read the full GetOwnedGames list through the remembered Steam session, without syncing PICS or downloading content.</summary>
+    public async Task<IReadOnlyDictionary<uint, string>> GetOwnedGamesAsync(CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            await EnsureSessionAsync();
+            return await _session.GetOwnedGamesAsync(ct);
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<StoreLibraryResult> SyncLibraryAsync(CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);

@@ -54,6 +54,11 @@ to anonymous queries. No saved session preserves the existing anonymous behavior
 opts into persistence with the `sessionPath` constructor argument; `LoginAsync` also supports
 in-memory sessions when no path is given. Injected HTTP clients must disable redirects and
 automatic cookies, as the default transport does. The adapter manages scoped cookies itself.
+Cookie changes from validated identity, Cargo and wikitext responses are saved atomically before
+the next request, including renewed expirations and cookie additions/removals. Unchanged cookies
+do not rewrite the file. Rejected identities, HTTP/API errors, malformed responses and cancelled
+requests do not replace the last verified session. An already saved valid rotation survives a
+later metadata-request failure, so the next process can reuse it without another password login.
 
 Authenticated AppID lookup uses the documented Cargo `Game` table:
 `action=cargoquery&tables=Game&fields=Game._pageID=PageID&where=Game.Steam_AppID HOLDS "APPID"&limit=2`.

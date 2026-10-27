@@ -17,7 +17,7 @@ public static class PcGamingWikiAuthProbes
     {
         Probe.Group("PCGamingWiki authenticated DRM reports");
         var root = Probe.ScratchDirectory();
-        try { await SessionsAsync(root); await FailuresAsync(root); await CliAsync(root); }
+        try { await SessionsAsync(root); await FailuresAsync(root); await CliAsync(root); await PcGamingWikiSessionRefreshProbes.RunAsync(root); }
         finally { Directory.Delete(root, true); }
     }
 

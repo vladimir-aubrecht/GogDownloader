@@ -10,6 +10,7 @@ public sealed partial class PcGamingWikiDrmSource
     private const string ApiUrl = "https://www.pcgamingwiki.com/w/api.php";
     private readonly PcGamingWikiSessionStore? _sessions;
     private CookieContainer _cookies = new();
+    private PcGamingWikiSession? _verifiedSession;
     private bool _sessionLoaded, _authenticated;
 
     /// <summary>Authenticates a bot password, verifies the session, then saves cookies when a session path was supplied.</summary>
@@ -24,6 +25,7 @@ public sealed partial class PcGamingWikiDrmSource
         try
         {
             _authenticated = _sessionLoaded = false;
+            _verifiedSession = null;
             _cookies = new();
             using var token = await ApiAsync("action=query&meta=tokens&type=login", ct);
             if (!TryProperty(token.RootElement, "query", out var query) || !TryProperty(query, "tokens", out var tokens)
@@ -46,14 +48,10 @@ public sealed partial class PcGamingWikiDrmSource
                 throw new InvalidDataException("PCGamingWiki did not identify the logged-in account.");
             var identity = await ReadIdentityAsync(ct);
             if (identity.Id != expectedId) throw new PcGamingWikiAuthenticationException("PCGamingWiki login and session identities do not match.");
-            var saved = new PcGamingWikiSession(identity.Name, identity.Id, _cookies.GetCookies(new Uri(ApiUrl)).Cast<Cookie>()
-                .Where(c => !c.Expired).Select(c => new PcGamingWikiSessionCookie(c.Name, c.Value, c.Path,
-                    c.Expires == DateTime.MinValue ? null : c.Expires.ToUniversalTime())).ToList());
-            PcGamingWikiSessionStore.Validate(saved);
-            if (_sessions is not null) await _sessions.SaveAsync(saved, ct);
+            await SaveSessionAsync(identity.Id, identity.Name, ct);
             _authenticated = _sessionLoaded = true;
         }
-        catch { _cookies = new(); _authenticated = _sessionLoaded = false; throw; }
+        catch { _cookies = new(); _verifiedSession = null; _authenticated = _sessionLoaded = false; throw; }
         finally { _gate.Release(); }
     }
 
@@ -73,9 +71,31 @@ public sealed partial class PcGamingWikiDrmSource
             var identity = await ReadIdentityAsync(ct);
             if (identity.Id != session.UserId || identity.Name != session.Username)
                 throw new PcGamingWikiAuthenticationException("PCGamingWiki session identity changed. Run auth login --source pcgamingwiki again.");
+            _verifiedSession = session;
+            await SaveSessionAsync(identity.Id, identity.Name, ct);
             _authenticated = true;
         }
         _sessionLoaded = true;
+    }
+
+    private async Task SaveSessionAsync(long userId, string username, CancellationToken ct)
+    {
+        var current = new PcGamingWikiSession(username, userId, _cookies.GetCookies(new Uri(ApiUrl)).Cast<Cookie>()
+            .Where(c => !c.Expired).Select(c => new PcGamingWikiSessionCookie(c.Name, c.Value, c.Path,
+                c.Expires == DateTime.MinValue ? null : c.Expires.ToUniversalTime())).ToList());
+        PcGamingWikiSessionStore.Validate(current);
+        static IEnumerable<PcGamingWikiSessionCookie> Ordered(PcGamingWikiSession session) => session.Cookies
+            .OrderBy(c => c.Name, StringComparer.Ordinal).ThenBy(c => c.Path, StringComparer.Ordinal);
+        if (_sessions is not null && (_verifiedSession is null || _verifiedSession.UserId != userId
+            || _verifiedSession.Username != username || !Ordered(_verifiedSession).SequenceEqual(Ordered(current))))
+            await _sessions.SaveAsync(current, ct);
+        _verifiedSession = current;
+    }
+
+    private Task SaveRefreshedSessionAsync(CancellationToken ct)
+    {
+        var session = _verifiedSession ?? throw new InvalidOperationException("PCGamingWiki session was not verified.");
+        return SaveSessionAsync(session.UserId, session.Username, ct);
     }
 
     private async Task<(long Id, string Name)> ReadIdentityAsync(CancellationToken ct)
@@ -96,14 +116,22 @@ public sealed partial class PcGamingWikiDrmSource
         using var lookup = await ApiAsync("action=cargoquery&tables=Game&fields=Game._pageID=PageID&limit=2&where=" + where + "&assert=user", ct);
         if (!TryProperty(lookup.RootElement, "cargoquery", out var rows) || rows.ValueKind != JsonValueKind.Array)
             throw new InvalidDataException("PCGamingWiki did not return an AppID lookup result.");
-        if (rows.GetArrayLength() != 1) return Unknown("No unique PCGamingWiki page for this Steam AppID.");
+        if (rows.GetArrayLength() != 1)
+        {
+            await SaveRefreshedSessionAsync(ct);
+            return Unknown("No unique PCGamingWiki page for this Steam AppID.");
+        }
         if (!TryProperty(rows[0], "title", out var fields) || !TryProperty(fields, "PageID", out var page)
             || !long.TryParse(page.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var pageId) || pageId <= 0)
             throw new InvalidDataException("PCGamingWiki returned an invalid page ID.");
+        // Persist each validated authenticated response before the next request. A later
+        // lookup failure/cancellation must not discard a session rotation already confirmed.
+        await SaveRefreshedSessionAsync(ct);
         using var json = await ApiAsync($"action=parse&prop=wikitext&redirects=1&pageid={pageId.ToString(CultureInfo.InvariantCulture)}&assert=user", ct);
         if (!TryProperty(json.RootElement, "parse", out var parsed) || !TryProperty(parsed, "wikitext", out var text)
             || !TryProperty(text, "*", out var raw) || raw.ValueKind != JsonValueKind.String)
             throw new InvalidDataException("PCGamingWiki did not return page wikitext.");
+        await SaveRefreshedSessionAsync(ct);
         return Parse(raw.GetString()!, id, "https://www.pcgamingwiki.com/w/index.php?curid=" + pageId.ToString(CultureInfo.InvariantCulture), DateTimeOffset.UtcNow);
     }
 

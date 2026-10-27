@@ -415,6 +415,11 @@ public sealed class SteamClient : IGameStore
                     position = checked(position + chunk.Size);
                 }
                 if (position != file.Size) throw new InvalidDataException($"Steam chunks do not cover {path}.");
+                // Some legacy depots (HeXen's PATCH.OUT) use a zero digest for an empty
+                // file. Normalize that sentinel so verification, reuse and saved hashes
+                // still use the actual SHA-1; never waive verification for nonempty data.
+                if (file.Size == 0 && file.Chunks.Count == 0 && file.Sha1.All(c => c == '0'))
+                    file = file with { Sha1 = Convert.ToHexStringLower(SHA1.HashData(Array.Empty<byte>())) };
                 files.Add(path, new(file, depot));
             }
         }

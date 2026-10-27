@@ -32,6 +32,7 @@ public static class MultiStoreProbes
             await ProviderLayoutAsync(root);
             await SteamSnapshotAsync(root);
             await SteamRecoveryAsync(root);
+            await SteamEmptyFilesAsync(root);
             await SteamFailuresAsync(root);
             await AggregateFailuresAsync(root);
             await MetadataAndClaimsAsync(root);
@@ -299,9 +300,28 @@ public static class MultiStoreProbes
             parallel.Outcome == ArchiveOutcome.Completed && parallelFixture.MaxInFlight is >= 2 and <= 3);
     }
 
+    private static async Task SteamEmptyFilesAsync(string root)
+    {
+        var fixture = new SteamFixture { Fault = "empty-zero-hash" };
+        await using var client = new SteamStore(fixture);
+        var options = Options(root, "empty-zero-hash");
+        var result = await client.DownloadAsync("1", options);
+        using (var zip = ZipFile.OpenRead(result.ArchivePath!))
+            Probe.Check("HeXen-style zero-hash empty files are included in completed archives",
+                result.Outcome == ArchiveOutcome.Completed && zip.GetEntry("base/PATCH.OUT") is { Length: 0 });
+        var metadata = (await ArchiveMetadata.LoadAsync(Path.GetDirectoryName(result.ArchivePath!)!))!;
+        Probe.Check("empty sentinel hashes are recorded as the real empty SHA-1", metadata.Platforms[GameOs.Windows].Files["base/PATCH.OUT"].Hash == SteamFixture.Hash(""));
+        var calls = fixture.ChunkCalls;
+        fixture.Revision++;
+        result = await client.DownloadAsync("1", options);
+        Probe.Check("normalized empty files remain reusable on a new manifest", result.Outcome == ArchiveOutcome.Completed && fixture.ChunkCalls == calls);
+        await using var archive = new GameArchiverClient(new SteamStore(new SteamFixture()));
+        Probe.Check("archives with sentinel empty files pass deep verification", (await archive.VerifyAsync(options.OutputRoot, deep: true)).All(v => v.Problems.Count == 0));
+    }
+
     private static async Task SteamFailuresAsync(string root)
     {
-        foreach (var mode in new[] { "hash", "path", "cycle", "missing-link", "chunk-map", "no-files", "manifest-id" })
+        foreach (var mode in new[] { "hash", "empty-bad-hash", "empty-chunks", "path", "cycle", "missing-link", "chunk-map", "no-files", "manifest-id" })
         {
             var fixture = new SteamFixture { Fault = mode };
             await using var client = new SteamStore(fixture);
@@ -556,6 +576,9 @@ public static class MultiStoreProbes
                     switch (fixture.Fault)
                     {
                         case "hash": files[0] = files[0] with { Sha1 = new string('0', 40) }; break;
+                        case "empty-zero-hash": files[2] = files[2] with { Path = "base/PATCH.OUT", Sha1 = new string('0', 40) }; break;
+                        case "empty-bad-hash": files[2] = files[2] with { Sha1 = new string('1', 40) }; break;
+                        case "empty-chunks": files[2] = files[2] with { Sha1 = new string('0', 40), Chunks = files[0].Chunks }; break;
                         case "path": files[0] = files[0] with { Path = "../escaped" }; break;
                         case "cycle": files.Add(new("loop", 0, "", []) { LinkTarget = "loop" }); break;
                         case "missing-link": files.Add(new("lost", 0, "", []) { LinkTarget = "absent" }); break;

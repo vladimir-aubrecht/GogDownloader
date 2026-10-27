@@ -254,6 +254,13 @@ Primary sources for labels: `Samples/013_UnifiedMessages/Program.cs` and
    the depot key. SteamKit2 decrypts/decompresses content and validates its Adler checksum.
 7. The provider additionally validates chunk and whole-file SHA-1 and exact chunk coverage.
 
+Some old manifests use twenty zero bytes as the hash of an empty file. The user's HeXen (2360)
+and HeXen: Deathkings (2370) downloads on 2026-10-27 both supplied this for `base/PATCH.OUT`
+(zero bytes, no chunks). Normalize only that combination to SHA-1 of empty content
+(`da39a3ee5e6b4b0d3255bfef95601890afd80709`) before verification and metadata publication.
+Keep exact size/chunk validation and reject other incorrect empty hashes or zero hashes of
+nonempty content. Recording the real digest also preserves cache reuse and resumed validation.
+
 Validate manifest identity and decrypted file names. File flags include `Executable`, `Directory` and
 `Symlink`; links are dereferenced against the manifest tree, with missing/cyclic/escaping targets
 rejected. Nothing outside the selected staging tree may be included. Preserve `Executable`

@@ -21,6 +21,7 @@ await GogComparisonProbes.RunAsync();
 await DownloadSizeProbes.RunAsync();
 await DrmProbes.RunAsync();
 await DrmTestProbes.RunAsync();
+await ScheduleProbes.RunAsync();
 await SteamCuratorDrmProbes.RunAsync();
 await PcGamingWikiAuthProbes.RunAsync();
 await ProviderLayoutProbes.RunAsync();

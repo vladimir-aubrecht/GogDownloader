@@ -18,6 +18,8 @@ and `innoextract` on `PATH`. No store credentials are needed for the tests.
 There is no installer. Run a CLI with `dotnet run`, or use `dotnet publish` to build a
 self-contained binary. `dotnet pack src/GameArchiver.Cli` creates the `gamearchiver` .NET tool.
 Rebuild the matching configuration after updating code before using `--no-build`.
+The [container workflow](../.github/workflows/container.yml) also builds amd64/ARM64 images;
+see [Docker Compose](docker.md) for scheduling and deployment configuration.
 
 ## Repository layout
 

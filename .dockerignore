@@ -1,0 +1,12 @@
+# Only build inputs enter the context; exclude credentials, configuration and downloaded games.
+**
+!Directory.Build.props
+!README.md
+!LICENSE
+!THIRD-PARTY-NOTICES.md
+!src/
+!src/**
+!docker/
+!docker/entrypoint.sh
+**/bin/
+**/obj/

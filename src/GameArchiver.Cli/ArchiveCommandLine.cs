@@ -26,7 +26,9 @@ public static partial class ArchiveCommandLine
         try { return await RunCoreAsync(args, storeFactory, drmSourceFactory, pcGamingWikiFactory, drmTestRuntime, ct); }
         catch (OperationCanceledException)
         {
-            Console.Error.WriteLine(args.Length >= 3 && args[0] == "library" && args[1] == "drm" && args[2] == "test"
+            Console.Error.WriteLine(args.Length > 0 && args[0] == "schedule"
+                ? "Scheduler stopped. Downloaded files were kept; restart to resume."
+                : args.Length >= 3 && args[0] == "library" && args[1] == "drm" && args[2] == "test"
                 ? "Interrupted. Completed DRM tests were saved; rerun the same command to continue with untested games."
                 : args.Length >= 2 && args[0] == "library" && args[1] == "drm"
                 ? "Interrupted. DRM metadata changes were not committed."
@@ -48,6 +50,8 @@ public static partial class ArchiveCommandLine
     private static async Task<int> RunCoreAsync(string[] args, Func<string, IEnumerable<IGameStore>>? factory, Func<IDrmSource>? drmSourceFactory,
         Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory, IDrmTestRuntime? drmTestRuntime, CancellationToken ct)
     {
+        if (args.FirstOrDefault() == "schedule")
+            return await RunScheduleAsync(args, (command, token) => RunAsync(command, token, factory, drmSourceFactory, pcGamingWikiFactory), ct);
         var flags = new Dictionary<string, string>();
         var providerDirectories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var positionals = new List<string>();
@@ -682,6 +686,7 @@ public static partial class ArchiveCommandLine
     }
     private static void Usage() => Console.WriteLine("""
         gamearchiver — archive owned GOG and Steam games
+          schedule --config FILE [--once | --dry-run]   run configured sync/download jobs periodically
           auth login|status|logout --source gog|steam|pcgamingwiki
           library sync|list|stats|failures [search] [--source gog|steam|all]
             --details shows full diagnostics for library sync or library failures

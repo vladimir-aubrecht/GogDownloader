@@ -20,4 +20,6 @@ GOG-only and shared archive projects do not reference SteamKit2.
 - License: GPLv2; see the upstream distribution for the complete terms
 
 The GOG provider invokes an independently installed executable for Windows Inno installers.
-It is not linked into the application or included in this repository.
+It is not linked into the application or included in this repository's source tree. The Docker
+image installs Debian's separate `innoextract` package; its license notices remain under
+`/usr/share/doc/innoextract/`, and the corresponding source is available from Debian's package archive.

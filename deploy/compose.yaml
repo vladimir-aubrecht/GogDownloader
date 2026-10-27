@@ -1,0 +1,37 @@
+services:
+  archiver:
+    image: ${ARCHIVER_IMAGE:-ghcr.io/vladimir-aubrecht/gamearchiver:latest}
+    build:
+      context: ..
+    user: "${ARCHIVER_UID:-1000}:${ARCHIVER_GID:-1000}"
+    environment:
+      ARCHIVER_UMASK: ${ARCHIVER_UMASK:-022}
+    restart: unless-stopped
+    stop_grace_period: 2m
+    volumes:
+      - type: bind
+        source: ./schedule.json
+        target: /config/schedule.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ARCHIVER_STATE_PATH:-./state}
+        target: /state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ARCHIVER_STAGING_PATH:-./staging}
+        target: /staging
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ARCHIVER_ARCHIVE_PATH:-./archives}
+        target: /archives
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

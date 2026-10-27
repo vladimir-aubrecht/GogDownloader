@@ -1,0 +1,21 @@
+{
+  "intervalMinutes": 360,
+  "stagingDirectory": "/staging",
+  "jobs": [
+    {
+      "name": "GOG games",
+      "source": "gog",
+      "output": "/archives/gog",
+      "all": true,
+      "platform": "windows"
+    },
+    {
+      "name": "Small Steam games",
+      "source": "steam",
+      "output": "/archives/steam",
+      "all": true,
+      "platform": "windows",
+      "maxSize": "500MB"
+    }
+  ]
+}

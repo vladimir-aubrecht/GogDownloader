@@ -10,3 +10,10 @@ obj/
 gog-backup/
 game-backup/
 steam-tokens.json
+
+# Local container configuration, credentials and backups
+deploy/.env
+deploy/schedule.json
+deploy/state/
+deploy/staging/
+deploy/archives/

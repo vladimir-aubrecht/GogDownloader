@@ -63,6 +63,7 @@ especially when the backup destination is a NAS.
 
 | Task | Guide |
 | --- | --- |
+| Run scheduled backups in Docker with per-source selections | [Docker Compose](docs/docker.md) |
 | Log in, select providers, configure folders or filter by size | [CLI guide](docs/cli.md) |
 | Understand product counts, sync failures and `library compare` | [Library and diagnostics](docs/library.md) |
 | Fetch community DRM reports, filter downloads or correct a result | [DRM reports and filters](docs/drm.md) |

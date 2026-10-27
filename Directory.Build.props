@@ -10,7 +10,7 @@
     <Copyright>Copyright (c) 2026 Vladimir Aubrecht</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
 
-    <!-- A push is a release. Every push bumps the version. -->
+    <!-- Bump for an explicitly requested versioned release. -->
     <Version>0.44.0</Version>
   </PropertyGroup>
 </Project>

@@ -322,6 +322,35 @@ downloads, and online features may depend on Steam even if the game itself runs 
 
 See [the PCGamingWiki adapter and its limits](docs/pcgamingwiki.md).
 
+## Test downloaded games locally
+
+On Windows, `library drm test` extracts completed archives to local staging, starts the recorded
+launcher and watches for Steam client processes. Close Steam first. The default observation
+period is 60 seconds, followed by a prompt to confirm actual gameplay. A running process can
+be a launcher or error dialog, and starting Steam can be optional integration: neither signal
+alone proves the DRM status.
+
+```powershell
+dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm test --source steam --out Z:\software\games\gamevault\steam
+# Automatic observations only, with no gameplay prompts:
+dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm test --source steam --out Z:\software\games\gamevault\steam --no-prompt
+dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm tests --source steam --details
+```
+
+Ctrl+C stops the active test; completed results are saved after each game in the library
+snapshot. Repeat the same command to resume. Use `--retest` to repeat completed/inconclusive
+tests, `--observe-seconds 120` to change the observation period, and `--dry-run` to preview.
+An observed Steam launch stops the batch; close Steam and rerun to test the remaining games.
+`--out` supports the normal provider layout; omit it inside a game folder to use its metadata.
+Batch selection defaults to games; `--include-non-games` also selects other archived products.
+
+Precedence is **manual override > confirmed local test for matching content > community report**.
+Automatic observations remain separate from the classification. Confirmed local results are
+scoped to the tested build, platform, branch, language and architecture; sync preserves them.
+These are tests on your machine, not proof of portability to a clean computer. Games execute
+under your account and may create saves/settings. The test stops its process tree and removes
+the extraction; ZIPs and archive metadata remain unchanged. See [local test behavior and limits](docs/local-drm-tests.md).
+
 ## Download a subset by size
 
 Use `--max-size` with `download --all` to select games whose recorded full download estimate

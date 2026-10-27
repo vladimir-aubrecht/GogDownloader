@@ -323,7 +323,11 @@ public sealed class GameDownloader(GogApiClient api, ContentClient content, Http
                 manifest.Platforms[options.Platform] = new PlatformBackup
                 {
                     ContentRevision = PlatformBackup.CurrentContentRevision,
-                    Drm = options.Drm ?? DrmInfo.ForStore("gog"),
+                    Drm = options.Drm?.ForVersion(new GameVersion(buildId)
+                    {
+                        Language = options.Language, Architecture = "", Dlcs = plan?.DlcIds ?? [],
+                        ContentRevision = options.Platform == GamePlatform.Windows ? 1 : PlatformBackup.CurrentContentRevision,
+                    }) ?? DrmInfo.ForStore("gog"),
                     BuildId = buildId,
                     VersionName = versionName,
                     Language = options.Language,

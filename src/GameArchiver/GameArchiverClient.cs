@@ -108,6 +108,7 @@ public sealed partial class GameArchiverClient : IAsyncDisposable
         return new()
         {
             DrmOverrides = previous?.DrmOverrides.ToDictionary(d => d.Key, d => d.Value.ToDictionary()) ?? [],
+            DrmTests = previous?.DrmTests.ToList() ?? [],
             PrimaryCatalogs = results.Where(r => r.Catalog is not null).ToDictionary(r => r.Source, r => r.Catalog!)
                 .Concat(previous?.PrimaryCatalogs.Where(c => !_stores.ContainsKey(c.Key)) ?? []).ToDictionary(),
             FailureImpacts = results.SelectMany(r => r.Impacts).Concat(previous?.FailureImpacts

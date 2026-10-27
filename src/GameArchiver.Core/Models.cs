@@ -167,6 +167,7 @@ public sealed record ArchiveLibrary
     public Dictionary<string, HashSet<string>> PrimaryCatalogs { get; init; } = [];
     public Dictionary<string, List<LibraryFailureImpact>> FailureImpacts { get; init; } = [];
     public Dictionary<string, Dictionary<GameOs, DrmInfo>> DrmOverrides { get; init; } = [];
+    public List<DrmTestRecord> DrmTests { get; init; } = [];
 
     public bool IsCatalogEntry(GameKey key) => !PrimaryCatalogs.TryGetValue(key.Source, out var catalog) || catalog.Contains(key.ProductId);
 
@@ -197,6 +198,7 @@ public sealed record ArchiveLibrary
             || values.Any(v => !Enum.IsDefined(v.Key) || v.Value is null || !v.Value.IsValid);
         if (library.Games is null || library.Failures is null || library.FailureNames is null || library.FailureSummaries is null
             || library.DrmOverrides is null || library.DrmOverrides.Any(d => string.IsNullOrWhiteSpace(d.Key) || InvalidDrm(d.Value))
+            || library.DrmTests is null || library.DrmTests.Any(t => t is null || !t.IsValid)
             || library.PrimaryCatalogs is null || library.PrimaryCatalogs.Any(c => string.IsNullOrWhiteSpace(c.Key)
                 || c.Value is null || c.Value.Any(string.IsNullOrWhiteSpace))
             || library.FailureImpacts is null || library.FailureImpacts.Any(f => f.Value is null

@@ -574,7 +574,7 @@ public sealed class SteamClient : IGameStore
         {
             Version = selection.Version, ArchiveName = archiveName, ArchiveSize = new FileInfo(archivePath).Length,
             InstalledSize = totalSize, Files = backedFiles, RuntimeRequirement = "steam-or-game-specific-drm; portability-not-verified",
-            Drm = options.Drm ?? new(),
+            Drm = options.Drm?.ForVersion(selection.Version) ?? new(),
             LaunchExecutable = launch?.Executable.Replace('\\', '/'), LaunchParameters = launch?.Arguments,
         };
         await location.Metadata.SaveAsync(location.Directory, ct);

@@ -292,8 +292,30 @@ Custom edits are not reapplied automatically when a later download rebuilds an a
 `DrmInfo` represents a reported `Unknown`, `Free` or `Protected` status with `Source`, `Url`,
 `CheckedAt`, `Notes` and `Branch`. `GameInfo.Drm` is keyed by OS; `ArchiveLibrary.DrmOverrides`
 is keyed by `source:ID` and OS. `DrmCatalog.Get(library, key, os, branch)` resolves a manual
-override, the saved community report, then the GOG distribution-policy default or unknown.
+override, confirmed matching local test, the saved community report, then the GOG distribution-policy default or unknown.
 No report applies to another OS or branch, and unknown is never treated as free.
+
+`GameArchiverClient.TestDrmAsync` accepts `DrmTestOptions`, an awaited checkpoint callback,
+an optional `IDrmTestRuntime` and optional gameplay confirmation callback. Native execution
+currently supports Windows; `DryRun` works elsewhere. Cancellation disposes the test process
+and removes its extraction; completed results have already reached the checkpoint callback.
+
+```csharp
+var tested = await archive.TestDrmAsync(library,
+    new ArchiveOptions { OutputRoot = @"Z:\games\steam", StagingRoot = @"C:\game-tests" },
+    new DrmTestOptions { ObserveFor = TimeSpan.FromSeconds(60) },
+    (updated, token) => updated.SaveAsync(snapshotPath, token), ct: ct);
+// No confirmation callback: save observations only, never infer DRM from process survival.
+// Handle tested.StoppedReason, e.g. close Steam before resuming.
+```
+
+`ArchiveLibrary.DrmTests` is independent of community evidence and manual overrides.
+`DrmCatalog.Get(library, key, selection)` additionally checks the requested language and
+architecture against local tests. Confirmed reports carry `DrmInfo.TestedVersion`; providers
+use `ForVersion(actualVersion)` at publication to avoid labeling different content with the
+old local verdict. See [local DRM tests](local-drm-tests.md) for observation limits and resume
+semantics. Launching game code is not sandboxed, even though its child processes are contained
+for cleanup.
 
 ```csharp
 using var source = new PcGamingWikiDrmSource();

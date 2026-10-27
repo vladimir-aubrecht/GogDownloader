@@ -12,20 +12,23 @@ namespace GameArchiver.Cli;
 public static partial class ArchiveCommandLine
 {
     private static readonly HashSet<string> Switches = ["all", "dry-run", "force", "clean", "no-reuse", "no-verify", "no-launcher",
-        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory", "include-non-games"];
+        "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory", "include-non-games", "no-prompt", "retest"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
-        "file", "entry", "name", "path", "max-size", "drm", "drm-source", "note", "pcgw-session"];
+        "file", "entry", "name", "path", "max-size", "drm", "drm-source", "note", "pcgw-session",
+        "observe-seconds", "executable", "arguments", "working-directory"];
 
     /// <summary>Run the same CLI with supplied stores for embedding or offline integration tests.</summary>
     public static async Task<int> RunAsync(string[] args, CancellationToken ct = default,
         Func<string, IEnumerable<IGameStore>>? storeFactory = null, Func<IDrmSource>? drmSourceFactory = null,
-        Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory = null)
+        Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory = null, IDrmTestRuntime? drmTestRuntime = null)
     {
-        try { return await RunCoreAsync(args, storeFactory, drmSourceFactory, pcGamingWikiFactory, ct); }
+        try { return await RunCoreAsync(args, storeFactory, drmSourceFactory, pcGamingWikiFactory, drmTestRuntime, ct); }
         catch (OperationCanceledException)
         {
-            Console.Error.WriteLine(args.Length >= 2 && args[0] == "library" && args[1] == "drm"
+            Console.Error.WriteLine(args.Length >= 3 && args[0] == "library" && args[1] == "drm" && args[2] == "test"
+                ? "Interrupted. Completed DRM tests were saved; rerun the same command to continue with untested games."
+                : args.Length >= 2 && args[0] == "library" && args[1] == "drm"
                 ? "Interrupted. DRM metadata changes were not committed."
                 : args.Length >= 2 && args[0] == "library" && args[1] == "compare"
                 ? "Interrupted. Library comparison was not completed."
@@ -43,7 +46,7 @@ public static partial class ArchiveCommandLine
     }
 
     private static async Task<int> RunCoreAsync(string[] args, Func<string, IEnumerable<IGameStore>>? factory, Func<IDrmSource>? drmSourceFactory,
-        Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory, CancellationToken ct)
+        Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory, IDrmTestRuntime? drmTestRuntime, CancellationToken ct)
     {
         var flags = new Dictionary<string, string>();
         var providerDirectories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -54,7 +57,7 @@ public static partial class ArchiveCommandLine
                 var key = args[i][2..];
                 if (!Switches.Contains(key) && !Values.Contains(key)) throw new ArgumentException($"Unknown option --{key}.");
                 if (Switches.Contains(key)) flags[key] = "";
-                else if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
+                else if (i + 1 < args.Length && (key == "arguments" || !args[i + 1].StartsWith("--")))
                 {
                     var value = args[++i];
                     if (key == "provider-dir")
@@ -85,8 +88,11 @@ public static partial class ArchiveCommandLine
             throw new ArgumentException("--pcgw-session requires auth --source pcgamingwiki or library drm sync --drm-source pcgamingwiki.");
         if (flags.ContainsKey("drm-source") && !(command == "library" && subcommand == "drm" && positionals.ElementAtOrDefault(2) == "sync"))
             throw new ArgumentException("--drm-source requires library drm sync.");
-        if (flags.ContainsKey("include-non-games") && (command != "download" || !flags.ContainsKey("all")))
-            throw new ArgumentException("--include-non-games requires download --all; an explicit product ID can always select an application.");
+        var drmTest = command == "library" && subcommand == "drm" && positionals.ElementAtOrDefault(2) == "test";
+        foreach (var flag in new[] { "no-prompt", "retest", "observe-seconds", "executable", "arguments", "working-directory" })
+            if (flags.ContainsKey(flag) && !drmTest) throw new ArgumentException($"--{flag} requires library drm test.");
+        if (flags.ContainsKey("include-non-games") && !drmTest && (command != "download" || !flags.ContainsKey("all")))
+            throw new ArgumentException("--include-non-games requires download --all or library drm test.");
         var drmFilter = flags.GetValueOrDefault("drm")?.ToLowerInvariant();
         if (drmFilter is not null)
         {
@@ -154,6 +160,9 @@ public static partial class ArchiveCommandLine
         if (command == "library" && subcommand == "drm")
         {
             if (legacy) throw new ArgumentException("DRM annotations require an aggregate snapshot. Run library sync first.");
+            if (positionals.ElementAtOrDefault(2) is "test" or "tests")
+                return await RunDrmTestsAsync(archive, library ?? throw new FileNotFoundException("Run library sync first."), snapshotPath,
+                    positionals, flags, providerDirectories, source, drmTestRuntime, ct);
             return await RunDrmAsync(library ?? throw new FileNotFoundException("Run library sync first."), snapshotPath,
                 positionals, flags, source, drmSourceFactory, pcGamingWikiFactory, ct);
         }
@@ -250,17 +259,17 @@ public static partial class ArchiveCommandLine
             games = games.Where(g => Search(g, search) && (flags.ContainsKey("inventory") || library.IsCatalogEntry(g.Key))).ToList();
             var drmSelection = Options(flags, providerDirectories);
             if (drmFilter is not null && drmFilter != "any") games = games.Where(g =>
-                DrmCatalog.Get(library, g.Key, drmSelection.Platform, drmSelection.Branch).Status == DrmCatalog.Parse(drmFilter)).ToList();
+                DrmCatalog.Get(library, g.Key, drmSelection).Status == DrmCatalog.Parse(drmFilter)).ToList();
             if (subcommand == "stats")
             { PrintLibraryStats(games); if (search.Length == 0) PrintCatalogStats(library, source); return 0; }
             if (subcommand != "list") throw new ArgumentException("Usage: library sync|list|stats|failures|compare");
             foreach (var game in games)
             {
                 Console.WriteLine(flags.ContainsKey("keys") ? game.Key.ToString() : $"{game.Key,-25} {game.Slug,-35} {game.Kind,-12} {game.Title}"
-                    + (drmFilter is null ? "" : $" [DRM: {DrmCatalog.Get(library, game.Key, drmSelection.Platform, drmSelection.Branch).Status.ToString().ToLowerInvariant()}]"));
+                    + (drmFilter is null ? "" : $" [DRM: {DrmCatalog.Get(library, game.Key, drmSelection).Status.ToString().ToLowerInvariant()}]"));
                 if (drmFilter is not null && flags.ContainsKey("details") && !flags.ContainsKey("keys"))
                 {
-                    var drm = DrmCatalog.Get(library, game.Key, drmSelection.Platform, drmSelection.Branch);
+                    var drm = DrmCatalog.Get(library, game.Key, drmSelection);
                     Console.WriteLine($"  Source: {drm.Source}; branch: {drm.Branch}; checked: {drm.CheckedAt?.ToString("O") ?? "not verified"}");
                     if (drm.Url is not null) Console.WriteLine($"  {drm.Url}");
                     if (drm.Notes is not null) Console.WriteLine($"  {drm.Notes}");
@@ -366,7 +375,7 @@ public static partial class ArchiveCommandLine
                 {
                     if (drmFilter is not null)
                     {
-                        var drm = DrmCatalog.Get(library, game.Key, options.Platform, options.Branch);
+                        var drm = DrmCatalog.Get(library, game.Key, options);
                         drmCounts[(int)drm.Status]++;
                         unknownSteamDrm |= game.Key.Source == "steam" && drm.Status == DrmStatus.Unknown;
                         if (drmFilter != "any" && drm.Status != DrmCatalog.Parse(drmFilter))
@@ -460,7 +469,7 @@ public static partial class ArchiveCommandLine
                 }
                 try
                 {
-                    var downloadOptions = options with { Drm = library is null ? DrmInfo.ForStore(key.Source) with { Branch = options.Branch } : DrmCatalog.Get(library, key, options.Platform, options.Branch) };
+                    var downloadOptions = options with { Drm = library is null ? DrmInfo.ForStore(key.Source) with { Branch = options.Branch } : DrmCatalog.Get(library, key, options) };
                     var result = await archive.DownloadAsync(key, downloadOptions, new InlineProgress<ArchiveProgress>(p =>
                         Console.Error.Write($"\r{key} {p.Phase}: {p.Bytes}/{p.TotalBytes} bytes, {p.Files}/{p.TotalFiles} files       ")), ct);
                     Console.Error.WriteLine();
@@ -697,6 +706,11 @@ public static partial class ArchiveCommandLine
         Metadata: archive migrate [search] [--source gog|steam|all] --out DIR [--layout provider] [--dry-run]
           Legacy .gogdl.json/.gamebackup.json become visible gamearchiver.json; ZIPs are unchanged.
         DRM: library drm sync [--source steam|gog|all] [--drm-source pcgamingwiki|steam-curator] [--refresh]
+          library drm test [search] --out DIR [--source steam|gog|all] [--observe-seconds 60] [--no-prompt] [--retest] [--dry-run]
+            Windows launch tests; close Steam first. Ctrl+C saves completed tests; repeat to resume.
+            Uses local staging; runs game code, then stops its process tree. Not a security sandbox.
+            Omit --out inside a game folder. Launch overrides for one game: --executable PATH --arguments TEXT --working-directory PATH
+          library drm tests [search] [--source steam|gog|all] [--details]   show saved local observations
           library drm set [SOURCE:ID] [--platform windows|linux|mac] --drm free|protected|unknown --note TEXT
           library drm clear [SOURCE:ID] [--platform windows|linux|mac]
           Without SOURCE:ID, use current-folder metadata; infer platform only when unique and use its saved branch.

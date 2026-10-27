@@ -12,10 +12,17 @@ public sealed class WindowsDrmTestRuntime : IDrmTestRuntime
     public bool IsSupported => OperatingSystem.IsWindows();
     private DateTime? _launchStartedAtUtc;
 
-    private static bool IsSteam(string name) => name.Equals("steam", StringComparison.OrdinalIgnoreCase)
-        || name.Equals("steamwebhelper", StringComparison.OrdinalIgnoreCase)
-        || name.Equals("steamerrorreporter", StringComparison.OrdinalIgnoreCase)
-        || name.Equals("steamerrorreporter64", StringComparison.OrdinalIgnoreCase);
+    private SteamProcessMonitor? _monitor;
+    private SteamProcessMonitor Monitor
+    {
+        get
+        {
+            if (_monitor is not null) return _monitor;
+            using var current = Process.GetCurrentProcess();
+            return _monitor = new(current.SessionId, () => Process.GetProcesses()
+                .Select(p => (ISteamTestProcess)new SteamProcess(p)).ToArray());
+        }
+    }
 
     internal static IDisposable AcquireLease()
     {
@@ -28,23 +35,7 @@ public sealed class WindowsDrmTestRuntime : IDrmTestRuntime
     public IReadOnlyList<string> GetSteamProcesses()
     {
         if (!IsSupported) throw new PlatformNotSupportedException("Windows process observation requires Windows.");
-        var found = new List<string>();
-        Process[] processes = [];
-        try
-        {
-            processes = Process.GetProcesses();
-            foreach (var process in processes)
-                try
-                {
-                    var name = process.ProcessName;
-                    if (IsSteam(name)) found.Add(name);
-                }
-                catch (InvalidOperationException) { } // Process exited during enumeration.
-        }
-        catch (Exception e) when (e is Win32Exception or UnauthorizedAccessException)
-        { throw new IOException("Cannot inspect running processes; Steam observation is unavailable.", e); }
-        finally { foreach (var process in processes) process.Dispose(); }
-        return found.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return Monitor.Observe();
     }
 
     public IDrmTestProcess Start(DrmTestLaunch launch)
@@ -94,52 +85,32 @@ public sealed class WindowsDrmTestRuntime : IDrmTestRuntime
         }
     }
 
-    public async Task<IReadOnlyList<string>> StopStartedSteamAsync(CancellationToken ct)
+    public Task<DrmTestCleanupResult> StopStartedSteamAsync(CancellationToken ct)
     {
         if (!IsSupported) throw new PlatformNotSupportedException("Steam cleanup requires Windows.");
-        if (_launchStartedAtUtc is not { } started) return [];
-        var observed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using var current = Process.GetCurrentProcess();
-        var session = current.SessionId;
-        var quiet = Stopwatch.StartNew();
-        try
+        return _launchStartedAtUtc is { } started ? Monitor.StopStartedAsync(started, ct)
+            : Task.FromResult(new DrmTestCleanupResult([]));
+    }
+
+    private sealed class SteamProcess(Process process) : ISteamTestProcess
+    {
+        public string Name => process.ProcessName;
+        public int SessionId => process.SessionId;
+        public bool HasExited => process.HasExited;
+        public SteamProcessIdentity Pin()
         {
-            while (true)
-            {
-                ct.ThrowIfCancellationRequested();
-                var found = false;
-                var processes = Process.GetProcesses();
-                try
-                {
-                    foreach (var process in processes)
-                        try
-                        {
-                            if (!IsSteam(process.ProcessName)) continue;
-                            // Pin the handle before checking creation time so a recycled PID
-                            // cannot redirect Kill to a different process.
-                            var handle = process.SafeHandle;
-                            if (process.HasExited) continue;
-                            var imagePath = new StringBuilder(32768); uint length = (uint)imagePath.Capacity;
-                            if (!Native.QueryFullProcessImageNameW(handle, 0, imagePath, ref length))
-                                throw new Win32Exception(Marshal.GetLastWin32Error());
-                            if (!IsSteam(Path.GetFileNameWithoutExtension(imagePath.ToString()))) continue;
-                            observed.Add(Path.GetFileNameWithoutExtension(imagePath.ToString()));
-                            if (process.StartTime.ToUniversalTime() < started || process.SessionId != session)
-                                throw new IOException("A Steam process predates this test or belongs to another session; it was left running.");
-                            found = true;
-                            process.Kill();
-                        }
-                        catch (InvalidOperationException) { } // The pinned process already exited.
-                        catch (Win32Exception) when (process.HasExited) { } // A helper exited as its parent stopped.
-                }
-                finally { foreach (var process in processes) process.Dispose(); }
-                if (found) quiet.Restart();
-                else if (quiet.Elapsed >= TimeSpan.FromMilliseconds(500)) return observed.ToList();
-                await Task.Delay(100, ct);
-            }
+            var handle = process.SafeHandle;
+            if (process.HasExited) throw new InvalidOperationException("Process exited.");
+            var imagePath = new StringBuilder(32768); uint length = (uint)imagePath.Capacity;
+            if (!Native.QueryFullProcessImageNameW(handle, 0, imagePath, ref length))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            // Query the live session instead of reusing Process.GetProcesses' cached snapshot.
+            if (!Native.ProcessIdToSessionId((uint)process.Id, out var session))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            return new(Path.GetFileNameWithoutExtension(imagePath.ToString()), (int)session, process.StartTime.ToUniversalTime());
         }
-        catch (Exception e) when (e is Win32Exception or UnauthorizedAccessException)
-        { throw new IOException("Cannot stop Steam processes started during the test.", e); }
+        public void Kill() => process.Kill();
+        public void Dispose() => process.Dispose();
     }
 
     private sealed class Job(IntPtr handle) : IDrmTestProcess
@@ -226,6 +197,8 @@ public sealed class WindowsDrmTestRuntime : IDrmTestRuntime
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool QueryFullProcessImageNameW(
             Microsoft.Win32.SafeHandles.SafeProcessHandle process, uint flags, StringBuilder path, ref uint length);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
         [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool CloseHandle(IntPtr handle);
     }
 }

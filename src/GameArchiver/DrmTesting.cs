@@ -20,16 +20,19 @@ public sealed record DrmTestOptions
 
 public sealed record DrmTestLaunch(string Root, string Executable, string Arguments, string WorkingDirectory);
 public sealed record DrmTestBatchResult(ArchiveLibrary Library, int Tested, int Skipped, string? StoppedReason, int Unavailable = 0);
+/// <summary>Observed clients are retained even when cleanup fails or times out.</summary>
+public sealed record DrmTestCleanupResult(IReadOnlyList<string> SteamProcesses, string? Error = null);
 
 /// <summary>Injectable native process boundary. Disposal must stop every process started by the test.</summary>
 public interface IDrmTestProcess : IDisposable { bool IsRunning { get; } }
 public interface IDrmTestRuntime
 {
     bool IsSupported { get; }
+    /// <summary>Steam clients visible in the test's Windows session only.</summary>
     IReadOnlyList<string> GetSteamProcesses();
     IDrmTestProcess Start(DrmTestLaunch launch);
     /// <summary>Stop only Steam clients started during this runtime's last launch; never stop a preexisting client.</summary>
-    Task<IReadOnlyList<string>> StopStartedSteamAsync(CancellationToken ct);
+    Task<DrmTestCleanupResult> StopStartedSteamAsync(CancellationToken ct);
 }
 
 public sealed partial class GameArchiverClient
@@ -79,7 +82,7 @@ public sealed partial class GameArchiverClient
             var workingDirectory = request.WorkingDirectory ?? "";
             var fingerprint = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
             {
-                TestRevision = 2, Environment.MachineName,
+                TestRevision = 3, Environment.MachineName,
                 current.Metadata.Key, options.Platform, backup.Version, backup.ArchiveName, backup.ArchiveSize,
                 backup.ModifiedAt, backup.NeedsRefresh, zipFile.LastWriteTimeUtc, executable, arguments, workingDirectory,
                 Seconds = request.ObserveFor.TotalSeconds,
@@ -111,6 +114,8 @@ public sealed partial class GameArchiverClient
                 var scratch = Path.Combine(scratchRoot, Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(scratch);
                 var launchAttempted = false;
+                var launchStarted = false;
+                var observed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
                     var launch = DrmTestExtraction.Launch(scratch, executable, arguments, workingDirectory);
@@ -122,7 +127,7 @@ public sealed partial class GameArchiverClient
                     launchAttempted = true;
                     using (var process = runtime.Start(launch))
                     {
-                        var observed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        launchStarted = true;
                         var watch = Stopwatch.StartNew();
                         void Sample() { foreach (var name in runtime.GetSteamProcesses()) observed.Add(name); }
                         Sample();
@@ -150,19 +155,28 @@ public sealed partial class GameArchiverClient
                         using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                         try
                         {
-                            var lateSteam = await runtime.StopStartedSteamAsync(cleanup.Token);
-                            var remainingSteam = runtime.GetSteamProcesses();
-                            if ((lateSteam.Count > 0 || remainingSteam.Count > 0) && record.Outcome != DrmTestOutcome.Unavailable)
-                                record = record with { Outcome = DrmTestOutcome.SteamObserved,
-                                    SteamProcesses = record.SteamProcesses.Concat(lateSteam).Concat(remainingSteam).Distinct(StringComparer.OrdinalIgnoreCase).ToList() };
-                            if (remainingSteam.Count > 0) stop = "Steam is still running after cleanup. The batch was stopped; completed results were saved.";
+                            var cleanupResult = await runtime.StopStartedSteamAsync(cleanup.Token);
+                            observed.UnionWith(cleanupResult.SteamProcesses);
+                            if (cleanupResult.Error is not null) stop = "Steam cleanup failed; the batch was stopped: " + cleanupResult.Error;
                         }
                         catch (Exception e) when (e is IOException or InvalidOperationException or OperationCanceledException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
                         {
                             stop = "Steam cleanup failed; the batch was stopped: " + e.Message;
-                            if (record.Outcome != DrmTestOutcome.SteamObserved)
-                                record = record with { Outcome = DrmTestOutcome.Unavailable, Detail = stop };
                         }
+                        // Resample even after a cleanup exception. A custom runtime may have
+                        // failed before returning its partial evidence.
+                        try
+                        {
+                            var remainingSteam = runtime.GetSteamProcesses();
+                            observed.UnionWith(remainingSteam);
+                            if (remainingSteam.Count > 0) stop ??= "Steam is still running after cleanup. The batch was stopped; completed results were saved.";
+                        }
+                        catch (Exception e) when (e is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+                        { stop ??= "Cannot confirm Steam cleanup; the batch was stopped: " + e.Message; }
+                        if (launchStarted && observed.Count > 0)
+                            record = record with { Outcome = DrmTestOutcome.SteamObserved, SteamProcesses = observed.ToList() };
+                        else if (stop is not null)
+                            record = record with { Outcome = DrmTestOutcome.Unavailable, Detail = stop };
                         if (stop is not null && ct.IsCancellationRequested) progress?.Report(stop);
                     }
                     // Native runtime disposal finishes before deleting extracted files.

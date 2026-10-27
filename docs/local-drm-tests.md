@@ -8,7 +8,9 @@ or slug. By default known non-game products are omitted; `--include-non-games` i
 
 ## Automatic classification
 
-The tool samples Steam processes every 200 ms while the launch runs (60 seconds by default).
+The tool samples Steam processes in the current Windows session every 200 ms while the launch
+runs (60 seconds by default). Clients in other signed-in users' sessions are ignored by both
+observation and cleanup, so they cannot block or classify a test.
 There are no prompts or gameplay confirmations, in the CLI or C# API. After an early process
 exit it watches for another two seconds for a deferred Steam launch. The outcomes are:
 
@@ -30,7 +32,9 @@ Windows session, including clients started outside the game job by a shell broke
 checks executable names on pinned process handles and creation times against the launch.
 Preexisting clients are never stopped. Run on a dedicated desktop session without launching
 Steam separately during the batch. Once cleanup succeeds the next game starts automatically;
-failed cleanup stops the batch and preserves the completed verdict. `--no-prompt` is accepted
+failed cleanup stops the batch and preserves the completed verdict. Observations are returned
+separately from cleanup errors, so a client seen only during cleanup still produces Protected
+after a permission error or timeout, even if it subsequently exits. `--no-prompt` is accepted
 for compatibility but no longer changes behavior. Redirected input works without flags.
 
 Cached authorization, another client, delayed checks and machine-specific dependencies may
@@ -51,6 +55,8 @@ recipe, machine and observation duration. It is a change detector, not a cryptog
 of every ZIP byte. A changed fingerprint gets a new test automatically; `--retest` replaces
 the result for the same fingerprint. Fix missing dependencies/launch settings and use
 `--retest` to repeat an otherwise unchanged unsuccessful test.
+The corrected session scope and cleanup evidence handling advance the fingerprint revision;
+the next test run reevaluates previous results instead of skipping them.
 
 Manual overrides remain first. A Free/Protected automatic local result then outranks community
 evidence only for a matching version and selection; Unknown falls back to community data.

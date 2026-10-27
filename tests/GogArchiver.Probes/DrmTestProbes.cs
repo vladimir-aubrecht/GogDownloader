@@ -15,6 +15,8 @@ public static class DrmTestProbes
         {
             await ResumeAndPrecedenceAsync(root);
             await ObservationAsync(root);
+            await CleanupEvidenceAsync(root);
+            await SteamProcessMonitorProbes.RunAsync();
             await ExtractionAsync(root);
             await CommandsAsync(root);
             await GogAndLayoutAsync(root);
@@ -219,6 +221,37 @@ public static class DrmTestProbes
             && malformedRuntime.Starts == 0 && EmptyStaging(options));
     }
 
+    private static async Task CleanupEvidenceAsync(string root)
+    {
+        var (library, options, snapshot) = await FixtureAsync(root, "cleanup-evidence", 2);
+        library.Games[0] = library.Games[0] with { Drm = new() { [GameOs.Windows] = new() { Status = DrmStatus.Free, Source = "community-fixture" } } };
+        await using var client = new GameArchiverClient(new Store(library.Games));
+        Task Save(ArchiveLibrary value, CancellationToken token) => value.SaveAsync(snapshot, token);
+        foreach (var error in new[] { "Access denied", "Cleanup timed out" })
+        {
+            var runtime = new Runtime { SteamDuringCleanup = true, CleanupError = error };
+            var result = await client.TestDrmAsync(library, options, Request(), Save, runtime);
+            var saved = await ArchiveLibrary.LoadAsync(snapshot);
+            Probe.Check("late Steam evidence survives a cleanup failure and JSON checkpoint: " + error,
+                result.StoppedReason?.Contains(error) == true && result.Tested == 1 && runtime.Starts == 1
+                && saved.DrmTests.Single().SteamProcesses.SequenceEqual(["steam"])
+                && saved.DrmTests.Single().Outcome == DrmTestOutcome.SteamObserved
+                && DrmCatalog.Get(saved, new("steam", "1"), GameOs.Windows) is { Status: DrmStatus.Protected, Source: "local-process-test" }
+                && EmptyStaging(options));
+        }
+        var thrown = new Runtime { CleanupFails = true };
+        thrown.OnCleanup = () => thrown.Steam = () => ["steamwebhelper"];
+        var retried = await client.TestDrmAsync(library, options, Request(), Save, thrown);
+        Probe.Check("a custom cleanup exception still resamples and preserves running Steam evidence",
+            retried.StoppedReason is not null && retried.Library.DrmTests.Single().SteamProcesses.SequenceEqual(["steamwebhelper"])
+            && DrmCatalog.Get(retried.Library, new("steam", "1"), GameOs.Windows).Status == DrmStatus.Protected);
+        var unreadable = new Runtime { SteamDuringCleanup = true, ObserveFailsAfterCleanup = true };
+        var retained = await client.TestDrmAsync(library, options, Request(), Save, unreadable);
+        Probe.Check("a failing final observation cannot discard a successful cleanup observation",
+            retained.StoppedReason is not null && retained.Library.DrmTests.Single().SteamProcesses.SequenceEqual(["steam"])
+            && DrmCatalog.Get(retained.Library, new("steam", "1"), GameOs.Windows).Status == DrmStatus.Protected);
+    }
+
     private static async Task CommandsAsync(string root)
     {
         var (library, options, snapshot) = await FixtureAsync(root, "cli");
@@ -367,18 +400,21 @@ public static class DrmTestProbes
     private sealed class Runtime : IDrmTestRuntime
     {
         public bool IsSupported => true;
-        public bool Running = true, StartFails, CleanupFails, SteamDuringCleanup, SteamAfterCleanup;
+        public bool Running = true, StartFails, CleanupFails, SteamDuringCleanup, SteamAfterCleanup, ObserveFailsAfterCleanup;
+        public string? CleanupError;
         public int Starts, Disposals, Cleanups;
         public Func<IReadOnlyList<string>> Steam = () => [];
         public Action<int>? OnStart;
-        public IReadOnlyList<string> GetSteamProcesses() => Steam();
-        public Task<IReadOnlyList<string>> StopStartedSteamAsync(CancellationToken ct)
+        public Action? OnCleanup;
+        public IReadOnlyList<string> GetSteamProcesses() => ObserveFailsAfterCleanup && Cleanups > 0
+            ? throw new IOException("Cannot observe processes") : Steam();
+        public Task<DrmTestCleanupResult> StopStartedSteamAsync(CancellationToken ct)
         {
-            ct.ThrowIfCancellationRequested(); Cleanups++;
+            ct.ThrowIfCancellationRequested(); Cleanups++; OnCleanup?.Invoke();
             if (CleanupFails) throw new IOException("Fixture cleanup failed");
             IReadOnlyList<string> observed = SteamDuringCleanup ? ["steam"] : Steam();
             Steam = () => SteamAfterCleanup ? ["steam"] : [];
-            return Task.FromResult(observed);
+            return Task.FromResult(new DrmTestCleanupResult(observed, CleanupError));
         }
         public IDrmTestProcess Start(DrmTestLaunch launch)
         {

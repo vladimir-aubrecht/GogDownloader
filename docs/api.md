@@ -314,9 +314,11 @@ var tested = await archive.TestDrmAsync(library,
 architecture against local tests. Automatic reports carry `DrmInfo.TestedVersion`; providers
 use `ForVersion(actualVersion)` at publication to avoid labeling different content with the
 old local verdict. See [local DRM tests](local-drm-tests.md) for observation limits and resume
-semantics. `IDrmTestRuntime.StopStartedSteamAsync` cleans up clients started during its last
-launch and returns client names observed during cleanup, so a deferred launch still classifies
-as Protected; it must leave preexisting clients alone. Launching game code is not sandboxed, even
+semantics. `IDrmTestRuntime.GetSteamProcesses` and cleanup both consider only the current
+Windows session. `StopStartedSteamAsync` returns `DrmTestCleanupResult`, containing observed
+client names and an optional error. Expected failures and timeouts must retain observations
+even if a client has already exited; a deferred launch still classifies as Protected when
+cleanup fails. Preexisting clients and other sessions must be left alone. Launching game code is not sandboxed, even
 though its child processes are contained for cleanup.
 
 ```csharp

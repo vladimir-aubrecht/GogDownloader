@@ -6,6 +6,20 @@ GOG and Steam, legacy metadata, flat/provider layouts and custom provider folder
 Without `--out`, it reads the current game's metadata. A search matches a source:ID, title
 or slug. By default known non-game products are omitted; `--include-non-games` includes them.
 
+## Run and inspect tests
+
+Build Release first (`dotnet build -c Release`), then run from the repository root:
+
+```powershell
+dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm test --source steam --out Z:\software\games\gamevault\steam
+dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm tests --source steam --details
+```
+
+Use `--dry-run` to preview, `--observe-seconds 120` for a longer observation period, and
+`--retest` to repeat completed attempts. Ctrl+C stops the current attempt; repeating the
+command resumes with untested games. Output layouts follow the [CLI guide](cli.md#output-folders).
+For community reports and manual corrections, see [DRM filtering](drm.md).
+
 ## Automatic classification
 
 The tool samples Steam processes in the current Windows session every 200 ms while the launch

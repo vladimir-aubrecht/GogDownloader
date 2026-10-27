@@ -6,38 +6,41 @@ GOG and Steam, legacy metadata, flat/provider layouts and custom provider folder
 Without `--out`, it reads the current game's metadata. A search matches a source:ID, title
 or slug. By default known non-game products are omitted; `--include-non-games` includes them.
 
-## Observations versus confirmation
+## Automatic classification
 
-The tool samples Steam processes every 200 ms while the launch runs (60 seconds by default),
-including while the user checks gameplay at the confirmation prompt. After an early process
+The tool samples Steam processes every 200 ms while the launch runs (60 seconds by default).
+There are no prompts or gameplay confirmations, in the CLI or C# API. After an early process
 exit it watches for another two seconds for a deferred Steam launch. The outcomes are:
 
-| Outcome | Meaning |
-| --- | --- |
-| RunningWithoutSteam | The test process tree was still running; no Steam process was observed. |
-| SteamObserved | A Steam client, web helper or crash reporter was observed. |
-| Exited | The process tree exited before the observation period ended. |
-| Unavailable | Missing/unsupported launcher, damaged ZIP, extraction or launch error. |
+| Outcome | Classification | Meaning |
+| --- | --- | --- |
+| RunningWithoutSteam | Free | The test process tree was still running at the deadline; no Steam process was observed. |
+| SteamObserved | Protected | A Steam client, web helper or crash reporter was observed, regardless of game survival. |
+| Exited | Unknown | The process tree exited before the observation period ended. |
+| Unavailable | Unknown | Missing/unsupported launcher, damaged ZIP, extraction or launch error. |
 
-None automatically means `Free` or `Protected`. A process can be displaying an error or a
-launcher; Steam can open for optional features. Polling can miss a short-lived Steam process.
-An already running Steam client blocks testing rather than contaminating the result. The
-installed Steam background service alone does not count as a running client. The tool does
-not stop unrelated Steam processes; after observing Steam it checkpoints the result and stops
-the batch. Close Steam and rerun to continue with other games.
+This rule is a heuristic, identified as `local-process-test` in DRM evidence. A process can
+be displaying an error or a launcher; Steam can open for optional features. Polling can miss
+a short-lived Steam process. Manual corrections remain available. An already running Steam
+client blocks testing rather than contaminating the result. The installed Steam background
+service alone does not count as a running client.
 
-The interactive prompt accepts `y` for confirmed gameplay without Steam, `s` for a confirmed
-requirement for Steam, or Enter for unknown. A detected Steam process always prevents a free
-confirmation, even if it starts while the prompt is open. `--no-prompt` saves observations
-without classification and is required when input is redirected. A game merely starting
-without Steam does not establish offline play: cached authorization, another client, delayed
-checks and machine-specific dependencies may still matter. No network isolation or clean
-Windows environment is created. No DRM is modified or removed.
+After each test the tool stops its game process tree and new Steam clients from the same
+Windows session, including clients started outside the game job by a shell broker. Cleanup
+checks executable names on pinned process handles and creation times against the launch.
+Preexisting clients are never stopped. Run on a dedicated desktop session without launching
+Steam separately during the batch. Once cleanup succeeds the next game starts automatically;
+failed cleanup stops the batch and preserves the completed verdict. `--no-prompt` is accepted
+for compatibility but no longer changes behavior. Redirected input works without flags.
+
+Cached authorization, another client, delayed checks and machine-specific dependencies may
+still matter. No network isolation or clean Windows environment is created. No DRM is modified
+or removed.
 
 ## Persistence, precedence and resuming
 
 `ArchiveLibrary.DrmTests` stores identity, version, launch recipe, machine, timestamp, elapsed
-observation time, processes seen, outcome and optional confirmation. `library drm tests
+observation time, processes seen, outcome and automatic rule revision. `library drm tests
 [search] [--source steam|gog|all] [--details]` shows these saved records. Each complete result is
 atomically checkpointed, including inconclusive/unavailable attempts. Ctrl+C leaves the
 current attempt unrecorded; repeat the command to retry it and continue with remaining games.
@@ -49,12 +52,14 @@ of every ZIP byte. A changed fingerprint gets a new test automatically; `--retes
 the result for the same fingerprint. Fix missing dependencies/launch settings and use
 `--retest` to repeat an otherwise unchanged unsuccessful test.
 
-Manual overrides remain first. A confirmed local result then outranks community evidence
-only for a matching version and selection; an unconfirmed observation does not replace a
-community classification. Store/community syncs retain local test records. Locally edited or
+Manual overrides remain first. A Free/Protected automatic local result then outranks community
+evidence only for a matching version and selection; Unknown falls back to community data.
+Store/community syncs retain local test records. Historical records without a rule revision
+remain readable with their original confirmation semantics, and are retested automatically
+under the new rule. They are not silently promoted to Free. Locally edited or
 outdated archives can be tested, but their results do not classify the provider's original
 content. Download publication checks `DrmInfo.TestedVersion` against the actual live version
-so a newer release cannot inherit a previous build's local confirmation. Existing ZIPs and
+so a newer release cannot inherit a previous build's local verdict. Existing ZIPs and
 `gamearchiver.json` are never rewritten just to annotate a test.
 
 ## Launching and extraction
@@ -84,10 +89,11 @@ then resumes it. Job accounting includes children after a launcher exits. Comple
 and cancellation terminate contained processes before cleanup; closing/crashing the test
 host also closes the job. This is process cleanup, not a security sandbox: games can write
 outside the extraction under your account, and services/shell brokers can create processes
-outside the job. The tool never deliberately kills unrelated processes. Cleanup failures
+outside the job. New Steam clients in the test session are also stopped as described above. Cleanup failures
 stop the batch and identify the scratch directory for manual inspection.
 
-The deterministic probes cover resuming, CRC/path failures, confirmation precedence, version
-invalidation and Steam starting during confirmation. Windows-only probes exercise actual
-child process containment. Development on Linux cannot validate real game launches, GUI
+The deterministic probes cover resuming, CRC/path failures, automatic classification, manual
+precedence, version invalidation, Steam cleanup and continued batch processing. Windows-only
+probes exercise child process containment and cleanup of a harmless fake client outside the
+job, skipping native launches if Steam is already running. Development on Linux cannot validate real game launches, GUI
 behavior or the native Windows runtime; these require a Windows machine.

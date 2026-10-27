@@ -46,7 +46,7 @@ public static class DrmCatalog
                 && (architecture is null || t.Version.Architecture.Length == 0 || t.Version.Architecture == architecture))
             .OrderByDescending(t => t.TestedAt).FirstOrDefault();
         var info = library.DrmOverrides.GetValueOrDefault(key.ToString())?.GetValueOrDefault(platform)
-            ?? (local is { Confirmation: not DrmTestConfirmation.Unknown } ? local.Classification : null)
+            ?? (local is not null && local.Classification.Status != DrmStatus.Unknown ? local.Classification : null)
             ?? game.Drm.GetValueOrDefault(platform)
             ?? DrmInfo.ForStore(key.Source);
         return info.Branch == branch ? info : new() { Branch = branch, Notes = "No DRM classification for this branch." };

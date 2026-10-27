@@ -325,29 +325,31 @@ See [the PCGamingWiki adapter and its limits](docs/pcgamingwiki.md).
 ## Test downloaded games locally
 
 On Windows, `library drm test` extracts completed archives to local staging, starts the recorded
-launcher and watches for Steam client processes. Close Steam first. The default observation
-period is 60 seconds, followed by a prompt to confirm actual gameplay. A running process can
-be a launcher or error dialog, and starting Steam can be optional integration: neither signal
-alone proves the DRM status.
+launcher and watches for Steam client processes. Close Steam first. The command is fully
+autonomous, with a default observation period of 60 seconds and no gameplay prompts:
+Steam observed means `Protected`; a game process tree still running without Steam at the
+deadline means `Free`; early exit or a launch/extraction error means `Unknown`.
 
 ```powershell
 dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm test --source steam --out Z:\software\games\gamevault\steam
-# Automatic observations only, with no gameplay prompts:
-dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm test --source steam --out Z:\software\games\gamevault\steam --no-prompt
 dotnet run --project src/GameArchiver.Cli -c Release --no-build -- library drm tests --source steam --details
 ```
 
 Ctrl+C stops the active test; completed results are saved after each game in the library
 snapshot. Repeat the same command to resume. Use `--retest` to repeat completed/inconclusive
 tests, `--observe-seconds 120` to change the observation period, and `--dry-run` to preview.
-An observed Steam launch stops the batch; close Steam and rerun to test the remaining games.
+Steam started during a test is stopped automatically before the next game. A Steam client
+already running before a test is left untouched, and blocks that test. Cleanup errors stop
+the batch while preserving completed results. `--no-prompt` remains an optional compatibility
+alias; all tests now run without prompts, including with redirected input.
 `--out` supports the normal provider layout; omit it inside a game folder to use its metadata.
 Batch selection defaults to games; `--include-non-games` also selects other archived products.
 
-Precedence is **manual override > confirmed local test for matching content > community report**.
-Automatic observations remain separate from the classification. Confirmed local results are
+Precedence is **manual override > automatic local test for matching content > community report**.
+Results are labelled `local-process-test`, identifying the automatic heuristic. Local results are
 scoped to the tested build, platform, branch, language and architecture; sync preserves them.
-These are tests on your machine, not proof of portability to a clean computer. Games execute
+The heuristic can misclassify launchers/error dialogs or optional Steam integration. These
+are tests on your machine, not proof of portability to a clean computer. Games execute
 under your account and may create saves/settings. The test stops its process tree and removes
 the extraction; ZIPs and archive metadata remain unchanged. See [local test behavior and limits](docs/local-drm-tests.md).
 

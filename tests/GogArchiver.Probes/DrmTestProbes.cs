@@ -71,12 +71,12 @@ public static class DrmTestProbes
         var resumed = await client.TestDrmAsync(library, options, Request(), Save, runtime);
         Probe.Check("DRM rerun skips completed fingerprints and resumes untested games", resumed.Tested == 1 && resumed.Skipped == 1
             && runtime.Starts == 1 && resumed.Library.DrmTests.Count == 2 && EmptyStaging(options));
-        Probe.Check("automatic process survival does not assert DRM-free", resumed.Library.DrmTests.All(t => t.Outcome == DrmTestOutcome.RunningWithoutSteam
-            && t.Confirmation == DrmTestConfirmation.Unknown) && DrmCatalog.Get(resumed.Library, new("steam", "1"), GameOs.Windows).Status == DrmStatus.Unknown);
-        var confirmed = await client.TestDrmAsync(resumed.Library, options, Request("steam:1") with { Retest = true }, Save, new Runtime(),
-            (_, _) => Task.FromResult(DrmTestConfirmation.PlayableWithoutSteam));
-        Probe.Check("confirmed local gameplay takes precedence for the tested build", confirmed.Library.DrmTests.Count == 2
-            && DrmCatalog.Get(confirmed.Library, new("steam", "1"), GameOs.Windows) is { Status: DrmStatus.Free, Source: "local-verification" });
+        Probe.Check("process survival without Steam automatically classifies free", resumed.Library.DrmTests.All(t => t.Outcome == DrmTestOutcome.RunningWithoutSteam
+            && t.RuleRevision == 1 && t.Confirmation == DrmTestConfirmation.Unknown)
+            && DrmCatalog.Get(resumed.Library, new("steam", "1"), GameOs.Windows).Status == DrmStatus.Free);
+        var confirmed = await client.TestDrmAsync(resumed.Library, options, Request("steam:1") with { Retest = true }, Save, new Runtime());
+        Probe.Check("automatic local evidence takes precedence for the tested build", confirmed.Library.DrmTests.Count == 2
+            && DrmCatalog.Get(confirmed.Library, new("steam", "1"), GameOs.Windows) is { Status: DrmStatus.Free, Source: "local-process-test" });
         var classification = DrmCatalog.Get(confirmed.Library, new("steam", "1"), GameOs.Windows);
         Probe.Check("a live download cannot stamp an old local verdict onto a different version",
             classification.ForVersion(confirmed.Library.Games[0].Versions[GameOs.Windows]).Status == DrmStatus.Free
@@ -86,12 +86,12 @@ public static class DrmTestProbes
             && DrmCatalog.Get(confirmed.Library, new("steam", "1"), new GameSelection { Architecture = "32" }).Status == DrmStatus.Unknown);
         var synced = await client.SyncLibraryAsync(confirmed.Library);
         var refreshed = (await LibraryDrm.RefreshAsync(synced, new Community())).Library;
-        Probe.Check("local confirmations survive store and community syncs", DrmCatalog.Get(refreshed, new("steam", "1"), GameOs.Windows).Source == "local-verification");
+        Probe.Check("local classifications survive store and community syncs", DrmCatalog.Get(refreshed, new("steam", "1"), GameOs.Windows).Source == "local-process-test");
         refreshed.DrmOverrides["steam:1"] = new() { [GameOs.Windows] = new() { Status = DrmStatus.Protected, Source = "manual" } };
-        Probe.Check("manual overrides remain above local confirmation", DrmCatalog.Get(refreshed, new("steam", "1"), GameOs.Windows).Source == "manual");
+        Probe.Check("manual overrides remain above automatic local classification", DrmCatalog.Get(refreshed, new("steam", "1"), GameOs.Windows).Source == "manual");
         refreshed.DrmOverrides.Clear();
         refreshed.Games[0] = refreshed.Games[0] with { Versions = new() { [GameOs.Windows] = new("build2") } };
-        Probe.Check("local confirmation cannot leak to another build, branch or platform",
+        Probe.Check("local classification cannot leak to another build, branch or platform",
             DrmCatalog.Get(refreshed, new("steam", "1"), GameOs.Windows).Source == "fixture-community"
             && DrmCatalog.Get(confirmed.Library, new("steam", "1"), GameOs.Windows, "beta").Status == DrmStatus.Unknown
             && DrmCatalog.Get(confirmed.Library, new("steam", "1"), GameOs.Linux).Status == DrmStatus.Unknown);
@@ -100,8 +100,7 @@ public static class DrmTestProbes
         var metadata = (await ArchiveMetadata.LoadAsync(backup))!;
         metadata.Platforms[GameOs.Windows] = metadata.Platforms[GameOs.Windows] with { ModifiedAt = DateTimeOffset.UtcNow };
         await metadata.SaveAsync(backup);
-        var modified = await client.TestDrmAsync(confirmed.Library, options, Request("steam:1"), Save, new Runtime(),
-            (_, _) => Task.FromResult(DrmTestConfirmation.PlayableWithoutSteam));
+        var modified = await client.TestDrmAsync(confirmed.Library, options, Request("steam:1"), Save, new Runtime());
         Probe.Check("edited archives are retested but cannot classify the provider's unmodified content",
             modified.Tested == 1 && !modified.Library.DrmTests.Last().AppliesToCatalog);
         var archived = metadata.Platforms[GameOs.Windows];
@@ -109,6 +108,12 @@ public static class DrmTestProbes
         await metadata.SaveAsync(backup);
         var newer = await client.TestDrmAsync(modified.Library, options, Request("steam:1"), Save, new Runtime());
         Probe.Check("a new archived build gets a new test without --retest", newer.Tested == 1 && newer.Library.DrmTests.Last().Version.BuildId == "build2");
+        var legacy = newer.Library with { DrmTests = [newer.Library.DrmTests.Last() with { RuleRevision = 0 }] };
+        Probe.Check("historical unconfirmed observations are not silently reclassified", legacy.DrmTests.Single().Classification.Status == DrmStatus.Unknown);
+        runtime = new();
+        var refreshedLegacy = await client.TestDrmAsync(legacy, options, Request("steam:1"), Save, runtime);
+        Probe.Check("historical observation-only tests are rerun under the autonomous rule", runtime.Starts == 1
+            && refreshedLegacy.Library.DrmTests.Single().RuleRevision == 1);
     }
 
     private static async Task ObservationAsync(string root)
@@ -120,21 +125,33 @@ public static class DrmTestProbes
         var result = await client.TestDrmAsync(library, options, Request(), Save, runtime);
         Probe.Check("preexisting Steam blocks testing without recording an outcome", result.StoppedReason is not null
             && result.Library.DrmTests.Count == 0 && runtime.Starts == 0 && EmptyStaging(options));
-        runtime = new Runtime(); runtime.Steam = () => runtime.Starts > 0 ? ["steam"] : [];
-        result = await client.TestDrmAsync(library, options, Request(), Save, runtime,
-            (_, _) => Task.FromResult(DrmTestConfirmation.PlayableWithoutSteam));
-        Probe.Check("observed Steam prevents a free confirmation and stops the batch before another game", result.Tested == 1
-            && result.StoppedReason is not null && runtime.Starts == 1 && runtime.Disposals == 1
-            && result.Library.DrmTests.Single() is { Outcome: DrmTestOutcome.SteamObserved, Confirmation: DrmTestConfirmation.Unknown });
+        runtime = new Runtime(); runtime.OnStart = _ => runtime.Steam = () => ["steam"];
+        result = await client.TestDrmAsync(library, options, Request(), Save, runtime);
+        Probe.Check("observed Steam automatically classifies protected, cleans up and continues the batch", result.Tested == 2
+            && result.StoppedReason is null && runtime.Starts == 2 && runtime.Disposals == 2 && runtime.Cleanups == 2
+            && result.Library.DrmTests.All(t => t.Outcome == DrmTestOutcome.SteamObserved && t.Classification.Status == DrmStatus.Protected));
+        runtime = new() { CleanupFails = true }; runtime.OnStart = _ => runtime.Steam = () => ["steam"];
+        result = await client.TestDrmAsync(library, options, Request(), Save, runtime);
+        Probe.Check("failed Steam cleanup keeps the verdict and blocks a contaminated next test", result.Tested == 1
+            && result.StoppedReason is not null && runtime.Starts == 1 && result.Library.DrmTests.Single().Classification.Status == DrmStatus.Protected);
+        runtime = new() { SteamDuringCleanup = true };
+        result = await client.TestDrmAsync(library, options, Request(), Save, runtime);
+        Probe.Check("a deferred Steam launch first observed during cleanup is protected and the batch continues",
+            result.Tested == 2 && result.StoppedReason is null && result.Library.DrmTests.All(t => t.Classification.Status == DrmStatus.Protected));
+        runtime = new() { SteamAfterCleanup = true };
+        result = await client.TestDrmAsync(library, options, Request(), Save, runtime);
+        Probe.Check("Steam appearing immediately after cleanup is protected and prevents the next test",
+            result.Tested == 1 && result.StoppedReason is not null && result.Library.DrmTests.Single().Classification.Status == DrmStatus.Protected);
+        runtime = new() { CleanupFails = true };
+        result = await client.TestDrmAsync(library, options, Request(), Save, runtime);
+        Probe.Check("failed cleanup cannot leave an unconfirmed free verdict", result.Tested == 1
+            && result.StoppedReason is not null && result.Library.DrmTests.Single().Classification.Status == DrmStatus.Unknown);
         runtime = new();
-        result = await client.TestDrmAsync(library, options, Request("steam:1"), Save, runtime, async (_, token) =>
-        {
-            runtime.Steam = () => ["steamwebhelper"];
-            await Task.Delay(300, token);
-            return DrmTestConfirmation.PlayableWithoutSteam;
-        });
-        Probe.Check("monitoring continues during gameplay confirmation", result.Library.DrmTests.Single().Outcome == DrmTestOutcome.SteamObserved
-            && result.Library.DrmTests.Single().Confirmation == DrmTestConfirmation.Unknown);
+        var samples = 0;
+        runtime.Steam = () => runtime.Starts > 0 && ++samples >= 3 ? ["steamwebhelper"] : [];
+        result = await client.TestDrmAsync(library, options, Request("steam:1"), Save, runtime);
+        Probe.Check("Steam appearing during observation takes precedence over a still-running game",
+            result.Library.DrmTests.Single().Classification.Status == DrmStatus.Protected);
         runtime = new() { Running = false };
         result = await client.TestDrmAsync(library, options, Request("steam:1"), Save, runtime);
         Probe.Check("immediate process exit stays inconclusive instead of free", result.Library.DrmTests.Single().Outcome == DrmTestOutcome.Exited
@@ -143,20 +160,16 @@ public static class DrmTestProbes
         result = await client.TestDrmAsync(library, options, Request("steam:1"), Save, runtime);
         Probe.Check("launcher failure records an unavailable test and removes extraction", result.Library.DrmTests.Single().Outcome == DrmTestOutcome.Unavailable
             && result.Library.DrmTests.Single().Classification.Status == DrmStatus.Unknown && EmptyStaging(options));
-        runtime = new();
-        result = await client.TestDrmAsync(library, options, Request("steam:1"), Save, runtime,
-            (_, _) => Task.FromResult(DrmTestConfirmation.SteamRequired));
-        Probe.Check("explicit Steam-required confirmation can classify protected content", result.Library.DrmTests.Single().Classification.Status == DrmStatus.Protected);
         using var cancellation = new CancellationTokenSource(); runtime = new();
+        runtime.OnStart = _ => { runtime.Steam = () => ["steam"]; cancellation.Cancel(); };
         var before = await File.ReadAllTextAsync(snapshot);
         try
         {
-            await client.TestDrmAsync(library, options, Request("steam:1"), Save, runtime,
-                async (_, token) => { cancellation.Cancel(); await Task.Delay(1000, token); return DrmTestConfirmation.PlayableWithoutSteam; }, ct: cancellation.Token);
+            await client.TestDrmAsync(library, options, Request("steam:1"), Save, runtime, ct: cancellation.Token);
         }
         catch (OperationCanceledException) { }
-        Probe.Check("cancelling a confirmation records no result and cleans up", before == await File.ReadAllTextAsync(snapshot)
-            && runtime.Disposals == 1 && EmptyStaging(options));
+        Probe.Check("cancelling observation records no result and cleans up both game and new Steam", before == await File.ReadAllTextAsync(snapshot)
+            && runtime.Disposals == 1 && runtime.Cleanups == 1 && runtime.GetSteamProcesses().Count == 0 && EmptyStaging(options));
     }
 
     private static async Task ExtractionAsync(string root)
@@ -216,9 +229,17 @@ public static class DrmTestProbes
         var result = await Run("library", "drm", "test", "--out", options.OutputRoot, "--staging", options.StagingRoot!, "--dry-run");
         Probe.Check("DRM dry-run previews offline without launching, extracting or saving", result.Exit == 0 && result.Output.Contains("WouldTest")
             && runtime.Starts == 0 && EmptyStaging(options) && before == await File.ReadAllTextAsync(snapshot));
-        result = await Run("library", "drm", "test", "--out", options.OutputRoot, "--staging", options.StagingRoot!, "--no-prompt", "--observe-seconds", "1");
-        Probe.Check("CLI exposes automatic observations with checkpointing", result.Exit == 0 && result.Output.Contains("1 saved")
-            && (await ArchiveLibrary.LoadAsync(snapshot)).DrmTests.Count == 1);
+        var input = Console.In;
+        try
+        {
+            Console.SetIn(new NoInput());
+            result = await Run("library", "drm", "test", "--out", options.OutputRoot, "--staging", options.StagingRoot!, "--observe-seconds", "1");
+        }
+        finally { Console.SetIn(input); }
+        Probe.Check("CLI classifies autonomously by default without reading input", result.Exit == 0 && result.Output.Contains("1 saved")
+            && (await ArchiveLibrary.LoadAsync(snapshot)).DrmTests.Single().Classification.Status == DrmStatus.Free);
+        result = await Run("library", "list", "--drm", "free", "--keys");
+        Probe.Check("automatic local verdicts reach existing DRM filters", result.Exit == 0 && result.Output.Trim() == "steam:1");
         result = await Run("library", "drm", "tests", "--details");
         Probe.Check("saved local test listing includes version and evidence", result.Exit == 0 && result.Output.Contains("RunningWithoutSteam") && result.Output.Contains("Build: build1"));
         result = await Run("library", "drm", "test", "--out", options.OutputRoot, "--arguments", "--game-option", "--dry-run");
@@ -261,18 +282,17 @@ public static class DrmTestProbes
         var metadata = (await ArchiveMetadata.LoadAsync(gogDir))!;
         library.Games.Add(new(new("gog", "1"), "GOG game", "game_1") { Versions = new() { [GameOs.Windows] = metadata.Platforms[GameOs.Windows].Version } });
         await using var client = new GameArchiverClient(new Store(library.Games), new Store(library.Games, "gog"));
-        var result = await client.TestDrmAsync(library, options, Request("gog:1"), (value, token) => value.SaveAsync(snapshot, token), new Runtime(),
-            (_, _) => Task.FromResult(DrmTestConfirmation.PlayableWithoutSteam));
+        var result = await client.TestDrmAsync(library, options, Request("gog:1"), (value, token) => value.SaveAsync(snapshot, token), new Runtime());
         Probe.Check("local tests read legacy GOG metadata in custom provider folders without confusing equal Steam IDs",
             result.Tested == 1 && result.Library.DrmTests.Single().Key == new GameKey("gog", "1")
-            && DrmCatalog.Get(result.Library, new("gog", "1"), GameOs.Windows).Source == "local-verification"
+            && DrmCatalog.Get(result.Library, new("gog", "1"), GameOs.Windows).Source == "local-process-test"
             && DrmCatalog.Get(result.Library, new("steam", "1"), GameOs.Windows).Status == DrmStatus.Unknown
             && File.Exists(Path.Combine(gogDir, ArchiveMetadata.LegacyFileName)) && !File.Exists(Path.Combine(gogDir, ArchiveMetadata.FileName)));
-        var invalid = result.Library with { DrmTests = [result.Library.DrmTests.Single() with { Outcome = DrmTestOutcome.SteamObserved }] };
+        var invalid = result.Library with { DrmTests = [result.Library.DrmTests.Single() with { SteamProcesses = ["steam"] }] };
         await invalid.SaveAsync(snapshot);
         var rejected = false;
         try { await ArchiveLibrary.LoadAsync(snapshot); } catch (InvalidDataException) { rejected = true; }
-        Probe.Check("snapshot validation rejects a free confirmation contradicting a Steam observation", rejected);
+        Probe.Check("snapshot validation rejects a free outcome contradicting a Steam observation", rejected);
         await using var steam = new GameArchiverClient(new Store(library.Games));
         rejected = false;
         try { await steam.TestDrmAsync(library, options, Request() with { GameDirectory = gogDir, DryRun = true }, (_, _) => throw new Exception("No writes")); }
@@ -291,6 +311,7 @@ public static class DrmTestProbes
         var launcher = Path.Combine(directory, "launcher.cmd");
         await File.WriteAllTextAsync(launcher, "@echo off\r\nstart \"\" /b cmd.exe /d /c \"echo started>child.txt & ping -n 60 127.0.0.1 >nul\"\r\nexit /b 0\r\n");
         var runtime = new WindowsDrmTestRuntime();
+        if (runtime.GetSteamProcesses().Count > 0) { Probe.Check("native DRM fixture leaves an already running Steam client untouched", true); return; }
         var process = runtime.Start(new(directory, launcher, "", directory));
         try
         {
@@ -300,6 +321,36 @@ public static class DrmTestProbes
         }
         finally { process.Dispose(); }
         Probe.Check("Windows job disposal stops the contained process tree", !process.IsRunning);
+        // A harmless cmd copy models a client started by a shell broker outside the job.
+        var fakeSteam = Path.Combine(directory, "steam.exe");
+        File.Copy(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"), fakeSteam);
+        System.Diagnostics.Process StartFakeSteam() => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = fakeSteam, Arguments = "/d /c set /p waiting=", UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+        })!;
+        using (var client = StartFakeSteam())
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await runtime.StopStartedSteamAsync(timeout.Token);
+                Probe.Check("Windows cleanup stops a new Steam client outside the game job", client.HasExited);
+            }
+            finally { if (!client.HasExited) { client.Kill(); await client.WaitForExitAsync(); } }
+        }
+        using (var client = StartFakeSteam())
+        {
+            try
+            {
+                var fresh = new WindowsDrmTestRuntime(); var refused = false;
+                try { using var unexpected = fresh.Start(new(directory, launcher, "", directory)); }
+                catch (IOException) { refused = true; }
+                await fresh.StopStartedSteamAsync(CancellationToken.None);
+                Probe.Check("Windows startup refuses an existing Steam client and never kills it", refused && !client.HasExited);
+            }
+            finally { if (!client.HasExited) { client.Kill(); await client.WaitForExitAsync(); } }
+        }
     }
 
     private static async Task ZipAsync(string path, params (string Name, string Data)[] entries)
@@ -316,11 +367,19 @@ public static class DrmTestProbes
     private sealed class Runtime : IDrmTestRuntime
     {
         public bool IsSupported => true;
-        public bool Running = true, StartFails;
-        public int Starts, Disposals;
+        public bool Running = true, StartFails, CleanupFails, SteamDuringCleanup, SteamAfterCleanup;
+        public int Starts, Disposals, Cleanups;
         public Func<IReadOnlyList<string>> Steam = () => [];
         public Action<int>? OnStart;
         public IReadOnlyList<string> GetSteamProcesses() => Steam();
+        public Task<IReadOnlyList<string>> StopStartedSteamAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested(); Cleanups++;
+            if (CleanupFails) throw new IOException("Fixture cleanup failed");
+            IReadOnlyList<string> observed = SteamDuringCleanup ? ["steam"] : Steam();
+            Steam = () => SteamAfterCleanup ? ["steam"] : [];
+            return Task.FromResult(observed);
+        }
         public IDrmTestProcess Start(DrmTestLaunch launch)
         {
             Starts++; OnStart?.Invoke(Starts);
@@ -330,6 +389,11 @@ public static class DrmTestProbes
         }
         private sealed class Process(Runtime runtime) : IDrmTestProcess
         { public bool IsRunning => runtime.Running; public void Dispose() => runtime.Disposals++; }
+    }
+    private sealed class NoInput : TextReader
+    {
+        public override string? ReadLine() => throw new Exception("Autonomous tests must not read console input");
+        public override int Read() => throw new Exception("Autonomous tests must not read console input");
     }
     private sealed class Store(List<GameInfo> games, string source = "steam") : IGameStore
     {

@@ -706,9 +706,10 @@ public static partial class ArchiveCommandLine
         Metadata: archive migrate [search] [--source gog|steam|all] --out DIR [--layout provider] [--dry-run]
           Legacy .gogdl.json/.gamebackup.json become visible gamearchiver.json; ZIPs are unchanged.
         DRM: library drm sync [--source steam|gog|all] [--drm-source pcgamingwiki|steam-curator] [--refresh]
-          library drm test [search] --out DIR [--source steam|gog|all] [--observe-seconds 60] [--no-prompt] [--retest] [--dry-run]
-            Windows launch tests; close Steam first. Ctrl+C saves completed tests; repeat to resume.
-            Uses local staging; runs game code, then stops its process tree. Not a security sandbox.
+          library drm test [search] --out DIR [--source steam|gog|all] [--observe-seconds 60] [--retest] [--dry-run]
+            Autonomous Windows tests: Steam observed = protected; running without Steam = free; early exit/failure = unknown.
+            Close Steam first. Ctrl+C saves completed tests; repeat to resume. --no-prompt is an optional compatibility alias.
+            Uses local staging; stops the game and Steam started during the test before continuing. Not a security sandbox.
             Omit --out inside a game folder. Launch overrides for one game: --executable PATH --arguments TEXT --working-directory PATH
           library drm tests [search] [--source steam|gog|all] [--details]   show saved local observations
           library drm set [SOURCE:ID] [--platform windows|linux|mac] --drm free|protected|unknown --note TEXT

@@ -19,8 +19,6 @@ public sealed record DrmTestOptions
 }
 
 public sealed record DrmTestLaunch(string Root, string Executable, string Arguments, string WorkingDirectory);
-public sealed record DrmTestObservation(GameKey Key, string Title, DrmTestOutcome Outcome, double Seconds,
-    IReadOnlyList<string> SteamProcesses);
 public sealed record DrmTestBatchResult(ArchiveLibrary Library, int Tested, int Skipped, string? StoppedReason, int Unavailable = 0);
 
 /// <summary>Injectable native process boundary. Disposal must stop every process started by the test.</summary>
@@ -30,6 +28,8 @@ public interface IDrmTestRuntime
     bool IsSupported { get; }
     IReadOnlyList<string> GetSteamProcesses();
     IDrmTestProcess Start(DrmTestLaunch launch);
+    /// <summary>Stop only Steam clients started during this runtime's last launch; never stop a preexisting client.</summary>
+    Task<IReadOnlyList<string>> StopStartedSteamAsync(CancellationToken ct);
 }
 
 public sealed partial class GameArchiverClient
@@ -38,7 +38,6 @@ public sealed partial class GameArchiverClient
     /// Ctrl+C leaves the current test unrecorded, so repeating the same request resumes it.</summary>
     public async Task<DrmTestBatchResult> TestDrmAsync(ArchiveLibrary library, ArchiveOptions options, DrmTestOptions request,
         Func<ArchiveLibrary, CancellationToken, Task> checkpoint, IDrmTestRuntime? runtime = null,
-        Func<DrmTestObservation, CancellationToken, Task<DrmTestConfirmation>>? confirm = null,
         IProgress<string>? progress = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
@@ -80,12 +79,12 @@ public sealed partial class GameArchiverClient
             var workingDirectory = request.WorkingDirectory ?? "";
             var fingerprint = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
             {
-                TestRevision = 1, Environment.MachineName,
+                TestRevision = 2, Environment.MachineName,
                 current.Metadata.Key, options.Platform, backup.Version, backup.ArchiveName, backup.ArchiveSize,
                 backup.ModifiedAt, backup.NeedsRefresh, zipFile.LastWriteTimeUtc, executable, arguments, workingDirectory,
                 Seconds = request.ObserveFor.TotalSeconds,
             }, ArchiveJson.Options)));
-            if (!request.Retest && result.DrmTests.Any(t => t.Key == current.Metadata.Key && t.Platform == options.Platform && t.Fingerprint == fingerprint))
+            if (!request.Retest && result.DrmTests.Any(t => t.RuleRevision == 1 && t.Key == current.Metadata.Key && t.Platform == options.Platform && t.Fingerprint == fingerprint))
             { progress?.Report($"AlreadyTested {current.Metadata.Title} ({current.Metadata.Key}); use --retest to repeat."); skipped++; continue; }
             progress?.Report($"{(request.DryRun ? "WouldTest" : "Testing")} {current.Metadata.Title} ({current.Metadata.Key}): {(executable.Length == 0 ? "no recorded launcher" : executable)}");
             if (request.DryRun) { skipped++; continue; }
@@ -96,6 +95,7 @@ public sealed partial class GameArchiverClient
                 Key = current.Metadata.Key, Platform = options.Platform, Version = backup.Version,
                 Fingerprint = fingerprint, ArchiveName = backup.ArchiveName, Executable = executable,
                 Arguments = arguments, WorkingDirectory = workingDirectory,
+                RuleRevision = 1,
                 AppliesToCatalog = backup.ModifiedAt is null && !backup.NeedsRefresh,
             };
             string? stop = null;
@@ -110,6 +110,7 @@ public sealed partial class GameArchiverClient
                 Directory.CreateDirectory(scratchRoot);
                 var scratch = Path.Combine(scratchRoot, Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(scratch);
+                var launchAttempted = false;
                 try
                 {
                     var launch = DrmTestExtraction.Launch(scratch, executable, arguments, workingDirectory);
@@ -118,6 +119,7 @@ public sealed partial class GameArchiverClient
                         return new(result, tested, skipped, "Steam started during extraction. Close Steam and rerun; this game remains untested.", unavailable);
                     if (!File.Exists(launch.Executable) || !Directory.Exists(launch.WorkingDirectory))
                         throw new InvalidDataException("Recorded launcher or working directory is missing from the archive. Use a single-game launch override.");
+                    launchAttempted = true;
                     using (var process = runtime.Start(launch))
                     {
                         var observed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -131,36 +133,38 @@ public sealed partial class GameArchiverClient
                             for (var i = 0; i < 10; i++) { await Task.Delay(200, ct); Sample(); }
                         var outcome = observed.Count > 0 ? DrmTestOutcome.SteamObserved
                             : process.IsRunning ? DrmTestOutcome.RunningWithoutSteam : DrmTestOutcome.Exited;
-                        var confirmation = DrmTestConfirmation.Unknown;
-                        if (confirm is not null)
-                        {
-                            using var promptCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                            var answer = confirm(new(record.Key, current.Metadata.Title, outcome, watch.Elapsed.TotalSeconds, observed.ToList()), promptCancellation.Token);
-                            try
-                            {
-                                // Keep observing while the user checks actual gameplay.
-                                while (!answer.IsCompleted) { await Task.WhenAny(answer, Task.Delay(200, ct)); ct.ThrowIfCancellationRequested(); Sample(); }
-                                confirmation = await answer;
-                            }
-                            finally { promptCancellation.Cancel(); }
-                        }
                         Sample(); ct.ThrowIfCancellationRequested();
-                        if (!Enum.IsDefined(confirmation)) throw new InvalidDataException("Invalid local test confirmation.");
-                        if (observed.Count > 0)
-                        {
-                            outcome = DrmTestOutcome.SteamObserved;
-                            if (confirmation == DrmTestConfirmation.PlayableWithoutSteam) confirmation = DrmTestConfirmation.Unknown;
-                            stop = "Steam was observed. Close it before rerunning to continue with untested games; use --retest to repeat this result.";
-                        }
-                        record = record with { Outcome = outcome, Confirmation = confirmation, SteamProcesses = observed.ToList(),
+                        if (observed.Count > 0) outcome = DrmTestOutcome.SteamObserved;
+                        record = record with { Outcome = outcome, SteamProcesses = observed.ToList(),
                             ObservedSeconds = watch.Elapsed.TotalSeconds, TestedAt = DateTimeOffset.UtcNow,
-                            Detail = "Steam client processes sampled every 200 ms. A launch signal alone is not proof of DRM; no Steam signal alone is not proof of gameplay." };
+                            Detail = "Automatic rule: Steam observed = protected; process tree running without Steam at the deadline = free; early exit or failure = unknown." };
                     }
                 }
                 catch (Exception e) when (e is IOException or InvalidDataException or ArgumentException or System.ComponentModel.Win32Exception or NotSupportedException or OverflowException)
                 { record = record with { Outcome = DrmTestOutcome.Unavailable, Confirmation = DrmTestConfirmation.Unknown, Detail = e.Message }; }
                 finally
                 {
+                    if (launchAttempted)
+                    {
+                        // Finish bounded cleanup even when the user interrupted observation.
+                        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                        try
+                        {
+                            var lateSteam = await runtime.StopStartedSteamAsync(cleanup.Token);
+                            var remainingSteam = runtime.GetSteamProcesses();
+                            if ((lateSteam.Count > 0 || remainingSteam.Count > 0) && record.Outcome != DrmTestOutcome.Unavailable)
+                                record = record with { Outcome = DrmTestOutcome.SteamObserved,
+                                    SteamProcesses = record.SteamProcesses.Concat(lateSteam).Concat(remainingSteam).Distinct(StringComparer.OrdinalIgnoreCase).ToList() };
+                            if (remainingSteam.Count > 0) stop = "Steam is still running after cleanup. The batch was stopped; completed results were saved.";
+                        }
+                        catch (Exception e) when (e is IOException or InvalidOperationException or OperationCanceledException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+                        {
+                            stop = "Steam cleanup failed; the batch was stopped: " + e.Message;
+                            if (record.Outcome != DrmTestOutcome.SteamObserved)
+                                record = record with { Outcome = DrmTestOutcome.Unavailable, Detail = stop };
+                        }
+                        if (stop is not null && ct.IsCancellationRequested) progress?.Report(stop);
+                    }
                     // Native runtime disposal finishes before deleting extracted files.
                     try { Directory.Delete(scratch, recursive: true); }
                     catch (Exception e) when (e is IOException or UnauthorizedAccessException)
@@ -174,7 +178,7 @@ public sealed partial class GameArchiverClient
             await checkpoint(result, CancellationToken.None);
             tested++;
             if (record.Outcome == DrmTestOutcome.Unavailable) unavailable++;
-            progress?.Report($"Tested {current.Metadata.Title} ({record.Key}): {record.Outcome}; confirmation: {record.Confirmation}. {record.Detail}");
+            progress?.Report($"Tested {current.Metadata.Title} ({record.Key}): {record.Classification.Status} ({record.Outcome}, automatic). {record.Detail}");
             if (stop is not null) return new(result, tested, skipped, stop, unavailable);
         }
         return new(result, tested, skipped, null, unavailable);

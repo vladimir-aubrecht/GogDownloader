@@ -26,12 +26,12 @@ public static partial class ArchiveCommandLine
                 .OrderByDescending(t => t.TestedAt).ToList();
             foreach (var record in records)
             {
-                Console.WriteLine($"{record.Key} {library.Games.FirstOrDefault(g => g.Key == record.Key)?.Title}: {record.Outcome}; confirmation: {record.Confirmation} ({record.Platform}, {record.TestedAt:u})");
+                Console.WriteLine($"{record.Key} {library.Games.FirstOrDefault(g => g.Key == record.Key)?.Title}: {record.Classification.Status} ({record.Outcome}; {record.Classification.Source}, {record.Platform}, {record.TestedAt:u})");
                 if (flags.ContainsKey("details")) Console.WriteLine($"  Build: {record.Version.BuildId}; branch: {record.Version.Branch}; language: {record.Version.Language}; machine: {record.Machine}\n"
                     + $"  Archive: {record.ArchiveName}; launch: {record.Executable} {record.Arguments}; working directory: {record.WorkingDirectory}\n"
                     + $"  Observed: {record.ObservedSeconds:F1}s; Steam: {string.Join(", ", record.SteamProcesses)}; catalog eligible: {record.AppliesToCatalog}\n  {record.Detail}");
             }
-            Console.WriteLine($"{records.Count} saved local tests. Observations alone do not establish DRM status.");
+            Console.WriteLine($"{records.Count} saved local tests. Automatic process classifications remain below manual overrides.");
             return 0;
         }
         string? gameDirectory = null;
@@ -44,10 +44,7 @@ public static partial class ArchiveCommandLine
                 throw new ArgumentException("Output layout options require --out for DRM tests.");
         }
         var dryRun = flags.ContainsKey("dry-run");
-        var noPrompt = flags.ContainsKey("no-prompt");
-        if (!dryRun && !noPrompt && Console.IsInputRedirected)
-            throw new ArgumentException("Use an interactive terminal to confirm gameplay, or --no-prompt to save automatic observations only.");
-        if (!dryRun) Console.Error.WriteLine("Close Steam before testing. Games run under your Windows account and may write settings/saves. Observing a process is not proof of gameplay or DRM.");
+        if (!dryRun) Console.Error.WriteLine("Autonomous DRM tests: Steam observed = protected; running without Steam = free; early exit/failure = unknown. Close Steam first; Steam started during a test is stopped automatically.");
         var request = new DrmTestOptions
         {
             Search = search, GameDirectory = gameDirectory, DryRun = dryRun, Retest = flags.ContainsKey("retest"),
@@ -56,7 +53,7 @@ public static partial class ArchiveCommandLine
         };
         var result = await archive.TestDrmAsync(library, options, request, async (updated, token) =>
         {
-            // Preserve unrelated snapshot updates made during an expensive interactive test.
+            // Preserve unrelated snapshot updates made during an expensive test.
             var latest = await ArchiveLibrary.LoadAsync(snapshot, token);
             foreach (var record in updated.DrmTests.Except(library.DrmTests))
             {
@@ -64,24 +61,10 @@ public static partial class ArchiveCommandLine
                 latest.DrmTests.Add(record);
             }
             await latest.SaveAsync(snapshot, token);
-        }, runtime, noPrompt ? null : ConfirmDrmTestAsync, new InlineProgress<string>(Console.Error.WriteLine), ct);
+        }, runtime, new InlineProgress<string>(Console.Error.WriteLine), ct);
         Console.WriteLine($"Local DRM tests: {result.Tested} saved, {result.Skipped} skipped, {result.Unavailable} unavailable. Manual overrides preserved.");
         if (result.StoppedReason is not null) { Console.Error.WriteLine(result.StoppedReason); return 1; }
         return result.Unavailable == 0 ? 0 : 1;
     }
 
-    private static async Task<DrmTestConfirmation> ConfirmDrmTestAsync(DrmTestObservation observation, CancellationToken ct)
-    {
-        Console.Error.WriteLine($"{observation.Title} ({observation.Key}): {observation.Outcome}. Check actual gameplay; the test will stop its process tree after your answer.");
-        Console.Error.Write(observation.Outcome == DrmTestOutcome.SteamObserved
-            ? "Was Steam required to play? [s] confirmed Steam required / [Enter] unknown: "
-            : "[y] played without Steam / [s] confirmed Steam required / [Enter] unknown: ");
-        var answer = (await ReadLineAsync(ct))?.Trim().ToLowerInvariant();
-        return answer switch
-        {
-            "y" when observation.Outcome != DrmTestOutcome.SteamObserved => DrmTestConfirmation.PlayableWithoutSteam,
-            "s" => DrmTestConfirmation.SteamRequired,
-            _ => DrmTestConfirmation.Unknown,
-        };
-    }
 }

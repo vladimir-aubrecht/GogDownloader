@@ -232,9 +232,13 @@ Steam defaults to unknown. Steam ownership, Steamworks DLLs and the absence of a
 are not evidence that a game is DRM-free. The classification describes the reported DRM status,
 not verified portability, offline play or availability of multiplayer/services.
 
-Fetch community reports separately from the normal library sync (no Steam login required):
+Fetch community reports separately from the normal library sync (no Steam login required).
+For authenticated PCGamingWiki access, create a [bot password](https://www.pcgamingwiki.com/wiki/Special:BotPasswords)
+with the `Create, query and delete data through the Cargo extension` grant, then log in with
+the generated `Account@BotName` username and bot password:
 
 ```sh
+dotnet run --project src/GameArchiver.Cli -- auth login --source pcgamingwiki
 dotnet run --project src/GameArchiver.Cli -- library drm sync --source steam
 # Public alternative when PCGamingWiki denies automated API access:
 dotnet run --project src/GameArchiver.Cli -- library drm sync --source steam --drm-source steam-curator
@@ -242,8 +246,21 @@ dotnet run --project src/GameArchiver.Cli -- library list --source steam --drm a
 dotnet run --project src/GameArchiver.Cli -- download --all --source steam --drm free --max-size 100MB --dry-run
 ```
 
-`library drm sync` uses PCGamingWiki's AppID resolver and explicit matching Steam availability
-rows. Reports are cached in `library.json` for seven days; `--refresh` bypasses that cache.
+The password prompt hides input. For noninteractive login, supply `GAMEARCHIVE_PCGW_USERNAME`
+and `GAMEARCHIVE_PCGW_BOT_PASSWORD` in the environment; `--username` can also select the bot
+username. No command-line password option is provided. Only session cookies are saved, never
+the bot password, in the user configuration directory's `gamearchive/pcgamingwiki-session.json`.
+The file is not encrypted; access is restricted to its owner on Unix and the current user on
+Windows. Use `--pcgw-session FILE` on both auth and DRM sync to select a different location.
+`auth status --source pcgamingwiki` reports the saved account without a network request;
+`auth logout --source pcgamingwiki` deletes the local session. Revoke the bot password on the
+wiki to revoke all its sessions. When a saved session expires, log in again.
+
+`library drm sync` automatically uses the saved PCGamingWiki session. It resolves exact Steam
+AppIDs through authenticated Cargo queries, fetches page wikitext and checks matching Steam
+availability rows. Without a saved session, it retains the anonymous AppID-resolver flow.
+An invalid or expired session never silently falls back to anonymous access. Reports are
+cached in `library.json` for seven days; `--refresh` bypasses that cache.
 Missing, conditional, conflicting or unrecognized evidence stays unknown. Unscoped reports
 are applied only to Windows; native Linux/macOS ports need explicit OS evidence or an override.
 If PCGamingWiki is unavailable (including HTTP 403), enrichment reports one failure, stops
@@ -252,6 +269,10 @@ independent. Filters use saved metadata without network access. The download sum
 free, protected and unknown counts before applying the size filter; `--details` shows excluded
 products and their evidence. Unknown does not mean DRM was detected. Downloading or testing a
 game does not automatically classify it; record a successful manual test with the command below.
+Login addresses API authentication requirements, but cannot bypass a Cloudflare access block.
+Cloudflare refusal, rejected credentials, expired sessions and missing Cargo permissions have
+separate diagnostics. The live authenticated flow requires a PCGamingWiki account; offline
+HTTP probes cover login, cookie persistence and authenticated enrichment.
 
 `--drm-source steam-curator` reads the public [DRM-Free Complete List](https://store.steampowered.com/curator/45614612/)
 instead, without a PCGamingWiki account or Steam login. It fetches the complete paginated list

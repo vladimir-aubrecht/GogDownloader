@@ -1,6 +1,6 @@
 # Community DRM metadata
 
-The PCGamingWiki adapter uses the public AppID resolver
+Without a saved session, the PCGamingWiki adapter uses the public AppID resolver
 `https://www.pcgamingwiki.com/api/appid.php?appid=APPID`, which redirects an exact match to a
 wiki page, followed by MediaWiki `action=parse&prop=wikitext&format=json&redirects=1&page=TITLE`
 at `https://www.pcgamingwiki.com/w/api.php`. A disambiguation/search response is not an exact
@@ -17,9 +17,58 @@ On 2026-10-27 the user also received HTTP 403 on the first lookup. A development
 resolver returned a Cloudflare challenge, and a direct MediaWiki request was denied too.
 The [official API requirements](https://www.pcgamingwiki.com/wiki/API#Requirements) now document
 restricted endpoints (notably Cargo queries), MediaWiki bot-password authentication, a custom
-user agent and a 60-request/minute limit. This adapter is anonymous and has no bot-password
-login. A Cloudflare refusal does not establish that a bot password alone would fix access.
-Report 403 as denied automated access, without retrying the library or blaming Steam login.
+user agent and a 60-request/minute limit. The adapter now supports bot-password login as
+described below. A Cloudflare refusal does not establish that a bot password alone would fix
+access. Report 403 as denied automated access, without retrying the library or blaming Steam login.
+
+## Bot-password authentication
+
+The implemented flow follows [MediaWiki API:Login](https://www.mediawiki.org/wiki/API:Login#Using_action=login)
+and PCGamingWiki's requirements (inspected 2026-10-27):
+
+1. GET `/w/api.php?action=query&meta=tokens&type=login&format=json`, retaining its cookies.
+2. POST form fields `action=login`, `format=json`, `lgname=Account@BotName`,
+   `lgpassword=BOT_PASSWORD`, `lgtoken=TOKEN` to `/w/api.php` with the same cookies.
+3. Require `login.result=Success`, then GET `action=query&meta=userinfo&assert=user` and
+   require an authenticated identity matching the login result before saving the session.
+
+Create the credentials at [Special:BotPasswords](https://www.pcgamingwiki.com/wiki/Special:BotPasswords).
+Grant `Create, query and delete data through the Cargo extension`, as documented by PCGamingWiki
+for `cargoquery`. GameArchiver only reads data; it does not use the grant to create/delete wiki data.
+Use the generated bot username and password, not the main account's password.
+
+The CLI provides `auth login|status|logout --source pcgamingwiki`. Login prompts without
+echoing the password or accepts `GAMEARCHIVE_PCGW_USERNAME` / `GAMEARCHIVE_PCGW_BOT_PASSWORD`.
+`--username` overrides the username environment variable. Credentials are never put in a URL,
+printed in diagnostics or saved to disk. Only the verified session's cookies and account
+identity are persisted, atomically, in `gamearchive/pcgamingwiki-session.json` under the user
+configuration directory. The cookie file is not encrypted: Unix files are created as 0600;
+Windows files are created with a protected ACL granting access only to the current user.
+Status reads local state and explicitly does not claim online validation. Logout forgets the
+local session; revoking the bot password on the wiki revokes all its sessions.
+
+`library drm sync` uses this session automatically, or the file selected by `--pcgw-session`.
+The first uncached lookup validates the saved identity. Authenticated requests use `assert=user`;
+an expired/rejected session stops enrichment and asks for a new login, never silently degrading
+to anonymous queries. No saved session preserves the existing anonymous behavior. The C# API
+opts into persistence with the `sessionPath` constructor argument; `LoginAsync` also supports
+in-memory sessions when no path is given. Injected HTTP clients must disable redirects and
+automatic cookies, as the default transport does. The adapter manages scoped cookies itself.
+
+Authenticated AppID lookup uses the documented Cargo `Game` table:
+`action=cargoquery&tables=Game&fields=Game._pageID=PageID&where=Game.Steam_AppID HOLDS "APPID"&limit=2`.
+Require exactly one page ID; no match or ambiguity remains unknown. Fetch wikitext by `pageid`
+and still require the exact Steam AppID in the availability row. Attribution links to the
+public `w/index.php?curid=PAGEID` page. This avoids the anonymous PHP redirector and page HTML.
+
+The default transport refuses API redirects (including POST redirects), keeps cookies on the
+fixed HTTPS API endpoint, bounds responses, and never echoes server-supplied login errors.
+Diagnostics distinguish rejected logins, expired sessions, missing Cargo grants, rate limits
+and recognizable Cloudflare blocks. No automatic login retry or challenge bypass is attempted.
+Failed/cancelled logins retain the previous saved session. Controlled HTTP probes cover the
+complete login/enrichment flow and failures. Live authenticated compatibility remains unverified:
+no PCGamingWiki credentials are configured here, and even the login-token endpoint returned a
+Cloudflare 403 from this development environment on 2026-10-27.
 
 The CLI supports `--drm-source steam-curator` as an explicit public alternative; see
 [the curator adapter](steam-curator-drm.md). It does not bypass the wiki's access protection
@@ -33,10 +82,10 @@ examples are ignored. Unscoped PC availability is classified only for Windows. E
 qualifiers can classify Linux/macOS; no claim is copied across OSes, store editions or branches.
 This intentionally leaves conditional DRM-free games unknown until manually reviewed.
 
-Requests are sequential with a one-second minimum interval, explicit user agent, 20-second
+Requests are sequential with a 1.1-second minimum interval, explicit user agent, 20-second
 header/body deadlines and a 2 MiB API-body limit. One failure stops further requests for that
 refresh. Fresh cached reports remain; unrefreshed reports become unknown without a successful
-check timestamp. No browser automation, challenge bypass or implicit login is attempted.
+check timestamp. No browser automation, challenge bypass or implicit password login is attempted.
 
 `DrmInfo` records status, source, public-branch scope, page URL, check time and a qualification
 note. The source URL provides attribution and a place to inspect the underlying evidence;

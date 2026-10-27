@@ -15,13 +15,14 @@ public static partial class ArchiveCommandLine
         "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory", "include-non-games"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
-        "file", "entry", "name", "path", "max-size", "drm", "drm-source", "note"];
+        "file", "entry", "name", "path", "max-size", "drm", "drm-source", "note", "pcgw-session"];
 
     /// <summary>Run the same CLI with supplied stores for embedding or offline integration tests.</summary>
     public static async Task<int> RunAsync(string[] args, CancellationToken ct = default,
-        Func<string, IEnumerable<IGameStore>>? storeFactory = null, Func<IDrmSource>? drmSourceFactory = null)
+        Func<string, IEnumerable<IGameStore>>? storeFactory = null, Func<IDrmSource>? drmSourceFactory = null,
+        Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory = null)
     {
-        try { return await RunCoreAsync(args, storeFactory, drmSourceFactory, ct); }
+        try { return await RunCoreAsync(args, storeFactory, drmSourceFactory, pcGamingWikiFactory, ct); }
         catch (OperationCanceledException)
         {
             Console.Error.WriteLine(args.Length >= 2 && args[0] == "library" && args[1] == "drm"
@@ -30,17 +31,19 @@ public static partial class ArchiveCommandLine
                 ? "Interrupted. Library comparison was not completed."
                 : args.Length >= 2 && args[0] == "archive" && args[1] == "migrate"
                 ? "Interrupted. Completed metadata migrations were kept; rerun to finish."
+                : args.Length > 0 && args[0] == "auth" ? "Interrupted. Authentication was not completed."
                 : args.Contains("archive")
                 ? "Interrupted. Completed archive edits were kept; unfinished edits were not committed."
                 : "Interrupted. Downloaded files were kept; rerun to resume.");
             return 130;
         }
         catch (Exception e) when (e is IOException or InvalidDataException or ArgumentException or NotSupportedException
-            or InvalidOperationException or KeyNotFoundException or JsonException or GogAuthException or SteamAuthenticationException or TimeoutException or HttpRequestException)
+            or InvalidOperationException or KeyNotFoundException or JsonException or GogAuthException or SteamAuthenticationException or TimeoutException or HttpRequestException or UnauthorizedAccessException)
         { Console.Error.WriteLine(e.Message); return 1; }
     }
 
-    private static async Task<int> RunCoreAsync(string[] args, Func<string, IEnumerable<IGameStore>>? factory, Func<IDrmSource>? drmSourceFactory, CancellationToken ct)
+    private static async Task<int> RunCoreAsync(string[] args, Func<string, IEnumerable<IGameStore>>? factory, Func<IDrmSource>? drmSourceFactory,
+        Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory, CancellationToken ct)
     {
         var flags = new Dictionary<string, string>();
         var providerDirectories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -72,10 +75,14 @@ public static partial class ArchiveCommandLine
         if (flags.ContainsKey("help") || positionals.Count == 0) { Usage(); return flags.ContainsKey("help") ? 0 : 1; }
         var source = flags.GetValueOrDefault("source", "all").ToLowerInvariant();
         ArchivePaths.ValidateName(source);
-        if (factory is null && source is not "gog" and not "steam" and not "all") throw new ArgumentException($"Unknown source '{source}'.");
         var snapshotPath = flags.GetValueOrDefault("snapshot", ArchiveLibrary.DefaultPath);
         var command = positionals[0];
         var subcommand = positionals.ElementAtOrDefault(1);
+        var pcgwAuth = command == "auth" && source == "pcgamingwiki";
+        if (factory is null && source is not "gog" and not "steam" and not "all" && !pcgwAuth) throw new ArgumentException($"Unknown source '{source}'.");
+        if (flags.ContainsKey("pcgw-session") && !pcgwAuth && !(command == "library" && subcommand == "drm"
+            && positionals.ElementAtOrDefault(2) == "sync" && flags.GetValueOrDefault("drm-source", "pcgamingwiki").Equals("pcgamingwiki", StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException("--pcgw-session requires auth --source pcgamingwiki or library drm sync --drm-source pcgamingwiki.");
         if (flags.ContainsKey("drm-source") && !(command == "library" && subcommand == "drm" && positionals.ElementAtOrDefault(2) == "sync"))
             throw new ArgumentException("--drm-source requires library drm sync.");
         if (flags.ContainsKey("include-non-games") && (command != "download" || !flags.ContainsKey("all")))
@@ -98,6 +105,7 @@ public static partial class ArchiveCommandLine
             if (command != "download" || !flags.ContainsKey("all")) throw new ArgumentException("--max-size requires download --all.");
             maxSize = ParseSizeLimit(sizeLimit);
         }
+        if (pcgwAuth) return await RunPcGamingWikiAuthAsync(positionals, flags, pcGamingWikiFactory, ct);
         ArchiveLibrary? library = null;
         var legacy = false;
         if (command is not "auth" and not "verify" and not "archive" && File.Exists(snapshotPath))
@@ -147,11 +155,11 @@ public static partial class ArchiveCommandLine
         {
             if (legacy) throw new ArgumentException("DRM annotations require an aggregate snapshot. Run library sync first.");
             return await RunDrmAsync(library ?? throw new FileNotFoundException("Run library sync first."), snapshotPath,
-                positionals, flags, source, drmSourceFactory, ct);
+                positionals, flags, source, drmSourceFactory, pcGamingWikiFactory, ct);
         }
         if (command == "auth")
         {
-            if (source == "all") throw new ArgumentException("Authentication requires --source gog or --source steam.");
+            if (source == "all") throw new ArgumentException("Authentication requires --source gog, steam or pcgamingwiki.");
             var store = stores.Single();
             if (store is GogClient gog)
             {
@@ -177,7 +185,7 @@ public static partial class ArchiveCommandLine
                 if (subcommand == "logout") { await steam.LogoutAsync(ct); Console.WriteLine("Steam tokens deleted."); return 0; }
                 if (subcommand == "status") { var auth = await steam.GetAuthenticationAsync(ct); Console.WriteLine(auth is null ? "Not logged into Steam." : $"Steam account {auth.AccountName} (saved session; not validated online)."); return auth is null ? 1 : 0; }
             }
-            throw new ArgumentException("Usage: auth login|status|logout --source gog|steam");
+            throw new ArgumentException("Usage: auth login|status|logout --source gog|steam|pcgamingwiki");
         }
         if (command == "library" && subcommand == "sync")
         {
@@ -640,10 +648,10 @@ public static partial class ArchiveCommandLine
         };
         options.Validate(); return options;
     }
-    private static async Task<string> ReadPasswordAsync(CancellationToken ct)
+    private static async Task<string> ReadPasswordAsync(CancellationToken ct, string label = "Steam password", string variable = "GAMEARCHIVE_STEAM_PASSWORD")
     {
-        if (Console.IsInputRedirected) throw new ArgumentException("Set GAMEARCHIVE_STEAM_PASSWORD for noninteractive login.");
-        Console.Error.Write("Steam password: ");
+        if (Console.IsInputRedirected) throw new ArgumentException($"Set {variable} for noninteractive login.");
+        Console.Error.Write(label + ": ");
         return await ReadLineAsync(ct, hide: true) ?? "";
     }
     private static async Task<string?> ReadLineAsync(CancellationToken ct, bool hide = false)
@@ -665,7 +673,7 @@ public static partial class ArchiveCommandLine
     }
     private static void Usage() => Console.WriteLine("""
         gamearchiver — archive owned GOG and Steam games
-          auth login|status|logout --source gog|steam
+          auth login|status|logout --source gog|steam|pcgamingwiki
           library sync|list|stats|failures [search] [--source gog|steam|all]
             --details shows full diagnostics for library sync or library failures
             --inventory includes products outside the primary catalog in library list/stats
@@ -693,8 +701,10 @@ public static partial class ArchiveCommandLine
           library drm clear [SOURCE:ID] [--platform windows|linux|mac]
           Without SOURCE:ID, use current-folder metadata; infer platform only when unique and use its saved branch.
           Explicit platform/branch override metadata. Changes are saved in the library snapshot.
-        Auth: --gog-tokens FILE --steam-tokens FILE --username NAME --code URL
+        Auth: --gog-tokens FILE --steam-tokens FILE --pcgw-session FILE --username NAME --code URL
           Steam password: interactive prompt or GAMEARCHIVE_STEAM_PASSWORD
           Steam Guard: interactive prompt/mobile approval or GAMEARCHIVE_STEAM_GUARD_CODE
+          PCGamingWiki: Account@BotName and hidden bot-password prompt, or GAMEARCHIVE_PCGW_USERNAME / GAMEARCHIVE_PCGW_BOT_PASSWORD
+          Only PCGamingWiki session cookies are saved; library drm sync reuses them automatically.
         """);
 }

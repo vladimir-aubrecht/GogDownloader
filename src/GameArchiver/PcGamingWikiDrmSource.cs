@@ -8,7 +8,7 @@ using GameArchiver.Core;
 namespace GameArchiver;
 
 /// <summary>Reads explicit Steam availability rows; missing or ambiguous evidence stays unknown.</summary>
-public sealed class PcGamingWikiDrmSource : IDrmSource, IDisposable
+public sealed partial class PcGamingWikiDrmSource : IDrmSource, IDisposable
 {
     private readonly HttpClient _http;
     private readonly bool _ownsHttp;
@@ -16,10 +16,13 @@ public sealed class PcGamingWikiDrmSource : IDrmSource, IDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private DateTimeOffset _lastRequest;
     public string Name => "pcgamingwiki";
-    public PcGamingWikiDrmSource(HttpClient? http = null, TimeSpan? minimumInterval = null)
+    /// <param name="http">Optional transport; its handler must disable automatic redirects and cookies.</param>
+    /// <param name="sessionPath">Optional saved login session. Omit for anonymous, in-memory use.</param>
+    public PcGamingWikiDrmSource(HttpClient? http = null, TimeSpan? minimumInterval = null, string? sessionPath = null)
     {
-        _http = http ?? new HttpClient(); _ownsHttp = http is null;
-        _interval = minimumInterval ?? TimeSpan.FromSeconds(1);
+        _http = http ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }); _ownsHttp = http is null;
+        _sessions = sessionPath is null ? null : new PcGamingWikiSessionStore(sessionPath);
+        _interval = minimumInterval ?? TimeSpan.FromSeconds(1.1);
         if (_interval < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(minimumInterval));
     }
 
@@ -30,31 +33,51 @@ public sealed class PcGamingWikiDrmSource : IDrmSource, IDisposable
         await _gate.WaitAsync(ct);
         try
         {
+            await EnsureSessionAsync(ct);
+            if (_authenticated) return await GetAuthenticatedAsync(id, ct);
             // The official AppID resolver redirects to a wiki page. A search/disambiguation page
             // is not an exact match and must never be resolved by guessing from a title.
-            using var response = await SendAsync($"https://www.pcgamingwiki.com/api/appid.php?appid={id}", ct);
+            using var response = await ResolveAnonymousAsync(id, ct);
             var uri = response.RequestMessage?.RequestUri;
             if (uri is null || uri.Scheme != "https" || uri.Host != "www.pcgamingwiki.com" || !uri.AbsolutePath.StartsWith("/wiki/", StringComparison.Ordinal))
                 return Unknown("No unique PCGamingWiki page for this Steam AppID.");
             var title = Uri.UnescapeDataString(uri.AbsolutePath[6..]);
-            using var page = await SendAsync("https://www.pcgamingwiki.com/w/api.php?action=parse&format=json&prop=wikitext&redirects=1&page="
-                + Uri.EscapeDataString(title), ct);
-            using var json = JsonDocument.Parse(await ReadBoundedAsync(page.Content, ct));
-            if (!json.RootElement.TryGetProperty("parse", out var parsed) || !parsed.TryGetProperty("wikitext", out var text)
-                || !text.TryGetProperty("*", out var raw) || raw.ValueKind != JsonValueKind.String)
+            using var json = await ApiAsync("action=parse&prop=wikitext&redirects=1&page=" + Uri.EscapeDataString(title), ct);
+            if (!TryProperty(json.RootElement, "parse", out var parsed) || !TryProperty(parsed, "wikitext", out var text)
+                || !TryProperty(text, "*", out var raw) || raw.ValueKind != JsonValueKind.String)
                 throw new InvalidDataException("PCGamingWiki did not return page wikitext.");
             return Parse(raw.GetString()!, id, uri.AbsoluteUri, DateTimeOffset.UtcNow);
         }
         finally { _gate.Release(); }
     }
 
-    private async Task<HttpResponseMessage> SendAsync(string uri, CancellationToken ct)
+    private async Task<HttpResponseMessage> ResolveAnonymousAsync(uint id, CancellationToken ct)
+    {
+        var uri = new Uri($"https://www.pcgamingwiki.com/api/appid.php?appid={id}");
+        for (var hop = 0; hop < 5; hop++)
+        {
+            var response = await SendAsync(uri.AbsoluteUri, ct);
+            if ((int)response.StatusCode is < 300 or >= 400) return response;
+            using (response)
+            {
+                if (response.Headers.Location is not { } location) throw new InvalidDataException("PCGamingWiki returned a redirect without a destination.");
+                uri = new Uri(uri, location);
+                if (uri.Scheme != "https" || uri.Host != "www.pcgamingwiki.com" || !uri.IsDefaultPort || uri.UserInfo.Length != 0)
+                    throw new InvalidDataException("PCGamingWiki redirected outside its HTTPS site.");
+            }
+        }
+        throw new InvalidDataException("Too many PCGamingWiki redirects.");
+    }
+
+    private async Task<HttpResponseMessage> SendAsync(string uri, CancellationToken ct, HttpContent? content = null)
     {
         var delay = _lastRequest + _interval - DateTimeOffset.UtcNow;
         if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
         _lastRequest = DateTimeOffset.UtcNow;
-        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        using var request = new HttpRequestMessage(content is null ? HttpMethod.Get : HttpMethod.Post, uri) { Content = content };
         request.Headers.UserAgent.ParseAdd("GameArchiver/1.0 (+https://github.com/vladimir-aubrecht/gogdownloader)");
+        var api = request.RequestUri!.GetLeftPart(UriPartial.Path) == ApiUrl;
+        if (api && _cookies.GetCookieHeader(new Uri(ApiUrl)) is { Length: > 0 } cookies) request.Headers.Add("Cookie", cookies);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
         try
@@ -63,8 +86,28 @@ public sealed class PcGamingWikiDrmSource : IDrmSource, IDisposable
             try
             {
                 if (response.StatusCode == HttpStatusCode.Forbidden)
-                    throw new HttpRequestException("PCGamingWiki denied automated access (HTTP 403). Its access protection or API permissions blocked this request; this is not a Steam login failure", null, response.StatusCode);
-                response.EnsureSuccessStatusCode(); return response;
+                {
+                    var challenge = response.Headers.TryGetValues("cf-mitigated", out var values) && values.Contains("challenge");
+                    var body = await ReadBoundedAsync(response.Content, ct);
+                    challenge |= body.Contains("cloudflare", StringComparison.OrdinalIgnoreCase);
+                    throw new HttpRequestException(challenge
+                        ? "Cloudflare blocked access to PCGamingWiki (HTTP 403) before the API could respond. Login cannot bypass this block; contact PCGamingWiki about API access"
+                        : "PCGamingWiki denied API access (HTTP 403). Check its API access requirements; this does not establish that the bot password is incorrect", null, response.StatusCode);
+                }
+                if ((int)response.StatusCode is >= 300 and < 400)
+                {
+                    if (api) throw new HttpRequestException("PCGamingWiki redirected an API request. Login data was not forwarded; check API access", null, response.StatusCode);
+                    return response;
+                }
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                    throw new HttpRequestException("PCGamingWiki rate limit reached (HTTP 429). Wait before retrying; no automatic retry was attempted", null, response.StatusCode);
+                if (api && response.Headers.TryGetValues("Set-Cookie", out var setCookies))
+                    foreach (var cookie in setCookies)
+                        try { _cookies.SetCookies(new Uri(ApiUrl), cookie); }
+                        catch (CookieException) { throw new InvalidDataException("PCGamingWiki returned an invalid session cookie."); }
+                if (!response.IsSuccessStatusCode) throw new HttpRequestException(
+                    $"PCGamingWiki request failed (HTTP {(int)response.StatusCode})", null, response.StatusCode);
+                return response;
             }
             catch { response.Dispose(); throw; }
         }

@@ -316,6 +316,23 @@ stops further lookups; stale reports pending refresh become unknown. User overri
 archives. Existing completed backups are not rewritten just to update a classification.
 See [PCGamingWiki behavior and limitations](pcgamingwiki.md).
 
+PCGamingWiki bot-password login is independent of Steam/GOG login:
+
+```csharp
+using var wiki = new PcGamingWikiDrmSource(sessionPath: PcGamingWikiSessionStore.DefaultPath);
+// Only for explicit login; obtain the bot password through a secret prompt/provider.
+await wiki.LoginAsync(new PcGamingWikiCredentials(botUsername, botPassword), ct);
+// Later instances with the same sessionPath reuse cookies without needing the password.
+var reports = await wiki.GetAsync(new GameKey("steam", "2270"), ct);
+```
+
+Only verified session cookies are saved; the password is never persisted. Omit `sessionPath`
+for an in-memory session. `PcGamingWikiSessionStore.LoadAsync` reads local status and `Delete`
+forgets the local session. An expired session requires explicit login. The default transport
+disables redirects and automatic cookies; injected HTTP clients must do the same. Authenticated
+AppID resolution uses Cargo, so the bot password needs PCGamingWiki's Cargo query grant.
+API authentication cannot bypass an upstream Cloudflare block.
+
 Native Steam archives use `gamearchiver.json` schema 2 with `Source`, string `ProductId`, `Slug`,
 `Title` and per-OS `Platforms`. Each completion records the build, branch, language, architecture,
 depot manifest IDs, owned DLC selection, measured installed/archive sizes, file hashes, launch

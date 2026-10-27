@@ -5,13 +5,14 @@ namespace GameArchiver.Cli;
 public static partial class ArchiveCommandLine
 {
     private static async Task<int> RunDrmAsync(ArchiveLibrary library, string snapshot, List<string> args,
-        Dictionary<string, string> flags, string source, Func<IDrmSource>? factory, CancellationToken ct)
+        Dictionary<string, string> flags, string source, Func<IDrmSource>? factory,
+        Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory, CancellationToken ct)
     {
         var operation = args.ElementAtOrDefault(2);
         var allowed = new HashSet<string> { "source", "snapshot" };
         allowed.UnionWith(operation switch
         {
-            "sync" => new[] { "refresh", "drm-source" }, "set" => ["platform", "branch", "drm", "note"], "clear" => ["platform", "branch"], _ => [],
+            "sync" => new[] { "refresh", "drm-source", "pcgw-session" }, "set" => ["platform", "branch", "drm", "note"], "clear" => ["platform", "branch"], _ => [],
         });
         if (flags.Keys.FirstOrDefault(k => !allowed.Contains(k)) is { } unsupported)
             throw new ArgumentException($"--{unsupported} is not supported by library drm {operation}.");
@@ -20,7 +21,9 @@ public static partial class ArchiveCommandLine
             if (args.Count != 3 || flags.ContainsKey("drm")) throw new ArgumentException("Usage: library drm sync [--source steam|gog|all] [--drm-source pcgamingwiki|steam-curator] [--refresh]");
             var drmSource = flags.GetValueOrDefault("drm-source", "pcgamingwiki").ToLowerInvariant();
             if (drmSource is not "pcgamingwiki" and not "steam-curator") throw new ArgumentException("Use --drm-source pcgamingwiki or steam-curator.");
-            var provider = factory?.Invoke() ?? (drmSource == "steam-curator" ? (IDrmSource)new SteamCuratorDrmSource() : new PcGamingWikiDrmSource());
+            var sessionPath = flags.GetValueOrDefault("pcgw-session", PcGamingWikiSessionStore.DefaultPath);
+            var provider = factory?.Invoke() ?? (drmSource == "steam-curator" ? (IDrmSource)new SteamCuratorDrmSource()
+                : pcGamingWikiFactory?.Invoke(sessionPath) ?? new PcGamingWikiDrmSource(sessionPath: sessionPath));
             try
             {
                 var result = await LibraryDrm.RefreshAsync(library, provider, source, flags.ContainsKey("refresh"),
@@ -30,7 +33,11 @@ public static partial class ArchiveCommandLine
                 if (result.Error is not null)
                 {
                     Console.Error.WriteLine($"DRM metadata unavailable: {result.Error.TrimEnd('.')}. Unrefreshed entries are unknown; normal library sync/download remains available.");
-                    if (drmSource == "pcgamingwiki") Console.Error.WriteLine("Alternative public community source: library drm sync --source steam --drm-source steam-curator. Missing or conditional curator reports remain unknown.");
+                    if (drmSource == "pcgamingwiki")
+                    {
+                        Console.Error.WriteLine("PCGamingWiki login: auth login --source pcgamingwiki (requires a bot password). Login does not bypass Cloudflare access blocks.");
+                        Console.Error.WriteLine("Alternative public community source: library drm sync --source steam --drm-source steam-curator. Missing or conditional curator reports remain unknown.");
+                    }
                 }
                 return result.Error is null ? 0 : 1;
             }

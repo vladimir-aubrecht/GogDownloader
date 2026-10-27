@@ -136,6 +136,11 @@ internal static class ScheduleProbes
             catch (OperationCanceledException) { }
             Probe.Check("cancelling an active download never starts the next job", commands.Count(c => c[0] == "download") == 1
                 && commands.All(c => Value(c, "--source") == "gog"));
+            commands.Clear(); downloadFailures = false;
+            result = await ScheduleRunner.RunAsync(settings, plans, true, (args, token) => args[0] == "download"
+                && Value(args, "--source") == "gog" ? Task.FromResult(130) : Invoke(args, token), CancellationToken.None);
+            Probe.Check("a command exit code cannot cancel unrelated jobs while the caller token is active",
+                result == 1 && commands.Count(c => c[0] == "download") == 3);
 
             var downloaded = new List<(GameKey Key, ArchiveOptions Options)>();
             var integration = settings with { Jobs = [settings.Jobs[0], settings.Jobs[1] with { Search = null, DrmSource = null }] };
@@ -146,6 +151,7 @@ internal static class ScheduleProbes
                 result == 0 && downloaded.Select(d => d.Key.ToString()).SequenceEqual(["gog:1", "steam:1"])
                 && downloaded.All(d => d.Options.OutputRoot == integration.Jobs.Single(j => j.Source == d.Key.Source).Output
                     && d.Options.StagingDirectory == integration.StagingDirectory));
+            await CheckTimeoutsAsync(integration, config, downloaded);
             using var lockFile = new FileStream(Path.Combine(Path.GetDirectoryName(settings.Snapshot)!, "schedule.lock"),
                 FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             var locked = false;
@@ -158,22 +164,104 @@ internal static class ScheduleProbes
 
     private static string Value(string[] args, string flag) => args[Array.IndexOf(args, flag) + 1];
 
-    private sealed class Store(string source, List<(GameKey Key, ArchiveOptions Options)> downloaded) : IGameStore
+    private static async Task CheckTimeoutsAsync(ScheduleSettings settings, string config,
+        List<(GameKey Key, ArchiveOptions Options)> downloaded)
+    {
+        var error = Console.Error;
+        using var diagnostics = new StringWriter();
+        try
+        {
+            Console.SetError(diagnostics);
+            foreach (var duringSync in new[] { true, false })
+            {
+                downloaded.Clear(); diagnostics.GetStringBuilder().Clear();
+                var code = await ArchiveCommandLine.RunAsync(["schedule", "--config", config, "--once"],
+                    storeFactory: source => [new Store(source, downloaded,
+                        beforeSync: source == "gog" && duringSync ? HttpTimeoutAsync : null,
+                        beforeDownload: source == "gog" && !duringSync ? HttpTimeoutAsync : null)]);
+                Probe.Check($"HTTP timeout during {(duringSync ? "sync" : "download")} fails the cycle but still downloads from Steam",
+                    code == 1 && downloaded.Select(d => d.Key.ToString()).SequenceEqual(["steam:1"])
+                    && diagnostics.ToString().Contains("Operation timed out")
+                    && !diagnostics.ToString().Contains("Interrupted") && !diagnostics.ToString().Contains("Scheduler stopped"));
+            }
+
+            downloaded.Clear();
+            var waits = 0; var attempts = 0;
+            using var cancellation = new CancellationTokenSource();
+            async Task FailOnceAsync(CancellationToken token)
+            { if (++attempts == 1) await HttpTimeoutAsync(token); }
+            try
+            {
+                await ScheduleRunner.RunAsync(settings, ArchiveCommandLine.BuildSchedule(settings), false,
+                    (command, token) => ArchiveCommandLine.RunAsync(command, token,
+                        storeFactory: source => [new Store(source, downloaded, beforeSync: source == "gog" ? FailOnceAsync : null)]),
+                    cancellation.Token, (interval, token) =>
+                    {
+                        waits++;
+                        Probe.Check("a timeout cycle completes other jobs before waiting the configured interval",
+                            interval == TimeSpan.FromMinutes(settings.IntervalMinutes)
+                            && downloaded.Last().Key.Source == "steam" && attempts == waits);
+                        if (waits == 2) cancellation.Cancel();
+                        return Task.CompletedTask;
+                    });
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            Probe.Check("a timed-out source recovers on the next scheduled cycle without starving Steam",
+                waits == 2 && downloaded.Select(d => d.Key.ToString()).SequenceEqual(["steam:1", "gog:1", "steam:1"]));
+
+            downloaded.Clear(); diagnostics.GetStringBuilder().Clear();
+            using var interrupted = new CancellationTokenSource();
+            var syncedSources = new List<string>();
+            var interruptedCode = await ArchiveCommandLine.RunAsync(["schedule", "--config", config, "--once"], interrupted.Token,
+                storeFactory: source => [new Store(source, downloaded, beforeSync: token =>
+                {
+                    syncedSources.Add(source); interrupted.Cancel(); token.ThrowIfCancellationRequested();
+                    return Task.CompletedTask;
+                })]);
+            Probe.Check("real caller cancellation still returns 130 and stops before the next source",
+                interruptedCode == 130 && downloaded.Count == 0 && syncedSources.SequenceEqual(["gog"])
+                && diagnostics.ToString().Contains("Scheduler stopped") && !diagnostics.ToString().Contains("Operation timed out"));
+        }
+        finally { Console.SetError(error); }
+    }
+
+    private static async Task HttpTimeoutAsync(CancellationToken ct)
+    {
+        // Exercise HttpClient's actual timeout exception without network access or credentials.
+        using var http = new HttpClient(new WaitingHandler()) { Timeout = TimeSpan.FromMilliseconds(50) };
+        using var response = await http.GetAsync("https://timeout.invalid/", ct);
+    }
+
+    private sealed class WaitingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            throw new InvalidOperationException("The fixture request must time out.");
+        }
+    }
+
+    private sealed class Store(string source, List<(GameKey Key, ArchiveOptions Options)> downloaded,
+        Func<CancellationToken, Task>? beforeSync = null, Func<CancellationToken, Task>? beforeDownload = null) : IGameStore
     {
         public string Source => source;
-        public Task<StoreLibraryResult> SyncLibraryAsync(CancellationToken ct = default) => Task.FromResult(new StoreLibraryResult(
-            Enumerable.Range(1, source == "gog" ? 1 : 4).Select(i => new GameInfo(new(source, i.ToString()), "Game " + i, "game_" + i)
+        public async Task<StoreLibraryResult> SyncLibraryAsync(CancellationToken ct = default)
+        {
+            if (beforeSync is not null) await beforeSync(ct);
+            return new(Enumerable.Range(1, source == "gog" ? 1 : 4).Select(i => new GameInfo(new(source, i.ToString()), "Game " + i, "game_" + i)
             {
                 Kind = i == 4 ? "application" : "game",
                 Drm = new() { [GameOs.Windows] = new() { Status = i == 2 ? DrmStatus.Protected : DrmStatus.Free, Source = "fixture" } },
                 Versions = new() { [GameOs.Windows] = new("build") { SizeEstimateRevision = 1, DownloadSize = i == 3 ? 200_000_000 : 100 } },
-            }).ToList()));
+            }).ToList());
+        }
         public Task<GameVersion> GetVersionAsync(string productId, GameSelection options, CancellationToken ct = default)
             => Task.FromResult(new GameVersion("build"));
-        public Task<ArchiveResult> DownloadAsync(string productId, ArchiveOptions options, IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default)
+        public async Task<ArchiveResult> DownloadAsync(string productId, ArchiveOptions options, IProgress<ArchiveProgress>? progress = null, CancellationToken ct = default)
         {
+            if (beforeDownload is not null) await beforeDownload(ct);
             var key = new GameKey(source, productId); downloaded.Add((key, options));
-            return Task.FromResult(new ArchiveResult(key, ArchiveOutcome.AlreadyDone));
+            return new(key, ArchiveOutcome.AlreadyDone);
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

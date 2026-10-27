@@ -158,8 +158,9 @@ internal static class ScheduleRunner
             {
                 ct.ThrowIfCancellationRequested();
                 var exit = await invoke(command, ct);
+                // Only caller cancellation stops the scheduler. A command's exit code
+                // alone must not interrupt unrelated jobs or bypass the cycle interval.
                 ct.ThrowIfCancellationRequested();
-                if (exit == 130) throw new OperationCanceledException("Scheduled command was interrupted.", ct);
                 if (exit != 0) { failed = true; Log($"Command {command[0]} finished with exit code {exit}; see diagnostics above."); }
                 return exit;
             }

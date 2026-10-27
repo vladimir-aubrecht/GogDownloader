@@ -122,6 +122,11 @@ public static class SteamComparisonProbes
         Probe.Check("an API failure aborts comparison instead of reporting every game missing",
             output.Exit == 1 && fixture.ListRequests == 1 && output.Text.Contains("GetOwnedGames unavailable") && !output.Text.Contains("SnapshotGameOnly"));
         output = await RunAsync(snapshot, new() { Error = new OperationCanceledException() });
+        Probe.Check("provider cancellation is a failed comparison, not a user interruption",
+            output.Exit == 1 && output.Text.Contains("Operation timed out or was canceled by the provider") && !output.Text.Contains("Interrupted"));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        output = await RunAsync(snapshot, new(), ct: cancellation.Token);
         Probe.Check("diagnostic cancellation returns 130 without claiming download work", output.Exit == 130 && output.Text.Contains("comparison was not completed"));
         Probe.Check("failed or cancelled comparison leaves the snapshot untouched", before.SequenceEqual(await File.ReadAllBytesAsync(snapshot)));
 
@@ -143,14 +148,14 @@ public static class SteamComparisonProbes
     private static GameInfo Game(uint id, string title, string kind = "game") => new(new("steam", id.ToString()), title, $"app_{id}") { Kind = kind };
     private static bool Rejects<T>(Action action) where T : Exception
     { try { action(); return false; } catch (T) { return true; } }
-    private static async Task<(int Exit, string Text)> RunAsync(string snapshot, Session session, string[]? extra = null)
+    private static async Task<(int Exit, string Text)> RunAsync(string snapshot, Session session, string[]? extra = null, CancellationToken ct = default)
     {
         var output = Console.Out; var error = Console.Error; using var writer = new StringWriter();
         try
         {
             Console.SetOut(writer); Console.SetError(writer);
             var exit = await ArchiveCommandLine.RunAsync(["library", "compare", "--source", "steam", "--snapshot", snapshot, .. extra ?? []],
-                storeFactory: _ => [new SteamStore(session)]);
+                ct, storeFactory: _ => [new SteamStore(session)]);
             return (exit, writer.ToString());
         }
         finally { Console.SetOut(output); Console.SetError(error); }

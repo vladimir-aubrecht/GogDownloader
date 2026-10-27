@@ -150,6 +150,7 @@ download available games; those failures remain visible in logs and the cycle st
 whole-source failure, missing snapshot or failed snapshot write skips that source's downloads.
 Other jobs continue, and the next cycle retries. If a job explicitly requests a DRM refresh
 and that refresh fails, its downloads are skipped until a later successful refresh.
+Network timeouts are command failures; they do not stop the scheduler or bypass its interval.
 
 `--once` returns 0 for a successful cycle, 1 for errors (including an empty download selection),
 and 130 for interruption. Continuous mode logs errors and waits the configured interval.

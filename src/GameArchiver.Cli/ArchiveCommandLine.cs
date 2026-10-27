@@ -24,7 +24,7 @@ public static partial class ArchiveCommandLine
         Func<string, PcGamingWikiDrmSource>? pcGamingWikiFactory = null, IDrmTestRuntime? drmTestRuntime = null)
     {
         try { return await RunCoreAsync(args, storeFactory, drmSourceFactory, pcGamingWikiFactory, drmTestRuntime, ct); }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             Console.Error.WriteLine(args.Length > 0 && args[0] == "schedule"
                 ? "Scheduler stopped. Downloaded files were kept; restart to resume."
@@ -42,6 +42,10 @@ public static partial class ArchiveCommandLine
                 : "Interrupted. Downloaded files were kept; rerun to resume.");
             return 130;
         }
+        // HttpClient timeouts also throw OperationCanceledException, with the caller's
+        // token still active. Report a failed command so scheduled jobs can continue.
+        catch (OperationCanceledException e)
+        { Console.Error.WriteLine($"Operation timed out or was canceled by the provider: {e.Message}"); return 1; }
         catch (Exception e) when (e is IOException or InvalidDataException or ArgumentException or NotSupportedException
             or InvalidOperationException or KeyNotFoundException or JsonException or GogAuthException or SteamAuthenticationException or TimeoutException or HttpRequestException or UnauthorizedAccessException)
         { Console.Error.WriteLine(e.Message); return 1; }

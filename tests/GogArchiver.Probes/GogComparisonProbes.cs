@@ -69,6 +69,11 @@ public static class GogComparisonProbes
         output = await RunAsync(snapshot, native, new() { Status = HttpStatusCode.Unauthorized });
         Probe.Check("GOG authentication failure aborts comparison", output.Exit == 1 && !output.Text.Contains("Differences:"));
         output = await RunAsync(snapshot, native, new() { Error = new OperationCanceledException() });
+        Probe.Check("provider cancellation is a failed GOG comparison, not a user interruption",
+            output.Exit == 1 && output.Text.Contains("Operation timed out or was canceled by the provider") && !output.Text.Contains("Interrupted"));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        output = await RunAsync(snapshot, native, new(), ct: cancellation.Token);
         Probe.Check("GOG comparison cancellation is reported without implying download work", output.Exit == 130 && output.Text.Contains("comparison was not completed"));
         Probe.Check("successful, failed and cancelled comparisons leave both snapshots byte-for-byte unchanged",
             before.SequenceEqual(await File.ReadAllBytesAsync(snapshot)) && await File.ReadAllTextAsync(native) == "Native snapshot must not be read or overwritten");
@@ -120,7 +125,7 @@ public static class GogComparisonProbes
     }
 
     private static GameInfo Game(long id, string title, string kind = "game") => new(new("gog", id.ToString()), title, $"product_{id}") { Kind = kind };
-    private static async Task<(int Exit, string Text)> RunAsync(string snapshot, string native, Ownership fixture, string[]? extra = null)
+    private static async Task<(int Exit, string Text)> RunAsync(string snapshot, string native, Ownership fixture, string[]? extra = null, CancellationToken ct = default)
     {
         using var http = new HttpClient(fixture);
         var output = Console.Out; var error = Console.Error; using var writer = new StringWriter();
@@ -128,7 +133,7 @@ public static class GogComparisonProbes
         {
             Console.SetOut(writer); Console.SetError(writer);
             var exit = await ArchiveCommandLine.RunAsync(["library", "compare", "--source", "gog", "--snapshot", snapshot, .. extra ?? []],
-                storeFactory: _ => [new GogClient(new(http), new(http, http, new(0)), http, new(), new() { SnapshotPath = native })]);
+                ct, storeFactory: _ => [new GogClient(new(http), new(http, http, new(0)), http, new(), new() { SnapshotPath = native })]);
             return (exit, writer.ToString());
         }
         finally { Console.SetOut(output); Console.SetError(error); }

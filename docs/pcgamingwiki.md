@@ -13,6 +13,18 @@ referenced script's missing-data default of `None` is **not** used. Live PCGamin
 from the development environment returned Cloudflare HTTP 403, so live-service compatibility
 has not been confirmed; controlled HTTP fixtures cover redirects, responses and access denial.
 
+On 2026-10-27 the user also received HTTP 403 on the first lookup. A development request to the
+resolver returned a Cloudflare challenge, and a direct MediaWiki request was denied too.
+The [official API requirements](https://www.pcgamingwiki.com/wiki/API#Requirements) now document
+restricted endpoints (notably Cargo queries), MediaWiki bot-password authentication, a custom
+user agent and a 60-request/minute limit. This adapter is anonymous and has no bot-password
+login. A Cloudflare refusal does not establish that a bot password alone would fix access.
+Report 403 as denied automated access, without retrying the library or blaming Steam login.
+
+The CLI supports `--drm-source steam-curator` as an explicit public alternative; see
+[the curator adapter](steam-curator-drm.md). It does not bypass the wiki's access protection
+or silently substitute a different data source. PCGamingWiki remains the default.
+
 The parser accepts an exact numeric Steam ID or Steam `/app/ID/` URL in an availability row.
 Only an explicit `DRM-free` or `None` DRM cell yields `Free`; known DRM identifiers yield
 `Protected`. Missing/unrecognized DRM, conflicting rows, incomplete templates and nonempty

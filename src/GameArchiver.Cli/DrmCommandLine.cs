@@ -11,21 +11,27 @@ public static partial class ArchiveCommandLine
         var allowed = new HashSet<string> { "source", "snapshot" };
         allowed.UnionWith(operation switch
         {
-            "sync" => new[] { "refresh" }, "set" => ["platform", "branch", "drm", "note"], "clear" => ["platform", "branch"], _ => [],
+            "sync" => new[] { "refresh", "drm-source" }, "set" => ["platform", "branch", "drm", "note"], "clear" => ["platform", "branch"], _ => [],
         });
         if (flags.Keys.FirstOrDefault(k => !allowed.Contains(k)) is { } unsupported)
             throw new ArgumentException($"--{unsupported} is not supported by library drm {operation}.");
         if (operation == "sync")
         {
-            if (args.Count != 3 || flags.ContainsKey("drm")) throw new ArgumentException("Usage: library drm sync [--source steam|gog|all] [--refresh]");
-            var provider = factory?.Invoke() ?? new PcGamingWikiDrmSource();
+            if (args.Count != 3 || flags.ContainsKey("drm")) throw new ArgumentException("Usage: library drm sync [--source steam|gog|all] [--drm-source pcgamingwiki|steam-curator] [--refresh]");
+            var drmSource = flags.GetValueOrDefault("drm-source", "pcgamingwiki").ToLowerInvariant();
+            if (drmSource is not "pcgamingwiki" and not "steam-curator") throw new ArgumentException("Use --drm-source pcgamingwiki or steam-curator.");
+            var provider = factory?.Invoke() ?? (drmSource == "steam-curator" ? (IDrmSource)new SteamCuratorDrmSource() : new PcGamingWikiDrmSource());
             try
             {
                 var result = await LibraryDrm.RefreshAsync(library, provider, source, flags.ContainsKey("refresh"),
                     new InlineProgress<string>(Console.Error.WriteLine), ct);
                 await result.Library.SaveAsync(snapshot, ct);
-                Console.WriteLine($"DRM metadata: {result.Updated} updated, {result.Cached} cached. Manual overrides preserved.");
-                if (result.Error is not null) Console.Error.WriteLine($"DRM metadata unavailable: {result.Error}. Unrefreshed entries are unknown; normal library sync/download remains available.");
+                Console.WriteLine($"DRM metadata: {result.Updated} updated, {result.Cached} cached. Source: {provider.Name}. Manual overrides preserved.");
+                if (result.Error is not null)
+                {
+                    Console.Error.WriteLine($"DRM metadata unavailable: {result.Error.TrimEnd('.')}. Unrefreshed entries are unknown; normal library sync/download remains available.");
+                    if (drmSource == "pcgamingwiki") Console.Error.WriteLine("Alternative public community source: library drm sync --source steam --drm-source steam-curator. Missing or conditional curator reports remain unknown.");
+                }
                 return result.Error is null ? 0 : 1;
             }
             finally { if (provider is IDisposable disposable) disposable.Dispose(); }

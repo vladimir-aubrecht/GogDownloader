@@ -236,6 +236,8 @@ Fetch community reports separately from the normal library sync (no Steam login 
 
 ```sh
 dotnet run --project src/GameArchiver.Cli -- library drm sync --source steam
+# Public alternative when PCGamingWiki denies automated API access:
+dotnet run --project src/GameArchiver.Cli -- library drm sync --source steam --drm-source steam-curator
 dotnet run --project src/GameArchiver.Cli -- library list --source steam --drm any --platform windows --details
 dotnet run --project src/GameArchiver.Cli -- download --all --source steam --drm free --max-size 100MB --dry-run
 ```
@@ -250,6 +252,16 @@ independent. Filters use saved metadata without network access. The download sum
 free, protected and unknown counts before applying the size filter; `--details` shows excluded
 products and their evidence. Unknown does not mean DRM was detected. Downloading or testing a
 game does not automatically classify it; record a successful manual test with the command below.
+
+`--drm-source steam-curator` reads the public [DRM-Free Complete List](https://store.steampowered.com/curator/45614612/)
+instead, without a PCGamingWiki account or Steam login. It fetches the complete paginated list
+once per refresh and matches exact AppIDs. Only an unqualified DRM-free report for an entry
+with Windows support becomes `Free`; absent, conditional and native Linux/macOS reports stay
+`Unknown`. Absence never means `Protected`. This secondary source does not reproduce all
+PCGamingWiki notes and may be incomplete or outdated. Its source, link and description are saved.
+Selecting a different community source replaces automatic reports for the selected products;
+manual overrides still win. Both sources use the seven-day snapshot cache. See
+[curator data and validation](docs/steam-curator-drm.md).
 
 Manual corrections take precedence and survive subsequent store and DRM syncs. They apply to
 the selected store, AppID, OS and branch (public by default); `--note` records the evidence:

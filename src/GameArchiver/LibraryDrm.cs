@@ -37,7 +37,7 @@ public static class LibraryDrm
                         p => info.GetValueOrDefault(p) ?? new() { Source = source.Name, CheckedAt = DateTimeOffset.UtcNow }) };
                     updated++; continue;
                 }
-                catch (Exception e) when (e is HttpRequestException or IOException or System.Text.Json.JsonException or TimeoutException)
+                catch (Exception e) when (e is HttpRequestException or IOException or InvalidDataException or System.Text.Json.JsonException or TimeoutException)
                 { error = $"{source.Name}: {e.Message}"; }
             // One outage warning, no per-game retries. Unrefreshed evidence must not become a
             // successful/free classification; manual corrections remain independently stored.

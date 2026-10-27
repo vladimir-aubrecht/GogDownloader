@@ -15,7 +15,7 @@ public static partial class ArchiveCommandLine
         "deep", "fix", "refresh", "keys", "help", "version", "ignore-case", "details", "inventory", "include-non-games"];
     private static readonly HashSet<string> Values = ["source", "layout", "provider-dir", "snapshot", "gog-snapshot", "out", "staging", "platform", "language",
         "arch", "branch", "directory", "connections", "compression-threads", "limit-rate", "gog-tokens", "steam-tokens", "username", "code",
-        "file", "entry", "name", "path", "max-size", "drm", "note"];
+        "file", "entry", "name", "path", "max-size", "drm", "drm-source", "note"];
 
     /// <summary>Run the same CLI with supplied stores for embedding or offline integration tests.</summary>
     public static async Task<int> RunAsync(string[] args, CancellationToken ct = default,
@@ -76,6 +76,8 @@ public static partial class ArchiveCommandLine
         var snapshotPath = flags.GetValueOrDefault("snapshot", ArchiveLibrary.DefaultPath);
         var command = positionals[0];
         var subcommand = positionals.ElementAtOrDefault(1);
+        if (flags.ContainsKey("drm-source") && !(command == "library" && subcommand == "drm" && positionals.ElementAtOrDefault(2) == "sync"))
+            throw new ArgumentException("--drm-source requires library drm sync.");
         if (flags.ContainsKey("include-non-games") && (command != "download" || !flags.ContainsKey("all")))
             throw new ArgumentException("--include-non-games requires download --all; an explicit product ID can always select an application.");
         var drmFilter = flags.GetValueOrDefault("drm")?.ToLowerInvariant();
@@ -402,7 +404,7 @@ public static partial class ArchiveCommandLine
                         + $"{drmCounts[(int)DrmStatus.Free]} free, {drmCounts[(int)DrmStatus.Protected]} protected, {drmCounts[(int)DrmStatus.Unknown]} unknown.");
                     if (unknownSteamDrm && drmFilter != "any")
                     {
-                        Console.Error.WriteLine("Unknown means unclassified, not confirmed DRM. Community DRM reports require library drm sync --source steam; regular library sync does not fetch them.");
+                        Console.Error.WriteLine("Unknown means unclassified, not confirmed DRM. Community DRM reports require library drm sync --source steam (or add --drm-source steam-curator); regular library sync does not fetch them.");
                         if (options.Branch != "public") Console.Error.WriteLine("Community reports currently cover the public branch. Other branches need a manual classification for that branch.");
                         Console.Error.WriteLine("Reports may remain unknown. Use --details for exclusion reasons or library drm set steam:APPID --platform "
                             + options.Platform.ToString().ToLowerInvariant()
@@ -686,7 +688,7 @@ public static partial class ArchiveCommandLine
           --force --clean --no-reuse --no-verify --no-launcher --dry-run
         Metadata: archive migrate [search] [--source gog|steam|all] --out DIR [--layout provider] [--dry-run]
           Legacy .gogdl.json/.gamebackup.json become visible gamearchiver.json; ZIPs are unchanged.
-        DRM: library drm sync [--source steam|gog|all] [--refresh]
+        DRM: library drm sync [--source steam|gog|all] [--drm-source pcgamingwiki|steam-curator] [--refresh]
           library drm set [SOURCE:ID] [--platform windows|linux|mac] --drm free|protected|unknown --note TEXT
           library drm clear [SOURCE:ID] [--platform windows|linux|mac]
           Without SOURCE:ID, use current-folder metadata; infer platform only when unique and use its saved branch.

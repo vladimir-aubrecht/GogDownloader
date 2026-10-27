@@ -20,6 +20,7 @@ await SteamComparisonProbes.RunAsync();
 await GogComparisonProbes.RunAsync();
 await DownloadSizeProbes.RunAsync();
 await DrmProbes.RunAsync();
+        await SteamCuratorDrmProbes.RunAsync();
 await ProviderLayoutProbes.RunAsync();
 await ArchiveFileProbes.RunAsync();
 await ReviewProbes.RunAsync();

@@ -60,7 +60,12 @@ public sealed class PcGamingWikiDrmSource : IDrmSource, IDisposable
         try
         {
             var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-            try { response.EnsureSuccessStatusCode(); return response; }
+            try
+            {
+                if (response.StatusCode == HttpStatusCode.Forbidden)
+                    throw new HttpRequestException("PCGamingWiki denied automated access (HTTP 403). Its access protection or API permissions blocked this request; this is not a Steam login failure", null, response.StatusCode);
+                response.EnsureSuccessStatusCode(); return response;
+            }
             catch { response.Dispose(); throw; }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new TimeoutException("PCGamingWiki request timed out."); }

@@ -307,6 +307,9 @@ await archive.DownloadAsync(key, new ArchiveOptions { OutputRoot = "/backups", D
 
 `IDrmSource` is injectable, independent of store authentication and suitable for controlled
 HTTP fixtures or another community provider. Enrichment does not mutate its input library.
+`SteamCuratorDrmSource` is a public alternative to `PcGamingWikiDrmSource`; it loads the complete
+DRM-Free Complete List curator once and returns conservative Windows/public Free or Unknown
+reports. See [source attribution and limitations](steam-curator-drm.md).
 Successful reports cache for seven days, with `force: true` for an explicit refresh. An outage
 stops further lookups; stale reports pending refresh become unknown. User overrides survive.
 `ArchiveOptions.Drm` records the selected report in newly created native and GOG legacy
